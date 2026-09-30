@@ -42,7 +42,75 @@ object YouTubeRepository {
     fun signedIn(): Boolean = cookies("https://www.youtube.com").contains("SAPISID=") || cookies("https://www.youtube.com").contains("__Secure-3PAPISID=")
 
     fun home(): List<FeedItem> = feed("home", "https://www.youtube.com/")
+    fun shorts(): List<FeedItem> {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val itemEndpoint = "$origin/youtubei/v1/reel/reel_item_watch?key=${bootstrap.key}"
+        val sequenceEndpoint = "$origin/youtubei/v1/reel/reel_watch_sequence?key=${bootstrap.key}"
+        val seed = post(itemEndpoint, JSONObject()
+            .put("context", context("WEB", bootstrap.version))
+            .put("disablePlayerResponse", true)
+            .put("inputType", "REEL_WATCH_INPUT_TYPE_SEEDLESS")
+            .put("params", "CA8%3D"), origin)
+        val result = mutableListOf<FeedItem>()
+        reelFeedItem(seed)?.let(result::add)
+        val continuation = seed.optString("sequenceContinuation").ifBlank {
+            findString(seed.optJSONObject("continuationEndpoint"), "token").orEmpty()
+        }
+        if (continuation.isNotBlank()) {
+            val sequence = post(sequenceEndpoint, JSONObject()
+                .put("context", context("WEB", bootstrap.version))
+                .put("sequenceParams", continuation), origin)
+            val entries = sequence.optJSONArray("entries")
+            if (entries != null) for (index in 0 until minOf(entries.length(), 24)) {
+                val watch = entries.optJSONObject(index)?.optJSONObject("command")?.optJSONObject("reelWatchEndpoint") ?: continue
+                val videoId = watch.optString("videoId")
+                val params = watch.optString("params")
+                if (videoId.length != 11 || params.isBlank()) continue
+                runCatching {
+                    post(itemEndpoint, JSONObject()
+                        .put("context", context("WEB", bootstrap.version))
+                        .put("disablePlayerResponse", true)
+                        .put("params", params)
+                        .put("playerRequest", JSONObject().put("videoId", videoId)), origin)
+                }.getOrNull()?.let { details -> reelFeedItem(details, watch)?.let(result::add) }
+            }
+        }
+        return result.distinctBy { it.id }.also { AppLog.event("shorts reel items=${it.size}") }
+    }
+
+    private fun reelFeedItem(response: JSONObject, fallbackWatch: JSONObject? = null): FeedItem? {
+        val watch = response.optJSONObject("replacementEndpoint")?.optJSONObject("reelWatchEndpoint") ?: fallbackWatch ?: return null
+        val videoId = watch.optString("videoId").takeIf { it.length == 11 } ?: return null
+        val header = response.optJSONObject("overlay")?.optJSONObject("reelPlayerOverlayRenderer")
+            ?.optJSONObject("reelPlayerHeaderSupportedRenderers")?.optJSONObject("reelPlayerHeaderRenderer")
+        val title = header?.let { text(it.opt("reelTitleText")) }
+            ?: header?.let { text(it.optJSONObject("reelTitleOnClickCommand")?.opt("title")) }
+            ?: deepText(response.opt("engagementPanels"), "title") ?: "Short"
+        val channel = header?.let { text(it.opt("channelTitleText")) }
+            ?: deepText(response.opt("engagementPanels"), "channelName") ?: "YouTube"
+        val thumbnail = findThumbnail(watch.opt("thumbnail")) ?: "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
+        val channelThumbnail = header?.let { findThumbnail(it.opt("channelThumbnail")) }.orEmpty()
+        return FeedItem(videoId, title, channel, thumbnail, 9, 16, channelThumbnail, "https://www.youtube.com/shorts/$videoId")
+    }
     fun history(): List<FeedItem> = feed("history", "https://www.youtube.com/feed/history")
+    fun ownChannelUrl(): String {
+        val origin = "https://www.youtube.com"
+        val youHtml = get("$origin/feed/you")
+        listOf(Regex("\\\"CHANNEL_ID\\\"\\s*:\\s*\\\"(UC[^\\\"]+)\\\""), Regex("/channel/(UC[A-Za-z0-9_-]+)"))
+            .firstNotNullOfOrNull { it.find(youHtml)?.groupValues?.getOrNull(1) }
+            ?.let { return "$origin/channel/$it" }
+        val bootstrap = bootstrap(origin, "WEB")
+        val accountMenu = runCatching {
+            post("$origin/youtubei/v1/account/account_menu?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
+        }.getOrNull()
+        accountMenu?.let(::findFirstChannelId)?.let { return "$origin/channel/$it" }
+        accountMenu?.let { findString(it, "channelHandle") }?.trim()?.takeIf { it.startsWith("@") }
+            ?.let { return "$origin/$it" }
+        val guide = post("$origin/youtubei/v1/guide?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
+        val channelId = findOwnChannelId(guide) ?: findFirstChannelId(guide) ?: error("YouTube did not expose the signed-in channel")
+        return "$origin/channel/$channelId"
+    }
     fun yourVideos(): List<FeedItem> {
         val youHtml = runCatching { get("https://www.youtube.com/feed/you") }.getOrDefault("")
         runCatching {
@@ -498,11 +566,23 @@ object YouTubeRepository {
             is JSONObject -> {
                 val labels = listOfNotNull(text(value.opt("title")), text(value.opt("text")), text(value.opt("label")))
                 if (labels.any { it.equals("Your channel", true) || it.equals("View your channel", true) }) {
-                    findString(value, "browseId")?.takeIf { it.startsWith("UC") }?.let { return it }
+                    findFirstChannelId(value)?.let { return it }
                 }
                 value.keys().forEach { key -> findOwnChannelId(value.opt(key))?.let { return it } }
             }
             is JSONArray -> for (index in 0 until value.length()) findOwnChannelId(value.opt(index))?.let { return it }
+        }
+        return null
+    }
+
+    private fun findFirstChannelId(value: Any?): String? {
+        when (value) {
+            is JSONObject -> {
+                value.optString("channelId").takeIf { it.startsWith("UC") }?.let { return it }
+                value.optString("browseId").takeIf { it.startsWith("UC") }?.let { return it }
+                value.keys().forEach { key -> findFirstChannelId(value.opt(key))?.let { return it } }
+            }
+            is JSONArray -> for (index in 0 until value.length()) findFirstChannelId(value.opt(index))?.let { return it }
         }
         return null
     }

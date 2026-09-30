@@ -4,15 +4,22 @@ import android.app.PictureInPictureParams
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.RemoteAction
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.util.Rational
 import android.text.Html
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebView
@@ -41,6 +48,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -61,6 +70,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.google.android.exoplayer2.ExoPlayer
+import com.google.android.exoplayer2.DefaultRenderersFactory
+import com.google.android.exoplayer2.mediacodec.MediaCodecSelector
 import com.google.android.exoplayer2.DefaultLoadControl
 import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackException
@@ -89,7 +100,7 @@ import org.schabi.newpipe.extractor.stream.StreamInfo
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK, OLED }
 enum class CodecChoice(val label: String, val tokens: List<String>) {
-    H264("H.264", listOf("avc1", "h264")), HEVC("HEVC", listOf("hev1", "hvc1", "hevc")),
+    H264("AVC", listOf("avc1", "h264")), HEVC("HEVC", listOf("hev1", "hvc1", "hevc")),
     AV1("AV1", listOf("av01", "av1")), VP9("VP9", listOf("vp9", "vp09"))
 }
 enum class AudioCodecChoice(val label: String, val tokens: List<String>) {
@@ -97,6 +108,11 @@ enum class AudioCodecChoice(val label: String, val tokens: List<String>) {
 }
 enum class QualityChoice(val label: String, val height: Int) {
     AUTO("Auto", 0), UHD2160("2160p", 2160), QHD1440("1440p", 1440), FHD1080("1080p", 1080), HD720("720p", 720), SD480("480p", 480), SD360("360p", 360)
+}
+enum class DecoderMode(val label: String) { AUTO("Auto"), HARDWARE("Force HW"), SOFTWARE("Force SW") }
+
+private object PlaybackPreferences {
+    @Volatile var decoderMode = DecoderMode.AUTO
 }
 
 private data class PlayerChoice(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val videoOnly: Boolean, val audioTrackName: String = "", val audioTrackId: String = "", val originalAudio: Boolean = false)
@@ -115,13 +131,26 @@ private fun videoDataSourceFactory(): DataSource.Factory = ChunkedDataSource.Fac
         .setDefaultRequestProperties(YouTubeRepository.mediaHeaders())
 )
 
-private fun bufferedPlayer(context: android.content.Context): ExoPlayer = ExoPlayer.Builder(context)
+private fun bufferedPlayer(context: android.content.Context): ExoPlayer {
+    val mode = PlaybackPreferences.decoderMode
+    val renderers = DefaultRenderersFactory(context)
+        .setEnableDecoderFallback(mode == DecoderMode.AUTO)
+        .setMediaCodecSelector(MediaCodecSelector { mimeType, secure, tunneling ->
+            val decoders = MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, secure, tunneling)
+            when (mode) {
+                DecoderMode.AUTO -> decoders.sortedBy { it.softwareOnly }
+                DecoderMode.HARDWARE -> decoders.filter { it.hardwareAccelerated && !it.softwareOnly }
+                DecoderMode.SOFTWARE -> decoders.filter { it.softwareOnly || !it.hardwareAccelerated }
+            }
+        })
+    return ExoPlayer.Builder(context, renderers)
     .setLoadControl(DefaultLoadControl.Builder()
         .setBufferDurationsMs(60_000, 180_000, 750, 1_500)
         .setTargetBufferBytes(192 * 1024 * 1024)
         .setPrioritizeTimeOverSizeThresholds(true)
         .build())
     .build()
+}
 
 private fun selectVideoStream(streams: List<PlayerChoice>, codec: CodecChoice, quality: QualityChoice): PlayerChoice? {
     val valid = streams.filter { it.url.startsWith("http") }
@@ -145,12 +174,27 @@ enum class AppColor(val title: String, val seed: Long) {
 }
 
 class MainActivity : ComponentActivity() {
+    companion object { private const val ACTION_PIP_TOGGLE = "com.x1colegal.materialyt.PIP_TOGGLE" }
     private var player: ExoPlayer? = null
+    private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
+    private var fullscreenEnabled = false
+    var pipMode by mutableStateOf(false)
+        private set
+    private val pipReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_PIP_TOGGLE) {
+                player?.let { if (it.isPlaying) it.pause() else it.play() }
+                updatePipAction()
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CookieManager.getInstance().setAcceptCookie(true)
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(pipReceiver, IntentFilter(ACTION_PIP_TOGGLE), RECEIVER_NOT_EXPORTED)
+        else @Suppress("DEPRECATION") registerReceiver(pipReceiver, IntentFilter(ACTION_PIP_TOGGLE))
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 71)
         setContent { MaterialYtRoot(this) { player = it } }
     }
@@ -169,12 +213,56 @@ class MainActivity : ComponentActivity() {
     fun stopMusicNotification() { getSystemService(NotificationManager::class.java).cancel(72) }
 
     fun fullscreen(enabled: Boolean) {
+        fullscreenEnabled = enabled
         requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        window.decorView.systemUiVisibility = if (enabled) View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY else View.SYSTEM_UI_FLAG_VISIBLE
+        applyFullscreenState()
+    }
+
+    private fun applyFullscreenState() {
+        if (Build.VERSION.SDK_INT >= 30) window.insetsController?.let { controller ->
+            if (fullscreenEnabled) {
+                controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+            } else controller.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+        }
+        window.decorView.systemUiVisibility = if (fullscreenEnabled) {
+            View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        } else View.SYSTEM_UI_FLAG_VISIBLE
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && fullscreenEnabled && !pipMode) applyFullscreenState()
     }
 
     fun pip() {
-        if (Build.VERSION.SDK_INT >= 26) enterPictureInPictureMode(PictureInPictureParams.Builder().build())
+        visiblePlayerView?.hideController()
+        if (Build.VERSION.SDK_INT >= 26) enterPictureInPictureMode(pipParams())
+    }
+
+    private fun pipParams(): PictureInPictureParams {
+        val playing = player?.isPlaying == true
+        val intent = PendingIntent.getBroadcast(this, 73, Intent(ACTION_PIP_TOGGLE).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
+        val action = RemoteAction(
+            android.graphics.drawable.Icon.createWithResource(this, if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play),
+            if (playing) "Pause" else "Play", if (playing) "Pause video" else "Play video", intent
+        )
+        return PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).setActions(listOf(action)).build()
+    }
+
+    fun updatePipAction() {
+        if (Build.VERSION.SDK_INT >= 26 && isInPictureInPictureMode) setPictureInPictureParams(pipParams())
+    }
+
+
+    fun visiblePlayerView(view: PlayerView?) { visiblePlayerView = view }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipMode = isInPictureInPictureMode
+        if (isInPictureInPictureMode) visiblePlayerView?.hideController()
     }
 
     fun videoPlayerActive(value: Boolean) { videoPlayerActive = value }
@@ -188,7 +276,7 @@ class MainActivity : ComponentActivity() {
         window.decorView.systemUiVisibility = if (enabled) View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY else View.SYSTEM_UI_FLAG_VISIBLE
     }
 
-    override fun onDestroy() { player?.release(); super.onDestroy() }
+    override fun onDestroy() { runCatching { unregisterReceiver(pipReceiver) }; player?.release(); super.onDestroy() }
 }
 
 private fun colorScheme(seed: ComposeColor, dark: Boolean, oled: Boolean): ColorScheme {
@@ -231,6 +319,8 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
     var codec by remember { mutableStateOf(runCatching { CodecChoice.valueOf(prefs.getString("codec", "H264")!!) }.getOrDefault(CodecChoice.H264)) }
     var audioCodec by remember { mutableStateOf(runCatching { AudioCodecChoice.valueOf(prefs.getString("audio_codec", "MP4A")!!) }.getOrDefault(AudioCodecChoice.MP4A)) }
     var quality by remember { mutableStateOf(runCatching { QualityChoice.valueOf(prefs.getString("quality", "AUTO")!!) }.getOrDefault(QualityChoice.AUTO)) }
+    var decoderMode by remember { mutableStateOf(runCatching { DecoderMode.valueOf(prefs.getString("decoder_mode", "AUTO")!!) }.getOrDefault(DecoderMode.AUTO)) }
+    PlaybackPreferences.decoderMode = decoderMode
     val systemDark = (activity.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
     val dark = theme == ThemeMode.DARK || theme == ThemeMode.OLED || (theme == ThemeMode.SYSTEM && systemDark)
     val base = ComposeColor(color.seed)
@@ -240,18 +330,20 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
         activity.window.navigationBarColor = if (theme == ThemeMode.OLED) Color.BLACK else scheme.surface.value.toInt()
     }
     MaterialTheme(colorScheme = scheme) {
-        AppScaffold(activity, theme, color, codec, audioCodec, quality, onTheme = { theme = it; prefs.edit().putString("theme", it.name).apply() },
+        AppScaffold(activity, theme, color, codec, audioCodec, quality, decoderMode, onTheme = { theme = it; prefs.edit().putString("theme", it.name).apply() },
             onColor = { color = it; prefs.edit().putString("color", it.name).apply() },
             onCodec = { codec = it; prefs.edit().putString("codec", it.name).apply() },
             onAudioCodec = { audioCodec = it; prefs.edit().putString("audio_codec", it.name).apply() },
-            onQuality = { quality = it; prefs.edit().putString("quality", it.name).apply() }, onPlayer)
+            onQuality = { quality = it; prefs.edit().putString("quality", it.name).apply() },
+            onDecoderMode = { decoderMode = it; PlaybackPreferences.decoderMode = it; prefs.edit().putString("decoder_mode", it.name).apply() }, onPlayer)
     }
 }
 
 @Composable
 private fun AppScaffold(
-    activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice,
+    activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, decoderMode: DecoderMode,
     onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit,
+    onDecoderMode: (DecoderMode) -> Unit,
     onPlayer: (ExoPlayer) -> Unit
 ) {
     var tab by remember { mutableIntStateOf(0) }
@@ -259,25 +351,26 @@ private fun AppScaffold(
     var playerMode by remember { mutableStateOf(false) }
     val tabs = buildList {
         add("Home" to Icons.Default.OndemandVideo)
+        add("Shorts" to Icons.Default.SmartDisplay)
         add("YT Music" to Icons.Default.Album)
         if (authenticated) add("History" to Icons.Default.History)
         add("Account" to Icons.Default.AccountCircle)
     }
     val content: @Composable (PaddingValues) -> Unit = { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
-            when (tab) {
-                0 -> HomeScreen(activity, codec, quality, onPlayer, { playerMode = it }) { tab = tabs.lastIndex }
-                1 -> MusicScreen(activity, audioCodec, onPlayer) { playerMode = it }
-                2 -> if (authenticated) NativeFeedScreen(activity, "History", Icons.Default.History, codec, quality, onPlayer, { playerMode = it }, loader = { YouTubeRepository.history() })
-                     else AccountScreen(activity, theme, color, codec, audioCodec, quality, onTheme, onColor, onCodec, onAudioCodec, onQuality, onPlayer) { authenticated = it; if (it) tab = 3 }
-                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, onTheme, onColor, onCodec, onAudioCodec, onQuality, onPlayer) { authenticated = it; if (it) tab = 3 }
+            when (tabs.getOrNull(tab)?.first) {
+                "Home" -> HomeScreen(activity, codec, quality, onPlayer, { playerMode = it }) { tab = tabs.indexOfFirst { it.first == "Account" } }
+                "Shorts" -> ShortsScreen(activity, codec, quality, onPlayer) { playerMode = it }
+                "YT Music" -> MusicScreen(activity, audioCodec, onPlayer) { playerMode = it }
+                "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, quality, onPlayer, { playerMode = it }, loader = { YouTubeRepository.history() })
+                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, decoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onDecoderMode, onPlayer) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
             }
         }
     }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     if (tablet) {
         Row(Modifier.fillMaxSize()) {
-            Scaffold(Modifier.weight(1f), bottomBar = { if (!playerMode) MiniPlayer { tab = 1 } }, content = content)
+            Scaffold(Modifier.weight(1f), bottomBar = { if (!playerMode) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } } }, content = content)
             if (!playerMode) NavigationRail {
                 Spacer(Modifier.weight(1f))
                 tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
@@ -286,7 +379,7 @@ private fun AppScaffold(
         }
     } else {
         Scaffold(bottomBar = {
-            if (!playerMode) Column { MiniPlayer { tab = 1 }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) } } }
+            if (!playerMode) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) } } }
         }, content = content)
     }
 }
@@ -387,7 +480,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    if (selected != null) { VideoScreen(activity, selected!!, codec, quality, onPlayer, { selected = null }); return }
+    if (selected != null) { VideoScreen(activity, selected!!, codec, quality, onPlayer, onBack = { selected = null }); return }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, quality, onPlayer) { selectedPlaylist = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
     Column(Modifier.fillMaxSize()) {
@@ -649,9 +742,13 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
     var playlist by remember { mutableStateOf<org.schabi.newpipe.extractor.playlist.PlaylistInfo?>(null) }
     var playlistItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
-    var selected by remember { mutableStateOf<String?>(null) }
+    var selectedIndex by remember { mutableStateOf<Int?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    if (selected != null) { VideoScreen(activity, selected!!, codec, quality, onPlayer) { selected = null }; return }
+    if (selectedIndex != null) {
+        val index = selectedIndex!!.coerceIn(0, playlistItems.lastIndex)
+        VideoScreen(activity, playlistItems[index].url, codec, quality, onPlayer, playlistItems, index, { selectedIndex = it }) { selectedIndex = null }
+        return
+    }
     LaunchedEffect(url) {
         val id = (Regex("[?&]list=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')).removePrefix("VL")
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistVideos(id) } }
@@ -669,9 +766,9 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
                 (playlist?.thumbnails?.lastOrNull()?.url ?: playlistItems.firstOrNull()?.thumbnail)?.let { AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(24.dp)), contentScale = ContentScale.Crop) }
                 Text(playlist?.name ?: "YouTube playlist", style = MaterialTheme.typography.headlineMedium); playlist?.uploaderName?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodyMedium)
-                if (playlistItems.isNotEmpty()) Button(onClick = { selected = playlistItems.first().url }, Modifier.fillMaxWidth()) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play") }
+                if (playlistItems.isNotEmpty()) Button(onClick = { selectedIndex = 0 }, Modifier.fillMaxWidth()) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play") }
             } }
-            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { selected = item.url }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall) } } }
+            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall) } } }
         }
     }
 }
@@ -705,7 +802,149 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
 }
 
 @Composable
-private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onBack: () -> Unit) {
+private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit) {
+    var shorts by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        onPlayerMode(false)
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.shorts() } }
+            .onSuccess { shorts = it; if (it.isEmpty()) error = "YouTube did not return Shorts" }
+            .onFailure { error = it.message }
+    }
+    if (shorts.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (error == null) CircularProgressIndicator() else Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(24.dp))
+        }
+        return
+    }
+    val pager = rememberPagerState(pageCount = { shorts.size })
+    VerticalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+        ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, quality, onPlayer)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit) {
+    val context = LocalContext.current
+    val player = remember(item.id) { bufferedPlayer(context).also(onPlayer) }
+    var streams by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
+    var selected by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
+    var audio by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
+    var audioTracks by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
+    var shortInfo by remember(item.id) { mutableStateOf<StreamInfo?>(null) }
+    var speed by remember { mutableFloatStateOf(1f) }
+    var expandedTitle by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showComments by remember { mutableStateOf(false) }
+    var comments by remember(item.id) { mutableStateOf<List<CommentsInfoItem>>(emptyList()) }
+    var commentsLoading by remember { mutableStateOf(false) }
+    var error by remember(item.id) { mutableStateOf<String?>(null) }
+
+    fun play(stream: PlayerChoice) {
+        val video = ProgressiveMediaSource.Factory(videoDataSourceFactory()).createMediaSource(MediaItem.fromUri(stream.url))
+        val source = if (stream.videoOnly && audio != null) MergingMediaSource(true, video,
+            ProgressiveMediaSource.Factory(videoDataSourceFactory()).createMediaSource(MediaItem.fromUri(audio!!.url))) else video
+        player.setMediaSource(source); player.prepare(); player.setPlaybackSpeed(speed); player.playWhenReady = active
+        selected = stream
+    }
+    LaunchedEffect(item.id, codec, quality) {
+        val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(item.id) } }
+        extracted.onSuccess { result ->
+            audioTracks = result.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
+            audio = audioTracks.filter { it.originalAudio }.ifEmpty { audioTracks }.maxByOrNull { it.bitrate }
+            streams = result.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }
+                .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+            selectVideoStream(streams, codec, quality)?.let(::play)
+        }.onFailure { error = it.message }
+        runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo("https://www.youtube.com/watch?v=${item.id}") } }
+            .onSuccess { shortInfo = it }
+    }
+    LaunchedEffect(active) { if (active) player.play() else player.pause() }
+    LaunchedEffect(active, item.id) {
+        if (!active) return@LaunchedEffect
+        var last = 0L
+        while (true) {
+            delay(if (last == 0L) 1_500 else 10_000)
+            val current = player.currentPosition.coerceAtLeast(0L)
+            if (player.isPlaying && current > last) {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.reportPlayback(item.id, last, current) } }
+                last = current
+            }
+        }
+    }
+    DisposableEffect(player) { onDispose { player.release() } }
+
+    Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+        AndroidView(factory = { PlayerView(it).apply {
+            this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); hideController()
+        } }, update = { it.useController = false; it.hideController() }, modifier = Modifier.fillMaxSize())
+        Box(Modifier.fillMaxSize().clickable { if (player.isPlaying) player.pause() else player.play() })
+        error?.let { Text(it, color = ComposeColor.White, modifier = Modifier.align(Alignment.Center).background(ComposeColor.Black.copy(alpha = .7f)).padding(16.dp)) }
+        Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val shortAvatar = shortInfo?.uploaderAvatars?.lastOrNull()?.url ?: item.channelThumbnail
+                    if (shortAvatar.isNotBlank()) AsyncImage(shortAvatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                    Spacer(Modifier.width(10.dp)); Text(shortInfo?.uploaderName?.takeIf { it.isNotBlank() } ?: item.subtitle.ifBlank { "YouTube" }, color = ComposeColor.White, style = MaterialTheme.typography.titleSmall, maxLines = 1)
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, modifier = Modifier.clickable { expandedTitle = true })
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                IconButton(onClick = {
+                    showComments = true; commentsLoading = true
+                }) { Icon(Icons.Default.Comment, "Comments", tint = ComposeColor.White) }
+                IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
+            }
+        }
+        if (expandedTitle) Box(Modifier.fillMaxSize().background(ComposeColor.Black.copy(alpha = .9f)).clickable { expandedTitle = false }.padding(24.dp)) {
+            Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()))
+        }
+    }
+    if (showComments) {
+        LaunchedEffect(item.id) {
+            runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(item.url)?.relatedItems ?: emptyList() } }
+                .onSuccess { comments = it }.onFailure { error = it.message }
+            commentsLoading = false
+        }
+        ModalBottomSheet(onDismissRequest = { showComments = false }) {
+            Text("Comments", Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.titleLarge)
+            if (commentsLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) { items(comments) { comment ->
+                Column(Modifier.padding(20.dp, 12.dp)) {
+                    Text(comment.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge)
+                    Text((if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(comment.commentText.content, Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") Html.fromHtml(comment.commentText.content)).toString())
+                }
+            } }
+        }
+    }
+    if (showSettings) AlertDialog(onDismissRequest = { showSettings = false }, confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } }, title = { Text("Playback settings") }, text = {
+        Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState())) {
+            Text("Speed", style = MaterialTheme.typography.titleMedium)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { items(listOf(.5f, .75f, 1f, 1.25f, 1.5f, 2f)) { value ->
+                FilterChip(speed == value, { speed = value; player.setPlaybackSpeed(value) }, { Text("${value}×") })
+            } }
+            Spacer(Modifier.height(16.dp)); Text("Quality", style = MaterialTheme.typography.titleMedium)
+            streams.forEach { stream ->
+                val bitrate = if (stream.bitrate > 0) " • ${"%.1f".format(stream.bitrate / 1_000_000.0)} Mbps" else ""
+                ListItem(headlineContent = { Text("${stream.height}p • ${stream.fps} FPS • ${stream.codec.uppercase()}$bitrate") },
+                    leadingContent = { RadioButton(selected == stream, null) }, modifier = Modifier.clickable { play(stream) })
+            }
+            Spacer(Modifier.height(16.dp)); Text("Audio track", style = MaterialTheme.typography.titleMedium)
+            audioTracks.distinctBy { it.url }.forEach { track ->
+                val name = track.audioTrackName.ifBlank { if (track.originalAudio) "Original audio" else "Audio" }
+                ListItem(headlineContent = { Text(name) }, supportingContent = { Text("${track.codec.uppercase()} • ${track.bitrate / 1000} kbps") },
+                    leadingContent = { RadioButton(audio?.url == track.url, null) }, modifier = Modifier.clickable { audio = track; selected?.let(::play) })
+            }
+        }
+    })
+}
+
+@Composable
+private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var info by remember { mutableStateOf<StreamInfo?>(null) }
@@ -728,7 +967,18 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var speed by remember { mutableFloatStateOf(1f) }
     if (channelUrl != null) { ChannelScreen(activity, channelUrl!!, codec, quality, onPlayer) { channelUrl = null }; return }
     val player = remember { bufferedPlayer(context).also(onPlayer) }
+    var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(true) }
+    fun bindPlaylistControls(view: PlayerView) {
+        val previous = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_prev)
+        val next = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_next)
+        previous?.isEnabled = playlistIndex > 0
+        previous?.alpha = if (playlistIndex > 0) 1f else .35f
+        previous?.setOnClickListener { if (playlistIndex > 0) onPlaylistIndex(playlistIndex - 1) }
+        next?.isEnabled = playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex
+        next?.alpha = if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) 1f else .35f
+        next?.setOnClickListener { if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1) }
+    }
     fun play(stream: PlayerChoice) {
         val videoSource = ProgressiveMediaSource.Factory(videoDataSourceFactory()).createMediaSource(MediaItem.fromUri(stream.url))
         val audio = if (stream.videoOnly) selectedAudio ?: audioStreams.maxByOrNull { it.bitrate } else null
@@ -745,11 +995,12 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     DisposableEffect(Unit) {
         activity.videoPlayerActive(true)
         val listener = object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) { playbackState = state }
+            override fun onPlaybackStateChanged(state: Int) { playbackState = state; if (state == Player.STATE_ENDED && playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1) }
+            override fun onIsPlayingChanged(isPlaying: Boolean) { activity.updatePipAction() }
             override fun onPlayerError(cause: PlaybackException) { Log.e("MaterialYT", "video player ${cause.errorCodeName}", cause); error = "${cause.errorCodeName}: ${cause.cause?.message ?: cause.localizedMessage}" }
         }
         player.addListener(listener)
-        onDispose { activity.fullscreen(false); activity.videoPlayerActive(false); player.removeListener(listener); player.release() }
+        onDispose { activity.fullscreen(false); activity.videoPlayerActive(false); activity.visiblePlayerView(null); player.removeListener(listener); player.release() }
     }
     BackHandler(fullscreen) { fullscreen = false; activity.fullscreen(false) }
     LaunchedEffect(player) {
@@ -757,11 +1008,13 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             playerPosition = player.currentPosition.coerceAtLeast(0L)
             playerBuffered = player.bufferedPosition.coerceAtLeast(playerPosition)
             playerDuration = player.duration.coerceAtLeast(0L)
+            currentPlayerView?.let(::bindPlaylistControls)
             delay(250)
         }
     }
     LaunchedEffect(url, codec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
+        player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; error = null
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
             audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
             val originalAudio = audioStreams.filter { it.audioTrackName.contains("original", true) }.ifEmpty { audioStreams.filter { it.originalAudio } }.ifEmpty { audioStreams }
@@ -803,10 +1056,17 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             } else if (current < lastReported) lastReported = current
         }
     }
-    if (fullscreen) {
+    if (activity.pipMode) {
+        AndroidView(
+            factory = { PlayerView(it).apply { this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER); currentPlayerView = this; activity.visiblePlayerView(this) } },
+            modifier = Modifier.fillMaxSize(),
+            update = { currentPlayerView = it; it.useController = false; it.hideController(); activity.visiblePlayerView(it) }
+        )
+    } else if (fullscreen) {
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
             AndroidView(
-                factory = { PlayerView(it).apply { this.player = player; useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE }); post { hideController(); controllerVisible = false } } },
+                factory = { PlayerView(it).apply { this.player = player; useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE }); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this); hideController(); controllerVisible = false } } },
+                update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
                 modifier = Modifier.fillMaxSize().padding(bottom = 8.dp)
             )
             AnimatedVisibility(controllerVisible, modifier = Modifier.align(Alignment.TopCenter)) { Row(
@@ -824,7 +1084,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     } else LazyColumn(Modifier.fillMaxSize()) {
         item {
             Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS) } }, Modifier.fillMaxSize())
+                AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
             }
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
@@ -901,17 +1161,33 @@ private fun LoginScreen(onBack: () -> Unit, onSignedIn: () -> Unit) {
 }
 
 @Composable
-private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onPlayer: (ExoPlayer) -> Unit, onAuth: (Boolean) -> Unit) {
+private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onBack: () -> Unit) {
+    var channelUrl by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.ownChannelUrl() } }
+            .onSuccess { channelUrl = it }
+            .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+    }
+    channelUrl?.let { ChannelScreen(activity, it, codec, quality, onPlayer, onBack); return }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Your Account", style = MaterialTheme.typography.headlineMedium) }
+        if (error == null) LinearProgressIndicator(Modifier.fillMaxWidth()) else Text(error.orEmpty(), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
+    }
+}
+
+@Composable
+private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, decoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onAuth: (Boolean) -> Unit) {
     var destination by remember { mutableStateOf("account") }
     var signedIn by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     if (destination == "login") { LoginScreen({ destination = "account" }) { signedIn = true; onAuth(true); destination = "account" }; return }
-    if (destination == "videos") { NativeFeedScreen(activity, "Your videos", Icons.Default.VideoLibrary, codec, quality, onPlayer, {}, { destination = "account" }) { YouTubeRepository.yourVideos() }; return }
+    if (destination == "your_account") { OwnAccountScreen(activity, codec, quality, onPlayer) { destination = "account" }; return }
     if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, quality, onPlayer, {}, { destination = "account" }) { YouTubeRepository.library() }; return }
     if (destination == "account") {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item { Text("Account", style = MaterialTheme.typography.headlineMedium) }
             item { ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp)) { Column(Modifier.padding(22.dp)) { Icon(Icons.Default.AccountCircle, null, Modifier.size(54.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(12.dp)); Text(if (signedIn) "Google account connected" else "Make MaterialYT yours", style = MaterialTheme.typography.titleLarge); Text(if (signedIn) "Your session powers native Home, History, YT Music, playback and comments." else "Sign in once. Only the Google login screen uses the web; your content stays in MaterialYT's native UI."); Spacer(Modifier.height(16.dp)); Button(onClick = { destination = "login" }) { Text(if (signedIn) "Refresh sign-in" else "Sign in with Google") } } } }
-            if (signedIn) item { ListItem(headlineContent = { Text("Your videos") }, leadingContent = { Icon(Icons.Default.VideoLibrary, null) }, trailingContent = { Icon(Icons.Default.ChevronRight, null) }, modifier = Modifier.clickable { destination = "videos" }) }
+            if (signedIn) item { ListItem(headlineContent = { Text("Your Account") }, supportingContent = { Text("Open your channel") }, leadingContent = { Icon(Icons.Default.AccountCircle, null) }, trailingContent = { Icon(Icons.Default.ChevronRight, null) }, modifier = Modifier.clickable { destination = "your_account" }) }
             if (signedIn) item { ListItem(headlineContent = { Text("Playlists") }, leadingContent = { Icon(Icons.Default.PlaylistPlay, null) }, trailingContent = { Icon(Icons.Default.ChevronRight, null) }, modifier = Modifier.clickable { destination = "playlists" }) }
             item { ListItem(headlineContent = { Text("Settings") }, supportingContent = { Text("Appearance, codec and backend protocol") }, leadingContent = { Icon(Icons.Default.Settings, null) }, trailingContent = { Icon(Icons.Default.ChevronRight, null) }, modifier = Modifier.clickable { destination = "settings" }) }
         }
@@ -924,6 +1200,7 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
         item { ChoiceSection("Preferred video codec", CodecChoice.entries, codec, { it.label }, onCodec) }
         item { ChoiceSection("Preferred audio codec", AudioCodecChoice.entries, audioCodec, { it.label }, onAudioCodec) }
         item { ChoiceSection("Default video quality", QualityChoice.entries, quality, { it.label }, onQuality) }
+        item { ChoiceSection("Video decoder", DecoderMode.entries, decoderMode, { it.label }, onDecoderMode) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }
         item { Text("HTTP/1.0 compatibility disables connection reuse but uses an HTTP/1.1 request line because OkHttp intentionally cannot emit HTTP/1.0. The HTTP/2 mode advertises HTTP/2 with HTTP/1.1 fallback.", style = MaterialTheme.typography.bodySmall) }
     }

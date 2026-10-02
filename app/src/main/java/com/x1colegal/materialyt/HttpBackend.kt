@@ -61,16 +61,23 @@ object HttpBackend : Downloader() {
         if (isYouTube) {
             val origin = if (url.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
             val accountCookies = YouTubeRepository.cookies(origin)
-            if (accountCookies.isNotBlank()) {
+            
+            // Only inject cookies globally for googlevideo.com (ExoPlayer). 
+            // YouTubeRepository handles its own cookies, and injecting into youtubei ruins NewPipe's anonymous requests.
+            if (url.contains("googlevideo.com") && accountCookies.isNotBlank()) {
                 val existingCookie = builder.build().header("Cookie")
                 val mergedCookie = if (existingCookie.isNullOrBlank()) accountCookies else "$existingCookie; $accountCookies"
                 builder.header("Cookie", mergedCookie)
             }
-            YouTubeRepository.authorization(origin)?.let { builder.header("Authorization", it) }
-            builder.header("Origin", origin)
-            builder.header("X-Origin", origin)
-            builder.header("X-Goog-AuthUser", "0")
-            builder.header("X-Youtube-Bootstrap-Logged-In", YouTubeRepository.signedIn().toString())
+            
+            if (url.contains("googlevideo.com")) {
+                YouTubeRepository.authorization(origin)?.let { builder.header("Authorization", it) }
+                builder.header("Origin", origin)
+                builder.header("X-Origin", origin)
+                builder.header("X-Goog-AuthUser", "0")
+                builder.header("X-Youtube-Bootstrap-Logged-In", YouTubeRepository.signedIn().toString())
+            }
+
             if (builder.build().header("User-Agent").isNullOrBlank()) {
                 builder.header("User-Agent", YouTubeRepository.UA)
             }

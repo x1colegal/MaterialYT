@@ -41,7 +41,39 @@ object YouTubeRepository {
 
     fun signedIn(): Boolean = cookies("https://www.youtube.com").contains("SAPISID=") || cookies("https://www.youtube.com").contains("__Secure-3PAPISID=")
 
-    fun home(): List<FeedItem> = feed("home", "https://www.youtube.com/")
+    @Volatile
+    private var homeToken: String? = null
+
+    fun home(): List<FeedItem> {
+        AppLog.event("feed=home started")
+        return try {
+            val bootstrap = bootstrap("https://www.youtube.com", "WEB")
+            val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "FEwhat_to_watch"), bootstrap.origin)
+            homeToken = findContinuationToken(data)
+            val uniqueItems = parseItems(data).distinctBy { it.id }
+            AppLog.event("feed=home success items=${uniqueItems.size} hasToken=${homeToken != null}")
+            uniqueItems
+        } catch (error: Throwable) {
+            AppLog.failure("feed=home", error)
+            throw error
+        }
+    }
+
+    fun homeContinuation(): List<FeedItem> {
+        val token = homeToken ?: return emptyList()
+        return try {
+            val bootstrap = bootstrap("https://www.youtube.com", "WEB")
+            val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), bootstrap.origin)
+            val nextToken = findContinuationToken(data)
+            homeToken = if (nextToken != token) nextToken else null
+            parseItems(data).distinctBy { it.id }
+        } catch (error: Throwable) {
+            AppLog.failure("feed=homeContinuation", error)
+            emptyList()
+        }
+    }
     fun shorts(): List<FeedItem> {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")

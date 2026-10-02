@@ -106,3 +106,15 @@ All notable changes to MaterialYT are documented in this file.
 - System, Light, Dark, and OLED Pure Black themes.
 - Twelve selectable Material color palettes with responsive single-line controls.
 - Android 5.0+ support.
+## [1.3.1] - 2026-10-02
+
+### Added
+- Close ('X') button on YT Music miniplayer to dismiss playback without dragging.
+- Audio settings dialog in YT Music matching the audio configuration style of Video & Shorts.
+- Setting in Account -> Settings: 'Continue Playing while not in PiP or app in foreground' (default: off). When disabled, playback pauses when switching out of the app.
+- Infinite scroll pagination for the Home feed using YouTube continuation tokens.
+
+### Fixed
+- Restored original solid video player UI and native layout hierarchy.
+- Fixed search bar auto-focusing on tablets and ensure software keyboard and focus are dismissed when executing or clearing searches.
+- Shorts resume playing properly when returning to the app without broken in-app PiP overlay.

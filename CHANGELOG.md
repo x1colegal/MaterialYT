@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.0] - 2026-10-02
+
+### Fixed
+- Bypass broken NewPipe VISIONOS extraction in VideoScreen by prioritizing YouTubeRepository player streams.
+- Optimized n-challenge and signature deciphering by lazy-caching player JavaScript.
+
 ## [1.3.9] - 2026-10-02
 
 ### Fixed

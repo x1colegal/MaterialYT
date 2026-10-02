@@ -1594,32 +1594,33 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
     LaunchedEffect(url, codec, audioCodec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
-        player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; error = null
-        runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo(url) } }.onSuccess { stream ->
-            info = stream
-            val newPipeAudio = stream.audioStreams.filter { it.content.startsWith("http") }.map {
-                val name = it.audioTrackName?.takeIf(String::isNotBlank) ?: it.audioLocale?.displayName?.takeIf(String::isNotBlank).orEmpty()
-                val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
-                PlayerChoice(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, false, name, it.audioTrackId.orEmpty(), original)
-            }
-            audioStreams = newPipeAudio
-            selectedAudio = selectAudioStream(audioStreams, audioCodec)
-            val fallbackVideo = (stream.videoOnlyStreams + stream.videoStreams).filter { it.content.startsWith("http") }
-            availableStreams = fallbackVideo.map { PlayerChoice(it.content, it.codec, it.height, it.fps, it.bitrate, it.isVideoOnly) }
-                .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-            selectVideoStream(availableStreams, codec, quality)?.let { chosen -> play(chosen) }
-        }.onFailure {
-            error = it.message
-        }
-        if (availableStreams.isEmpty()) {
-            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
+        var loaded = false
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
+            if (extracted.isNotEmpty()) {
                 audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
                 selectedAudio = selectAudioStream(audioStreams, audioCodec)
                 availableStreams = extracted.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen); loaded = true }
+            }
+        }.onFailure { e ->
+            AppLog.failure("player repository streams video=$videoId", e)
+        }
+        if (!loaded || availableStreams.isEmpty()) {
+            runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo(url) } }.onSuccess { stream ->
+                info = stream
+                val newPipeAudio = stream.audioStreams.filter { it.content.startsWith("http") }.map {
+                    val name = it.audioTrackName?.takeIf(String::isNotBlank) ?: it.audioLocale?.displayName?.takeIf(String::isNotBlank).orEmpty()
+                    val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
+                    PlayerChoice(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, false, name, it.audioTrackId.orEmpty(), original)
+                }
+                audioStreams = newPipeAudio
+                selectedAudio = selectAudioStream(audioStreams, audioCodec)
+                val fallbackVideo = (stream.videoOnlyStreams + stream.videoStreams).filter { it.content.startsWith("http") }
+                availableStreams = fallbackVideo.map { PlayerChoice(it.content, it.codec, it.height, it.fps, it.bitrate, it.isVideoOnly) }
+                    .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
-            }.onFailure { e ->
-                AppLog.failure("player repository streams video=$videoId", e)
-                if (availableStreams.isEmpty()) error = e.message
+            }.onFailure {
+                if (availableStreams.isEmpty()) error = it.message
             }
         }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }

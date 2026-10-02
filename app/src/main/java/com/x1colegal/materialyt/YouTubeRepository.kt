@@ -315,14 +315,14 @@ object YouTubeRepository {
         val data = response.optJSONObject("streamingData") ?: error("YouTube returned no playable streams")
         val formats = mutableListOf<JSONObject>()
         listOf("formats", "adaptiveFormats").forEach { key -> data.optJSONArray(key)?.let { array -> for (i in 0 until array.length()) array.optJSONObject(i)?.let(formats::add) } }
+        val playerJsLazy by lazy { runCatching { playerJavaScript(videoId) }.getOrNull() }
         val streams = formats.mapNotNull { item ->
             val rawUrl = item.optString("url").takeIf { it.startsWith("http") } ?: run {
                 val cipher = item.optString("signatureCipher").split('&').mapNotNull { part -> part.split('=', limit = 2).takeIf { it.size == 2 }?.let { java.net.URLDecoder.decode(it[0], "UTF-8") to java.net.URLDecoder.decode(it[1], "UTF-8") } }.toMap()
                 val baseUrl = cipher["url"] ?: return@run null
                 val signature = cipher["s"]?.takeIf { it.isNotBlank() }?.let { sig ->
                     runCatching {
-                        val playerJs = playerJavaScript(videoId)
-                        EjsChallengeSolver.solveSignature(playerJs, sig)
+                        playerJsLazy?.let { js -> EjsChallengeSolver.solveSignature(js, sig) }
                     }.getOrElse {
                         runCatching {
                             YoutubeJavaScriptPlayerManager.deobfuscateSignature(videoId, sig)
@@ -336,7 +336,7 @@ object YouTubeRepository {
             } ?: return@mapNotNull null
             val urlWithCpn = if (cpn.isBlank() || "cpn=" in rawUrl) rawUrl else "$rawUrl&cpn=$cpn"
             val streamUrl = runCatching {
-                solveNChallenge(videoId, urlWithCpn)
+                solveNChallenge(videoId, urlWithCpn, playerJsLazy)
             }.getOrElse {
                 AppLog.failure("player n parameter video=$videoId", it)
                 rawUrl
@@ -364,12 +364,12 @@ object YouTubeRepository {
             ?: get(playerUrl).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
     }
 
-    private fun solveNChallenge(videoId: String, streamingUrl: String): String {
+    private fun solveNChallenge(videoId: String, streamingUrl: String, playerJs: String? = null): String {
         val parsed = streamingUrl.toHttpUrlOrNull() ?: return streamingUrl
         val challenge = parsed.queryParameter("n") ?: return streamingUrl
         val solved = synchronized(nChallengeCache) { nChallengeCache[challenge] } ?: run {
-            val playerJavaScript = playerJavaScript(videoId)
-            EjsChallengeSolver.solveN(playerJavaScript, challenge).also { result ->
+            val js = playerJs ?: playerJavaScript(videoId)
+            EjsChallengeSolver.solveN(js, challenge).also { result ->
                 synchronized(nChallengeCache) { nChallengeCache[challenge] = result }
             }
         }

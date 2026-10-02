@@ -319,8 +319,15 @@ object YouTubeRepository {
             val rawUrl = item.optString("url").takeIf { it.startsWith("http") } ?: run {
                 val cipher = item.optString("signatureCipher").split('&').mapNotNull { part -> part.split('=', limit = 2).takeIf { it.size == 2 }?.let { java.net.URLDecoder.decode(it[0], "UTF-8") to java.net.URLDecoder.decode(it[1], "UTF-8") } }.toMap()
                 val baseUrl = cipher["url"] ?: return@run null
-                val signature = cipher["s"]?.takeIf { it.isNotBlank() }?.let {
-                    YoutubeJavaScriptPlayerManager.deobfuscateSignature(videoId, it)
+                val signature = cipher["s"]?.takeIf { it.isNotBlank() }?.let { sig ->
+                    runCatching {
+                        val playerJs = playerJavaScript(videoId)
+                        EjsChallengeSolver.solveSignature(playerJs, sig)
+                    }.getOrElse {
+                        runCatching {
+                            YoutubeJavaScriptPlayerManager.deobfuscateSignature(videoId, sig)
+                        }.getOrNull()
+                    }
                 }
                 if (signature == null) baseUrl else {
                     val separator = if ('?' in baseUrl) '&' else '?'
@@ -347,17 +354,21 @@ object YouTubeRepository {
         return streams
     }
 
+    private fun playerJavaScript(videoId: String): String {
+        val watchHtml = get("https://www.youtube.com/watch?v=$videoId")
+        val encodedPlayerUrl = Regex("\\\"(?:jsUrl|PLAYER_JS_URL)\\\":\\\"([^\\\"]+)").find(watchHtml)?.groupValues?.get(1)
+            ?: error("YouTube did not expose its player JavaScript URL")
+        val playerPath = JSONObject("{\"value\":\"$encodedPlayerUrl\"}").getString("value")
+        val playerUrl = if (playerPath.startsWith("http")) playerPath else "https://www.youtube.com$playerPath"
+        return synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] }
+            ?: get(playerUrl).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
+    }
+
     private fun solveNChallenge(videoId: String, streamingUrl: String): String {
         val parsed = streamingUrl.toHttpUrlOrNull() ?: return streamingUrl
         val challenge = parsed.queryParameter("n") ?: return streamingUrl
         val solved = synchronized(nChallengeCache) { nChallengeCache[challenge] } ?: run {
-            val watchHtml = get("https://www.youtube.com/watch?v=$videoId")
-            val encodedPlayerUrl = Regex("\\\"(?:jsUrl|PLAYER_JS_URL)\\\":\\\"([^\\\"]+)").find(watchHtml)?.groupValues?.get(1)
-                ?: error("YouTube did not expose its player JavaScript URL")
-            val playerPath = JSONObject("{\"value\":\"$encodedPlayerUrl\"}").getString("value")
-            val playerUrl = if (playerPath.startsWith("http")) playerPath else "https://www.youtube.com$playerPath"
-            val playerJavaScript = synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] }
-                ?: get(playerUrl).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
+            val playerJavaScript = playerJavaScript(videoId)
             EjsChallengeSolver.solveN(playerJavaScript, challenge).also { result ->
                 synchronized(nChallengeCache) { nChallengeCache[challenge] = result }
             }

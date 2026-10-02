@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.3.8] - 2026-10-02
+
+### Fixed
+- Fixed signature deobfuscation failure (`Could not parse deobfuscation function`) by routing cipher solving through EJS player solver.
+
 ## [1.3.7] - 2026-10-02
 
 ### Fixed

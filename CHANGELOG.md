@@ -2,6 +2,14 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.2.2] - 2026-10-02
+
+### Fixed
+
+- Fixed bot attestation (`LOGIN_REQUIRED: Sign in to confirm you're not a bot`) block on video streams by passing authentication headers to internal mobile players.
+- Re-added fallback to `IOS` and `ANDROID` clients when the primary player fails.
+- Fixed NewPipe error masking when internal clients fail.
+
 ## [1.2.1] - 2026-10-02
 
 ### Fixed

@@ -194,10 +194,6 @@ object YouTubeRepository {
             response = iosPlayer(videoId)
             clientUsed = "IOS"
         }
-        if (response.optJSONObject("playabilityStatus")?.optString("status") != "OK") {
-            response = androidPlayer(videoId)
-            clientUsed = "ANDROID"
-        }
         val finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
         if (finalStatus != "OK") error(response.optJSONObject("playabilityStatus")?.optString("reason").takeUnless { it.isNullOrBlank() } ?: finalStatus)
@@ -338,10 +334,6 @@ object YouTubeRepository {
         return mobilePlayer(videoId, "IOS", "21.03.2", "5", "iPhone16,2", "iOS", "18.7.2.22H124")
     }
 
-    private fun androidPlayer(videoId: String): JSONObject {
-        return mobilePlayer(videoId, "ANDROID", "19.29.37", "3", "Pixel 8 Pro", "Android", "14")
-    }
-
     private fun mobilePlayer(videoId: String, name: String, version: String, id: String, model: String, os: String, osVersion: String): JSONObject {
         val ua = "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
         val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
@@ -447,9 +439,7 @@ object YouTubeRepository {
     }
 
     fun mediaHeaders(): Map<String, String> = buildMap {
-        put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-        put("Origin", "https://www.youtube.com")
-        put("Referer", "https://www.youtube.com/")
+        put("User-Agent", "com.google.ios.youtube/1.02 (iPhone; U; CPU iOS 25_6_0 like Mac OS X)")
     }
 
     fun postComment(videoId: String, text: String) {

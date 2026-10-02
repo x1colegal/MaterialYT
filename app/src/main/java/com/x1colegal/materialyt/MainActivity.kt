@@ -1094,7 +1094,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             selectedAudio = selectAudioStream(audioStreams, audioCodec)
             availableStreams = extracted.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
             selectVideoStream(availableStreams, codec, quality)?.let { play(it) }
-        }.onFailure { error = it.message }
+        }.onFailure { e ->
+            AppLog.failure("player repository streams video=$videoId", e)
+        }
         runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo(url) } }.onSuccess { stream ->
             info = stream
             val newPipeAudio = stream.audioStreams.filter { it.content.startsWith("http") }.map {
@@ -1112,6 +1114,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
             }
+        }.onFailure {
+            if (availableStreams.isEmpty()) error = it.message
         }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelInfo(videoId) } }.onSuccess { channelInfo = it }

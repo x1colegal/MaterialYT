@@ -332,7 +332,15 @@ object YouTubeRepository {
             val watchtime = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl").orEmpty()
             if (playback.isNotBlank() && watchtime.isNotBlank()) synchronized(playbackTracking) { playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, trackingAsMusic) }
         }
-        val data = response.optJSONObject("streamingData") ?: error("YouTube returned no playable streams")
+        val data = response.optJSONObject("streamingData")
+        if (data == null) {
+            val npStreams = runCatching { newPipeStreams(videoId) }.getOrNull()
+            if (!npStreams.isNullOrEmpty()) {
+                AppLog.event("player fallback to newPipeStreams (missing streamingData) video=$videoId streams=${npStreams.size}")
+                return npStreams
+            }
+            error("YouTube returned no playable streams")
+        }
         val formats = mutableListOf<JSONObject>()
         listOf("formats", "adaptiveFormats").forEach { key -> data.optJSONArray(key)?.let { array -> for (i in 0 until array.length()) array.optJSONObject(i)?.let(formats::add) } }
         val playerJsLazy by lazy { runCatching { playerJavaScript(videoId) }.getOrNull() }
@@ -370,7 +378,14 @@ object YouTubeRepository {
             PlayableStream(streamUrl, codec, item.optInt("height"), item.optInt("fps"), item.optInt("bitrate"), audio, !audio && !item.has("audioQuality"), originalAudio, trackName, audioTrack?.optString("id").orEmpty())
         }
         AppLog.event("player streams=${streams.size} formats=${formats.size} video=$videoId")
-        if (streams.isEmpty()) error("YouTube returned only protected stream URLs")
+        if (streams.isEmpty()) {
+            val npStreams = runCatching { newPipeStreams(videoId) }.getOrNull()
+            if (!npStreams.isNullOrEmpty()) {
+                AppLog.event("player fallback to newPipeStreams (empty streams) video=$videoId streams=${npStreams.size}")
+                return npStreams
+            }
+            error("YouTube returned only protected stream URLs")
+        }
         return streams
     }
 

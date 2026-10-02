@@ -210,6 +210,7 @@ enum class AppColor(val title: String, val seed: Long) {
 class MainActivity : ComponentActivity() {
     companion object { private const val ACTION_PIP_TOGGLE = "com.x1colegal.materialyt.PIP_TOGGLE" }
     private var player: ExoPlayer? = null
+    fun registerCurrentPlayer(p: ExoPlayer) { player = p }
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
     var isFullscreen by mutableStateOf(false)
@@ -412,6 +413,10 @@ private fun colorScheme(seed: ComposeColor, dark: Boolean, oled: Boolean): Color
 
 @Composable
 private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit) {
+    val registerPlayer: (ExoPlayer) -> Unit = { p ->
+        activity.registerCurrentPlayer(p)
+        onPlayer(p)
+    }
     val prefs = remember { activity.getSharedPreferences("settings", 0) }
     var theme by remember { mutableStateOf(runCatching { ThemeMode.valueOf(prefs.getString("theme", "SYSTEM")!!) }.getOrDefault(ThemeMode.SYSTEM)) }
     var color by remember { mutableStateOf(runCatching { AppColor.valueOf(prefs.getString("color", "PURPLE")!!) }.getOrDefault(AppColor.PURPLE)) }
@@ -434,7 +439,7 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
             onCodec = { codec = it; prefs.edit().putString("codec", it.name).apply() },
             onAudioCodec = { audioCodec = it; prefs.edit().putString("audio_codec", it.name).apply() },
             onQuality = { quality = it; prefs.edit().putString("quality", it.name).apply() },
-            onDecoderMode = { decoderMode = it; PlaybackPreferences.decoderMode = it; prefs.edit().putString("decoder_mode", it.name).apply() }, onPlayer)
+            onDecoderMode = { decoderMode = it; PlaybackPreferences.decoderMode = it; prefs.edit().putString("decoder_mode", it.name).apply() }, registerPlayer)
     }
 }
 
@@ -1462,6 +1467,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var speed by remember { mutableFloatStateOf(1f) }
     if (channelUrl != null) { ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }; return }
     val player = remember { bufferedPlayer(context).also(onPlayer) }
+    var isMinimized by remember { mutableStateOf(false) }
+    var miniplayerDismissed by remember { mutableStateOf(false) }
     var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(true) }
     fun bindPlaylistControls(view: PlayerView) {
@@ -1551,7 +1558,17 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             player.release()
         }
     }
-    BackHandler(fullscreen) { fullscreen = false; activity.fullscreen(false) }
+    BackHandler {
+        if (fullscreen) {
+            fullscreen = false
+            activity.fullscreen(false)
+        } else if (!isMinimized) {
+            isMinimized = true
+        } else {
+            miniplayerDismissed = true
+            onBack()
+        }
+    }
     LaunchedEffect(player) {
         while (true) {
             playerPosition = player.currentPosition.coerceAtLeast(0L)
@@ -1607,6 +1624,120 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
     }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, player) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                if (!activity.getSharedPreferences("settings", 0).getBoolean("background_play", false)) {
+                    player.pause()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    if (miniplayerDismissed) {
+        LaunchedEffect(Unit) { onBack() }
+        return
+    }
+
+    if (isMinimized) {
+        val miniOffset = if (tablet) 0.dp else 80.dp
+        Box(Modifier.fillMaxSize()) {
+            var downwardDrag by remember { mutableFloatStateOf(0f) }
+            val animatedOffset by animateFloatAsState(
+                targetValue = downwardDrag.coerceAtLeast(0f),
+                animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                label = "video_mini_drag"
+            )
+            val miniAlpha = (1f - (animatedOffset / 100f)).coerceIn(0f, 1f)
+
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = miniOffset)
+                    .fillMaxWidth()
+                    .height(72.dp)
+                    .offset { IntOffset(0, animatedOffset.roundToInt()) }
+                    .graphicsLayer { alpha = miniAlpha }
+                    .pointerInput(Unit) {
+                        detectVerticalDragGestures(
+                            onDragStart = { downwardDrag = 0f },
+                            onVerticalDrag = { change, amount ->
+                                change.consume()
+                                downwardDrag += amount
+                            },
+                            onDragEnd = {
+                                if (downwardDrag > 48f) {
+                                    miniplayerDismissed = true
+                                    onBack()
+                                }
+                                downwardDrag = 0f
+                            },
+                            onDragCancel = { downwardDrag = 0f }
+                        )
+                    }
+                    .clickable { isMinimized = false },
+                tonalElevation = 8.dp,
+                shadowElevation = 8.dp
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(108.dp)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(ComposeColor.Black)
+                    ) {
+                        AndroidView(
+                            factory = {
+                                PlayerView(it).apply {
+                                    this.player = player
+                                    useController = false
+                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+                                    currentPlayerView = this
+                                    activity.visiblePlayerView(this)
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                            update = {
+                                currentPlayerView = it
+                                it.useController = false
+                                it.hideController()
+                                activity.visiblePlayerView(it)
+                            }
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(info?.name ?: "Video", maxLines = 1, style = MaterialTheme.typography.titleSmall)
+                        Text(info?.uploaderName ?: "", maxLines = 1, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    var playing by remember { mutableStateOf(player.isPlaying) }
+                    DisposableEffect(player) {
+                        val playListener = object : Player.Listener {
+                            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+                        }
+                        player.addListener(playListener)
+                        onDispose { player.removeListener(playListener) }
+                    }
+                    IconButton(onClick = { if (playing) player.pause() else player.play() }) {
+                        Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause")
+                    }
+                    IconButton(onClick = { miniplayerDismissed = true; onBack() }) {
+                        Icon(Icons.Default.Close, "Close")
+                    }
+                }
+            }
+        }
+        return
+    }
+
     if (activity.pipMode) {
         AndroidView(
             factory = { PlayerView(it).apply { this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER); currentPlayerView = this; activity.visiblePlayerView(this) } },
@@ -1639,7 +1770,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
                 }
                 Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
+                    IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
                     Spacer(Modifier.weight(1f))
                     IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
                     IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
@@ -1686,7 +1817,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
             }
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
+                IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
                 IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }

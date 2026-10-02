@@ -791,14 +791,23 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
         onDispose { player.removeListener(listener); activity.stopMusicNotification(); mediaSession.isActive = false; mediaSession.release(); activity.immersive(false); player.release() }
     }
     LaunchedEffect(track.id) {
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }.onSuccess { streams ->
-            val audio = streams.filter { it.audio }.maxByOrNull { it.bitrate }
-            if (audio != null) {
-                val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders()))
-                    .createMediaSource(MediaItem.fromUri(audio.url))
-                player.setMediaSource(source); player.prepare(); player.playWhenReady = true; mediaLoaded = true
-            } else error = "No playable audio stream was found"
-        }.onFailure { error = it.message }
+        var audioStreams = runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.stream.StreamInfo.getInfo("https://www.youtube.com/watch?v=${track.id}") } }
+            .getOrNull()?.audioStreams?.map {
+                val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
+                val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
+                PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
+            }.orEmpty()
+        if (audioStreams.isEmpty()) {
+            val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
+            audioStreams = extracted.getOrNull()?.filter { it.audio }.orEmpty()
+            extracted.exceptionOrNull()?.let { if (audioStreams.isEmpty()) error = it.message }
+        }
+        val audio = audioStreams.maxByOrNull { it.bitrate }
+        if (audio != null) {
+            val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders()))
+                .createMediaSource(MediaItem.fromUri(audio.url))
+            player.setMediaSource(source); player.prepare(); player.playWhenReady = true; mediaLoaded = true
+        } else if (error == null) error = "No playable audio stream was found"
     }
     LaunchedEffect(Unit) { while (true) { position = player.currentPosition.coerceAtLeast(0L); bufferedPosition = player.bufferedPosition.coerceAtLeast(position); mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
         .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO or PlaybackStateCompat.ACTION_STOP)

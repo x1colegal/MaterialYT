@@ -162,8 +162,16 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             }.getOrNull()
             publishMetadata()
             startForeground(NOTIFICATION_ID, notification())
-            val audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
-                .getOrNull()?.filter { it.audio }.orEmpty()
+            var audioStreams = runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.stream.StreamInfo.getInfo("https://www.youtube.com/watch?v=${track.id}") } }
+                .getOrNull()?.audioStreams?.map {
+                    val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
+                    val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
+                    PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
+                }.orEmpty()
+            if (audioStreams.isEmpty()) {
+                audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
+                    .getOrNull()?.filter { it.audio }.orEmpty()
+            }
             val original = audioStreams.filter { it.audioTrackName.contains("original", true) }.ifEmpty { audioStreams.filter { it.originalAudio } }.ifEmpty { audioStreams }
             val stream = original.filter { stream -> preferredCodec.tokens.any { stream.codec.contains(it, true) } }.maxByOrNull { it.bitrate }
                 ?: original.maxByOrNull { it.bitrate } ?: return@launch

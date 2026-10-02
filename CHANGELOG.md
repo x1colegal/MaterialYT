@@ -2,7 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
-## [1.2.4] - 2026-10-02
+## [1.2.5] - 2026-10-02
+
+### Fixed
+
+- Fixed YT Music failing to play by also applying the NewPipe stream extraction fallback to the music service and legacy music player.
 
 ### Changed
 

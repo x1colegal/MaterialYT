@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.3.5] - 2026-10-02
+
+### Fixed
+- Fixed video miniplayer being pushed up into the middle of the screen by removing duplicate bottom padding.
+
 ## [1.3.4] - 2026-10-02
 
 ### Fixed

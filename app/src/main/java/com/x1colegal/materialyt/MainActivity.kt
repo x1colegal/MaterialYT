@@ -1657,7 +1657,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
 
     if (isMinimized) {
-        val miniBottomPadding = if (tablet) 0.dp else 80.dp
         var downwardDrag by remember { mutableFloatStateOf(0f) }
         val animatedOffset by animateFloatAsState(
             targetValue = downwardDrag.coerceAtLeast(0f),
@@ -1669,7 +1668,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
             Surface(
                 modifier = Modifier
-                    .padding(bottom = miniBottomPadding)
                     .fillMaxWidth()
                     .height(66.dp)
                     .offset { IntOffset(0, animatedOffset.roundToInt()) }

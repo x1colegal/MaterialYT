@@ -64,7 +64,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -612,19 +614,21 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selected by remember { mutableStateOf<String?>(null) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
+    var selectedChannel by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     if (selected != null) { VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = { selected = null }); return }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
+    if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } else Icon(icon, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(8.dp)); Text(title, Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); IconButton(onClick = { refreshKey++ }) { Icon(Icons.Default.Refresh, "Refresh") } }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
-        LazyColumn { items(feed) { item -> FeedRow(item) { if (item.playlist) selectedPlaylist = item.url else selected = item.url } } }
+        LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
     }
 }
 
@@ -856,8 +860,105 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
     }
 }
 
+private fun formatCount(count: Long): String = when {
+    count < 0L -> ""
+    count < 1_000L -> count.toString()
+    count < 1_000_000L -> {
+        val k = count / 1_000.0
+        if (count % 1_000L == 0L || k >= 100.0) {
+            "${count / 1_000L}K"
+        } else {
+            val formatted = String.format(java.util.Locale.US, "%.1f", k)
+            if (formatted.endsWith(".0")) "${count / 1_000L}K" else "${formatted}K"
+        }
+    }
+    count < 1_000_000_000L -> {
+        val m = count / 1_000_000.0
+        if (count % 1_000_000L == 0L || m >= 100.0) {
+            "${count / 1_000_000L}M"
+        } else {
+            val formatted = String.format(java.util.Locale.US, "%.1f", m)
+            if (formatted.endsWith(".0")) "${count / 1_000_000L}M" else "${formatted}M"
+        }
+    }
+    else -> {
+        val b = count / 1_000_000_000.0
+        val formatted = String.format(java.util.Locale.US, "%.1f", b)
+        if (formatted.endsWith(".0")) "${count / 1_000_000_000L}B" else "${formatted}B"
+    }
+}
+
+@Composable
+private fun ChannelRow(item: FeedItem, click: () -> Unit) {
+    val avatar = item.channelThumbnail.ifBlank { item.thumbnail }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = click)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (avatar.isNotBlank()) {
+            AsyncImage(
+                model = avatar,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Surface(
+                modifier = Modifier.size(72.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer
+            ) {
+                Icon(
+                    Icons.Default.Person,
+                    contentDescription = null,
+                    modifier = Modifier.padding(16.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+        Spacer(Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (item.subtitle.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = item.subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        FilledTonalButton(
+            onClick = click,
+            shape = CircleShape,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+        ) {
+            Text("Channel", style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
 @Composable
 private fun FeedRow(item: FeedItem, click: () -> Unit) {
+    if (item.channel) {
+        ChannelRow(item, click)
+        return
+    }
     Column(Modifier.fillMaxWidth().padding(bottom = 18.dp).clickable(onClick = click)) {
         AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(item.thumbnailWidth.toFloat() / item.thumbnailHeight.coerceAtLeast(1)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
         Row(Modifier.padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.Top) {
@@ -901,11 +1002,33 @@ private fun TopicChips(labels: List<String>) {
 
 @Composable
 private fun ResultRow(item: InfoItem, showSubtitle: Boolean = true, click: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = click).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        AsyncImage(item.thumbnails.firstOrNull()?.url, null, Modifier.size(132.dp, 76.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
-        Column(Modifier.padding(start = 12.dp)) {
-            Text(item.name, style = MaterialTheme.typography.titleSmall)
-            if (showSubtitle) Text(item.infoType.name.lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodySmall)
+    val isChannel = item.infoType == InfoItem.InfoType.CHANNEL
+    Row(Modifier.fillMaxWidth().clickable(onClick = click).padding(horizontal = 16.dp, vertical = if (isChannel) 14.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        val thumb = item.thumbnails.firstOrNull()?.url
+        if (isChannel) {
+            if (!thumb.isNullOrBlank()) {
+                AsyncImage(thumb, null, Modifier.size(72.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape), contentScale = ContentScale.Crop)
+            } else {
+                Surface(Modifier.size(72.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
+                    Icon(Icons.Default.Person, null, Modifier.padding(16.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                }
+            }
+        } else {
+            AsyncImage(thumb, null, Modifier.size(132.dp, 76.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
+        }
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(item.name, style = MaterialTheme.typography.titleMedium, maxLines = 2)
+            if (showSubtitle) {
+                Spacer(Modifier.height(2.dp))
+                Text(item.infoType.name.lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (isChannel) {
+            Spacer(Modifier.width(8.dp))
+            FilledTonalButton(onClick = click, shape = CircleShape, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)) {
+                Text("Channel", style = MaterialTheme.typography.labelMedium)
+            }
         }
     }
 }
@@ -967,7 +1090,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(104.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
                 Text(data.name, style = MaterialTheme.typography.headlineSmall)
-                if (data.subscriberCount >= 0) Text("${data.subscriberCount} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(data.description.orEmpty(), maxLines = 5, style = MaterialTheme.typography.bodyMedium)
             }
             LazyColumn { items(channelItems) { item -> ResultRow(item, showSubtitle = false) { if (item.infoType == InfoItem.InfoType.STREAM) selected = item.url } } }
@@ -1345,6 +1468,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             selectVideoStream(availableStreams, codec, quality)?.let { play(it) }
         }.onFailure { e ->
             AppLog.failure("player repository streams video=$videoId", e)
+            if (availableStreams.isEmpty()) error = e.message
         }
         runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo(url) } }.onSuccess { stream ->
             info = stream
@@ -1364,7 +1488,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
             }
         }.onFailure {
-            if (availableStreams.isEmpty()) error = it.message
+            if (availableStreams.isEmpty() && error == null) error = it.message
         }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelInfo(videoId) } }.onSuccess { channelInfo = it }
@@ -1422,7 +1546,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 }
                 Text(info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
                 Text(
-                    if (info == null) "" else "${info?.viewCount ?: 0} views",
+                    if (info == null) "" else "${formatCount(info?.viewCount ?: 0)} views",
                     Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1436,7 +1560,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
                         Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
                         val subscribers = info?.uploaderSubscriberCount ?: -1
-                        if (subscribers >= 0) Text("$subscribers subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -1469,7 +1593,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             Text(info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
             Text(
-                if (info == null) "" else "${info?.viewCount ?: 0} views",
+                if (info == null) "" else "${formatCount(info?.viewCount ?: 0)} views",
                 Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1483,7 +1607,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
                     Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
                     val subscribers = info?.uploaderSubscriberCount ?: -1
-                    if (subscribers >= 0) Text("$subscribers subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             HorizontalDivider()

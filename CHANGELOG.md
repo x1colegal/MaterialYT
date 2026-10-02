@@ -2,6 +2,15 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.2.1] - 2026-10-02
+
+### Fixed
+
+- Rely exclusively on VisionOS player client, removing unstable iOS player fallback that triggered `LOGIN_REQUIRED: Sign in to confirm you're not a robot`.
+- Filtered ads ("Sponsored", "Patrocinado", "Anúncio", and ad renderers) from history, Shorts, and search feeds.
+- Channel items in search results now render with dedicated circular avatar cards and channel info rather than 16:9 video thumbnails.
+- Subscriber and view counts now format exact integers for 1-999 and dot-separated notation for 1K-999K, 1M+, and 1B+ (e.g., 5.4K, 5.2M).
+
 ## [1.2.0] - 2026-10-01
 
 ### Added

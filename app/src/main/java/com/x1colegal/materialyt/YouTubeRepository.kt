@@ -53,7 +53,9 @@ object YouTubeRepository {
             .put("inputType", "REEL_WATCH_INPUT_TYPE_SEEDLESS")
             .put("params", "CA8%3D"), origin)
         val result = mutableListOf<FeedItem>()
-        reelFeedItem(seed)?.let(result::add)
+        if (!containsAdMarker(seed)) {
+            reelFeedItem(seed)?.let(result::add)
+        }
         val continuation = seed.optString("sequenceContinuation").ifBlank {
             findString(seed.optJSONObject("continuationEndpoint"), "token").orEmpty()
         }
@@ -63,7 +65,10 @@ object YouTubeRepository {
                 .put("sequenceParams", continuation), origin)
             val entries = sequence.optJSONArray("entries")
             if (entries != null) for (index in 0 until minOf(entries.length(), 24)) {
-                val watch = entries.optJSONObject(index)?.optJSONObject("command")?.optJSONObject("reelWatchEndpoint") ?: continue
+                val entry = entries.optJSONObject(index) ?: continue
+                if (containsAdMarker(entry)) continue
+                val watch = entry.optJSONObject("command")?.optJSONObject("reelWatchEndpoint") ?: continue
+                if (containsAdMarker(watch)) continue
                 val videoId = watch.optString("videoId")
                 val params = watch.optString("params")
                 if (videoId.length != 11 || params.isBlank()) continue
@@ -73,7 +78,11 @@ object YouTubeRepository {
                         .put("disablePlayerResponse", true)
                         .put("params", params)
                         .put("playerRequest", JSONObject().put("videoId", videoId)), origin)
-                }.getOrNull()?.let { details -> reelFeedItem(details, watch)?.let(result::add) }
+                }.getOrNull()?.let { details ->
+                    if (!containsAdMarker(details)) {
+                        reelFeedItem(details, watch)?.let(result::add)
+                    }
+                }
             }
         }
         return result.distinctBy { it.id }.also { AppLog.event("shorts reel items=${it.size}") }
@@ -112,6 +121,7 @@ object YouTubeRepository {
     }
 
     private fun reelFeedItem(response: JSONObject, fallbackWatch: JSONObject? = null): FeedItem? {
+        if (containsAdMarker(response) || (fallbackWatch != null && containsAdMarker(fallbackWatch))) return null
         val watch = response.optJSONObject("replacementEndpoint")?.optJSONObject("reelWatchEndpoint") ?: fallbackWatch ?: return null
         val videoId = watch.optString("videoId").takeIf { it.length == 11 } ?: return null
         val header = response.optJSONObject("overlay")?.optJSONObject("reelPlayerOverlayRenderer")
@@ -130,6 +140,7 @@ object YouTubeRepository {
             if (channelThumbnail.isBlank()) channelThumbnail = meta.avatar
             if (channelUrl.isBlank()) channelUrl = meta.channelUrl
         }
+        if (isAdString(title) || isAdString(channel)) return null
         if (title.isBlank()) title = "Short"
         if (channel.isBlank()) channel = "YouTube"
 
@@ -230,12 +241,8 @@ object YouTubeRepository {
     fun playerStreams(videoId: String, music: Boolean = false): List<PlayableStream> {
         runCatching { bootstrap("https://www.youtube.com/watch?v=$videoId", "WEB") }
             .onFailure { AppLog.failure("player account bootstrap video=$videoId", it) }
-        var response = visionOsPlayer(videoId)
-        var clientUsed = "VISIONOS"
-        if (response.optJSONObject("playabilityStatus")?.optString("status") != "OK") {
-            response = iosPlayer(videoId)
-            clientUsed = "IOS"
-        }
+        val response = visionOsPlayer(videoId)
+        val clientUsed = "VISIONOS"
         val finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
         if (finalStatus != "OK") error(response.optJSONObject("playabilityStatus")?.optString("reason").takeUnless { it.isNullOrBlank() } ?: finalStatus)
@@ -350,9 +357,6 @@ object YouTubeRepository {
         return response.optJSONObject("playbackTracking")
     }
 
-    private fun iosPlayer(videoId: String): JSONObject {
-        return mobilePlayer(videoId, "IOS", "21.03.2", "5", "iPhone16,2", "iOS", "18.7.2.22H124")
-    }
 
     private fun mobilePlayer(videoId: String, name: String, version: String, id: String, model: String, os: String, osVersion: String): JSONObject {
         val ua = "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
@@ -571,10 +575,17 @@ object YouTubeRepository {
             val columns = flexColumnTexts(renderer)
             val title = text(renderer.opt("title")) ?: text(renderer.opt("headline")) ?: columns.firstOrNull()
                 ?: deepText(renderer, "title") ?: deepText(renderer, "headline") ?: return@walkFeedRenderers
-            val subtitle = text(renderer.opt("shortBylineText")) ?: text(renderer.opt("ownerText")) ?: text(renderer.opt("longBylineText")) ?: text(renderer.opt("subtitle"))
+            val channelSubtitle = if (isChannel) {
+                val subs = text(renderer.opt("subscriberCountText"))
+                val vids = text(renderer.opt("videoCountText"))
+                listOfNotNull(subs, vids).joinToString(" • ").ifBlank { null }
+            } else null
+            val rawSubtitle = channelSubtitle ?: text(renderer.opt("shortBylineText")) ?: text(renderer.opt("ownerText")) ?: text(renderer.opt("longBylineText")) ?: text(renderer.opt("subtitle"))
                 ?: columns.drop(1).firstOrNull()
                 ?: deepText(renderer, "shortBylineText") ?: deepText(renderer, "ownerText") ?: deepText(renderer, "longBylineText") ?: deepText(renderer, "subtitle")
                 ?: inferChannelName(renderer, title)?.takeIf { '<' !in it && '>' !in it } ?: "Unknown channel"
+            val subtitle = rawSubtitle.replace(Regex("(\\d+),(\\d+)"), "$1.$2")
+            if (containsAdMarker(renderer) || isAdString(title) || isAdString(subtitle)) return@walkFeedRenderers
             val thumbnails = renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 ?: renderer.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
             val providedThumbnail = thumbnails?.optJSONObject((thumbnails.length() - 1).coerceAtLeast(0))?.optString("url").orEmpty()
@@ -582,9 +593,9 @@ object YouTubeRepository {
             val isMusicItem = renderer.has("flexColumns") || renderer.has("thumbnailRenderer") || renderer.has("subtitle")
             val thumbnail = if ((isMusicItem || isPlaylist || isChannel) && providedThumbnail.isNotBlank()) providedThumbnail else "https://i.ytimg.com/vi/$id/maxresdefault.jpg"
             val selectedThumb = thumbnails?.optJSONObject((thumbnails.length() - 1).coerceAtLeast(0))
-            val thumbWidth = if (isMusicItem) selectedThumb?.optInt("width")?.takeIf { it > 0 } ?: 1 else 16
-            val thumbHeight = if (isMusicItem) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
-            val channelThumbnail = findChannelThumbnail(renderer).orEmpty()
+            val thumbWidth = if (isMusicItem || isChannel) selectedThumb?.optInt("width")?.takeIf { it > 0 } ?: 1 else 16
+            val thumbHeight = if (isMusicItem || isChannel) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
+            val channelThumbnail = findChannelThumbnail(renderer).orEmpty().ifBlank { if (isChannel) thumbnail else "" }
             val url = when { isChannel -> "https://www.youtube.com/channel/$id"; isPlaylist -> "https://www.youtube.com/playlist?list=$id"; else -> "https://www.youtube.com/watch?v=$id" }
             output.putIfAbsent(id, FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel))
         }
@@ -637,8 +648,13 @@ object YouTubeRepository {
                 val blocked = blockedByAd || keys.any { key ->
                     key.contains("adSlot", true) || key.contains("promoted", true) ||
                         key.contains("displayAd", true) || key.contains("carouselAd", true) ||
-                        key.contains("adPlacement", true) || key.contains("playerAd", true)
-                }
+                        key.contains("adPlacement", true) || key.contains("playerAd", true) ||
+                        key.contains("inFeedAd", true) || key.contains("adLayout", true) ||
+                        key.contains("aboutThisAd", true) || key.contains("adBadge", true) ||
+                        key.contains("advertiser", true)
+                } || containsAdMarker(value.opt("adSlotRenderer")) ||
+                     containsAdMarker(value.opt("inFeedAdLayoutRenderer")) ||
+                     containsAdMarker(value.opt("adPlacementRenderer"))
                 if (!blocked) {
                     val supported = setOf(
                         "videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "playlistVideoRenderer", "playlistRenderer", "gridPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
@@ -654,13 +670,31 @@ object YouTubeRepository {
         }
     }
 
+    private fun isAdString(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.equals("ad", ignoreCase = true)) return true
+        val lower = trimmed.lowercase(java.util.Locale.ROOT)
+        return lower == "sponsored" || lower == "patrocinado" || lower == "patrocinada" ||
+            lower == "anúncio" || lower == "anuncio" || lower == "publicidade" ||
+            lower == "promoted" ||
+            lower.startsWith("sponsored") || lower.startsWith("patrocinad") ||
+            lower.startsWith("anúncio") || lower.startsWith("anuncio") ||
+            lower.startsWith("publicidade")
+    }
+
     private fun containsAdMarker(value: Any?): Boolean = when (value) {
         is JSONObject -> value.keys().asSequence().any { key ->
-            key.contains("adBadge", true) || key.contains("promoted", true) || key.contains("advertiser", true) ||
-                key.contains("adSlot", true) || containsAdMarker(value.opt(key))
+            key.contains("adBadge", true) || key.contains("promoted", true) ||
+                key.contains("advertiser", true) || key.contains("adSlot", true) ||
+                key.contains("inFeedAd", true) || key.contains("adPlacement", true) ||
+                key.contains("adLayout", true) || key.contains("aboutThisAd", true) ||
+                key.contains("adContext", true) || key.contains("adTag", true) ||
+                key.contains("paidContent", true) || key.contains("displayAd", true) ||
+                key.contains("carouselAd", true) || key.contains("playerAd", true) ||
+                containsAdMarker(value.opt(key))
         }
         is JSONArray -> (0 until value.length()).any { containsAdMarker(value.opt(it)) }
-        is String -> value.equals("Sponsored", true) || value.equals("Ad", true)
+        is String -> isAdString(value)
         else -> false
     }
 

@@ -241,11 +241,22 @@ object YouTubeRepository {
     fun playerStreams(videoId: String, music: Boolean = false): List<PlayableStream> {
         runCatching { bootstrap("https://www.youtube.com/watch?v=$videoId", "WEB") }
             .onFailure { AppLog.failure("player account bootstrap video=$videoId", it) }
-        val response = visionOsPlayer(videoId)
-        val clientUsed = "VISIONOS"
-        val finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        var response = runCatching { visionOsPlayer(videoId) }.getOrDefault(JSONObject())
+        var clientUsed = "VISIONOS"
+        var finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        var firstError = response.optJSONObject("playabilityStatus")?.optString("reason").takeUnless { it.isNullOrBlank() } ?: finalStatus
+        if (finalStatus != "OK") {
+            response = runCatching { iosPlayer(videoId) }.getOrDefault(JSONObject())
+            clientUsed = "IOS"
+            finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        }
+        if (finalStatus != "OK") {
+            response = runCatching { androidPlayer(videoId) }.getOrDefault(JSONObject())
+            clientUsed = "ANDROID"
+            finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        }
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
-        if (finalStatus != "OK") error(response.optJSONObject("playabilityStatus")?.optString("reason").takeUnless { it.isNullOrBlank() } ?: finalStatus)
+        if (finalStatus != "OK") error(firstError)
         val cpn = response.optString("_materialytCpn")
         // The regular WEB tracking client is the path YouTube reliably commits to
         // the account's shared watch history, including music videos.
@@ -346,6 +357,14 @@ object YouTubeRepository {
         return mobilePlayer(videoId, "VISIONOS", "1.02", "101", "RealityDevice14,1", "visionOS", "25.6.0.23O471")
     }
 
+    private fun iosPlayer(videoId: String): JSONObject {
+        return mobilePlayer(videoId, "IOS", "21.03.2", "5", "iPhone16,2", "iOS", "18.7.2.22H124")
+    }
+
+    private fun androidPlayer(videoId: String): JSONObject {
+        return mobilePlayer(videoId, "ANDROID", "19.29.37", "3", "Pixel 8 Pro", "Android", "14")
+    }
+
     private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
         val origin = if (music) "https://music.youtube.com" else "https://www.youtube.com"
         val clientName = if (music) "WEB_REMIX" else "WEB"
@@ -359,7 +378,7 @@ object YouTubeRepository {
 
 
     private fun mobilePlayer(videoId: String, name: String, version: String, id: String, model: String, os: String, osVersion: String): JSONObject {
-        val ua = "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
+        val ua = if (name == "ANDROID") "com.google.android.youtube/$version (Linux; U; Android $osVersion)" else "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
         val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
         val clientContext = JSONObject()
             .put("clientName", name).put("clientVersion", version)
@@ -377,6 +396,7 @@ object YouTubeRepository {
                 val accountOrigin = "https://www.youtube.com"
                 val accountCookies = cookies(accountOrigin)
                 if (accountCookies.isNotBlank()) header("Cookie", accountCookies)
+                authorization(accountOrigin)?.let { header("Authorization", it) }
                 header("Origin", accountOrigin)
                 header("X-Origin", accountOrigin)
                 header("X-Goog-AuthUser", "0")

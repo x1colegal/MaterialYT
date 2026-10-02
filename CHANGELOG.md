@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.1] - 2026-10-02
+
+### Fixed
+- Fixed missing video metadata (title showing "Video", missing channel/views) when playing videos by extracting and using videoDetails from the YouTube player response.
+
 ## [1.4.0] - 2026-10-02
 
 ### Fixed

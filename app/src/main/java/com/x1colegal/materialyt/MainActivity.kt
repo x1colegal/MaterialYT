@@ -1460,7 +1460,9 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
     var info by remember { mutableStateOf<StreamInfo?>(null) }
+    var videoMetadata by remember { mutableStateOf<VideoDetails?>(null) }
     var channelInfo by remember { mutableStateOf<ChannelInfo?>(null) }
     var comments by remember { mutableStateOf<List<CommentsInfoItem>>(emptyList()) }
     var commentText by remember { mutableStateOf("") }
@@ -1509,11 +1511,11 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         selectedStream = stream
     }
     val mediaSession = remember { MediaSessionCompat(context, "MaterialYT Video") }
-    LaunchedEffect(info, channelInfo) {
-        if (info != null) {
-            val title = info?.name ?: "Video"
-            val author = info?.uploaderName ?: channelInfo?.name ?: ""
-            val thumb = info?.thumbnails?.lastOrNull()?.url
+    LaunchedEffect(info, videoMetadata, channelInfo) {
+        if (info != null || videoMetadata != null) {
+            val title = info?.name ?: videoMetadata?.title ?: "Video"
+            val author = info?.uploaderName ?: channelInfo?.name ?: videoMetadata?.author ?: ""
+            val thumb = info?.thumbnails?.lastOrNull()?.url ?: videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
             activity.showPlaybackNotification(mediaSession, title, author, thumb, player.isPlaying)
         }
     }
@@ -1536,9 +1538,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 activity.updatePipAction()
-                val title = info?.name ?: "Video"
-                val author = info?.uploaderName ?: channelInfo?.name ?: ""
-                val thumb = info?.thumbnails?.lastOrNull()?.url
+                val title = info?.name ?: videoMetadata?.title ?: "Video"
+                val author = info?.uploaderName ?: channelInfo?.name ?: videoMetadata?.author ?: ""
+                val thumb = info?.thumbnails?.lastOrNull()?.url ?: videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
                 activity.showPlaybackNotification(mediaSession, title, author, thumb, isPlaying)
                 mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
                     .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO)
@@ -1600,6 +1602,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
                 selectedAudio = selectAudioStream(audioStreams, audioCodec)
                 availableStreams = extracted.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                val details = YouTubeRepository.videoDetails(videoId)
+                if (details != null && (videoMetadata == null || videoMetadata?.title?.isBlank() == true)) {
+                    videoMetadata = details
+                }
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen); loaded = true }
             }
         }.onFailure { e ->
@@ -1721,8 +1727,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         )
                     }
                     Column(Modifier.padding(horizontal = 10.dp).weight(1f)) {
-                        Text(info?.name ?: "Video", maxLines = 1, style = MaterialTheme.typography.titleSmall)
-                        Text(info?.uploaderName ?: "", maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                        Text(info?.name ?: videoMetadata?.title ?: "Video", maxLines = 1, style = MaterialTheme.typography.titleSmall)
+                        Text(info?.uploaderName ?: videoMetadata?.author ?: "", maxLines = 1, style = MaterialTheme.typography.bodySmall)
                     }
                     var playing by remember { mutableStateOf(player.isPlaying) }
                     DisposableEffect(player) {
@@ -1784,21 +1790,21 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
                             if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
                         }
-                        Text(info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
+                        Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
                         Text(
-                            if (info == null) "" else "${formatCount(info?.viewCount ?: 0)} views",
+                            if (info == null && videoMetadata == null) "" else "${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views",
                             Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
                         HorizontalDivider()
-                        Row(Modifier.fillMaxWidth().clickable(enabled = !info?.uploaderUrl.isNullOrBlank()) { channelUrl = info?.uploaderUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url
+                        Row(Modifier.fillMaxWidth().clickable(enabled = !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) { channelUrl = info?.uploaderUrl ?: videoMetadata?.authorUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
                             if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                             else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
                             Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                                Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
+                                Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: videoMetadata?.author?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
                                 val subscribers = info?.uploaderSubscriberCount ?: -1
                                 if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -1831,21 +1837,21 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
                         if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
                     }
-                    Text(info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
+                    Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
                     Text(
-                        if (info == null) "" else "${formatCount(info?.viewCount ?: 0)} views",
+                        if (info == null && videoMetadata == null) "" else "${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views",
                         Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
                     HorizontalDivider()
-                    Row(Modifier.fillMaxWidth().clickable(enabled = !info?.uploaderUrl.isNullOrBlank()) { channelUrl = info?.uploaderUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url
+                    Row(Modifier.fillMaxWidth().clickable(enabled = !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) { channelUrl = info?.uploaderUrl ?: videoMetadata?.authorUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
                         if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                         else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
                         Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                            Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
+                            Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: videoMetadata?.author?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
                             val subscribers = info?.uploaderSubscriberCount ?: -1
                             if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

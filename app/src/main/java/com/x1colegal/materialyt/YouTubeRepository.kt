@@ -18,6 +18,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "")
 data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "")
 data class ChannelInfo(val name: String, val thumbnail: String)
+data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 
 object YouTubeRepository {
@@ -29,6 +30,8 @@ object YouTubeRepository {
     private val bootstrapCache = mutableMapOf<String, Pair<Long, Bootstrap>>()
     private val playerJavaScriptCache = mutableMapOf<String, String>()
     private val nChallengeCache = mutableMapOf<String, String>()
+    private val videoDetailsCache = mutableMapOf<String, VideoDetails>()
+    fun videoDetails(videoId: String): VideoDetails? = synchronized(videoDetailsCache) { videoDetailsCache[videoId] }
     private data class PlaybackTracking(
         val playbackUrl: String,
         val watchtimeUrl: String,
@@ -300,6 +303,23 @@ object YouTubeRepository {
                 return npStreams
             }
             error(firstError)
+        }
+        val detailsObj = response.optJSONObject("videoDetails")
+        if (detailsObj != null) {
+            val title = detailsObj.optString("title")
+            val author = detailsObj.optString("author")
+            val length = detailsObj.optString("lengthSeconds").toLongOrNull() ?: 0L
+            val views = detailsObj.optString("viewCount").toLongOrNull() ?: 0L
+            val channelId = detailsObj.optString("channelId")
+            synchronized(videoDetailsCache) {
+                videoDetailsCache[videoId] = VideoDetails(
+                    title = title,
+                    author = author,
+                    authorUrl = if (channelId.isNotBlank()) "https://www.youtube.com/channel/$channelId" else "",
+                    viewCount = views,
+                    durationSeconds = length
+                )
+            }
         }
         val cpn = response.optString("_materialytCpn")
         // The regular WEB tracking client is the path YouTube reliably commits to

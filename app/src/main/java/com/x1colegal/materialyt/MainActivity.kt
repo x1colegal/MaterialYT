@@ -85,6 +85,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -575,7 +580,8 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = { Icon(Icons.Default.Search, null) })
+            val keyboardController = LocalSoftwareKeyboardController.current
+            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = { Icon(Icons.Default.Search, null) }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide(); if (query.isNotBlank()) scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }; loading = false } }))
             IconButton(onClick = {
                 if (query.isNotBlank()) scope.launch {
                     loading = true; error = null
@@ -601,11 +607,23 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 Icon(Icons.Default.PlayCircle, null, Modifier.size(68.dp), tint = MaterialTheme.colorScheme.primary)
                 Text(if (YouTubeRepository.signedIn()) "Your feed is currently empty" else "Search YouTube", Modifier.padding(16.dp))
             }
-        } else LazyColumn {
-            if (results.isNotEmpty()) item { Text("Channels and playlists", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
-            items(results) { item -> ResultRow(item) { selectedResult = item } }
-            if (feed.isNotEmpty() && results.isNotEmpty()) item { Text("Videos", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
-            items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
+        } else {
+            val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+            if (tablet) {
+                LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(16.dp)) {
+                    if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
+                    gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
+                    if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
+                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+                }
+            } else {
+                LazyColumn {
+                    if (results.isNotEmpty()) item { Text("Channels and playlists", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
+                    items(results) { item -> ResultRow(item) { selectedResult = item } }
+                    if (feed.isNotEmpty() && results.isNotEmpty()) item { Text("Videos", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
+                    items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
+                }
+            }
         }
     }
 }
@@ -629,7 +647,14 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
-        LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+        val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+        if (tablet) {
+            LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp)) {
+                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+            }
+        } else {
+            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+        }
     }
 }
 
@@ -647,7 +672,8 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search music") }, shape = CircleShape, leadingIcon = { Icon(Icons.Default.Search, null) })
+            val keyboardController = LocalSoftwareKeyboardController.current
+            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search music") }, shape = CircleShape, leadingIcon = { Icon(Icons.Default.Search, null) }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide(); if (query.isNotBlank()) load { YouTubeRepository.musicSearch(query) } }))
             IconButton(onClick = { if (query.isNotBlank()) load { YouTubeRepository.musicSearch(query) } }) { Icon(Icons.Default.Search, "Search music") }
             IconButton(onClick = { query = ""; load { YouTubeRepository.music() } }) { Icon(Icons.Default.Refresh, "Refresh") }
         }

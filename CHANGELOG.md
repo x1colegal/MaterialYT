@@ -2,7 +2,17 @@
 
 All notable changes to MaterialYT are documented in this file.
 
-## [1.2.5] - 2026-10-02
+## [1.2.6] - 2026-10-02
+
+### Added
+
+- Native grid layouts for videos and results on tablets.
+- Added larger, scaled-up MiniPlayer for tablet devices.
+
+### Fixed
+
+- Fixed Android 7 (API 24) crash when loading comments due to missing `toUnmodifiableList` Java API by adding core library desugaring.
+- Fixed keyboard getting stuck when opening search on tablets by adding IME search action support.
 
 ### Fixed
 

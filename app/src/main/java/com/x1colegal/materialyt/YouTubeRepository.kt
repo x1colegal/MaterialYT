@@ -609,7 +609,7 @@ object YouTubeRepository {
             val thumbnails = renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 ?: renderer.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
             val providedThumbnail = thumbnails?.optJSONObject((thumbnails.length() - 1).coerceAtLeast(0))?.optString("url").orEmpty()
-                .ifBlank { findThumbnail(renderer).orEmpty() }
+                .ifBlank { findThumbnail(renderer).orEmpty() }.let { if (it.startsWith("//")) "https:$it" else it }
             val isMusicItem = renderer.has("flexColumns") || renderer.has("thumbnailRenderer") || renderer.has("subtitle")
             val thumbnail = if ((isMusicItem || isPlaylist || isChannel) && providedThumbnail.isNotBlank()) providedThumbnail else "https://i.ytimg.com/vi/$id/maxresdefault.jpg"
             val selectedThumb = thumbnails?.optJSONObject((thumbnails.length() - 1).coerceAtLeast(0))
@@ -751,7 +751,7 @@ object YouTubeRepository {
     }
 
     private fun findThumbnail(value: Any?): String? = when (value) {
-        is JSONObject -> value.optString("url").takeIf { it.contains("ytimg.com") || it.contains("ggpht.com") }
+        is JSONObject -> value.optString("url").takeIf { it.contains("ytimg.com") || it.contains("ggpht.com") }?.let { if (it.startsWith("//")) "https:$it" else it }
             ?: value.keys().asSequence().mapNotNull { findThumbnail(value.opt(it)) }.firstOrNull()
         is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findThumbnail(value.opt(it)) }.firstOrNull()
         else -> null

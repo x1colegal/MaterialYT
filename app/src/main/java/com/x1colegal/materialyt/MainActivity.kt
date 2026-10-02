@@ -1,4 +1,5 @@
 package com.x1colegal.materialyt
+import androidx.compose.ui.platform.LocalFocusManager
 
 import android.app.PictureInPictureParams
 import android.app.NotificationChannel
@@ -590,8 +591,11 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             val keyboardController = LocalSoftwareKeyboardController.current
-            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = { Icon(Icons.Default.Search, null) }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide(); if (query.isNotBlank()) scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }; loading = false } }))
+            val focusManager = LocalFocusManager.current
+            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = { Icon(Icons.Default.Search, null) }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }; loading = false } }))
             IconButton(onClick = {
+                focusManager.clearFocus()
+                keyboardController?.hide()
                 if (query.isNotBlank()) scope.launch {
                     loading = true; error = null
                     runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }
@@ -601,6 +605,8 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             }) { Icon(Icons.Default.Search, "Search") }
             IconButton(onClick = {
                 query = ""
+                focusManager.clearFocus()
+                keyboardController?.hide()
                 scope.launch {
                     loading = true; error = null; results = emptyList()
                     runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
@@ -617,6 +623,21 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 Text(if (YouTubeRepository.signedIn()) "Your feed is currently empty" else "Search YouTube", Modifier.padding(16.dp))
             }
         } else {
+        val loadingMoreContent: @Composable () -> Unit = {
+            if (query.isBlank() && feed.isNotEmpty()) {
+                var loadingMore by remember { mutableStateOf(false) }
+                LaunchedEffect(Unit) {
+                    loadingMore = true
+                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.homeContinuation() } }
+                        .onSuccess { newItems ->
+                            homeFeed = homeFeed + newItems
+                            feed = homeFeed
+                        }
+                    loadingMore = false
+                }
+                if (loadingMore) CircularProgressIndicator(Modifier.fillMaxWidth().padding(16.dp).wrapContentWidth(Alignment.CenterHorizontally))
+            }
+        }
             val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
             if (tablet) {
                 LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(16.dp)) {
@@ -624,6 +645,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> { GlobalPlayerState.activeVideoUrl = item.url; GlobalPlayerState.videoMinimized = false } } } } }
+                    item(span = { GridItemSpan(maxLineSpan) }) { loadingMoreContent() }
                 }
             } else {
                 LazyColumn {
@@ -631,6 +653,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     items(results) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item { Text("Videos", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
                     items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> { GlobalPlayerState.activeVideoUrl = item.url; GlobalPlayerState.videoMinimized = false } } } }
+                    item { loadingMoreContent() }
                 }
             }
         }
@@ -699,6 +722,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
 }
 
 @Composable
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec: AudioCodecChoice, onBack: () -> Unit) {
     var showLyrics by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }

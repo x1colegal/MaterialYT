@@ -114,3 +114,10 @@ All notable changes to MaterialYT are documented in this file.
 
 ### Changed
 - Replaced the YT Music Audio Settings dialog with a ModalBottomSheet (matches Video and Shorts settings).
+
+## [1.3.0] - 2026-10-02
+### Added
+- Infinite scrolling (pagination) on the Home feed using YouTube continuation tokens.
+
+### Fixed
+- Fixed search bar auto-focusing on tablet view and ensure software keyboard and focus are dismissed when performing searches or clearing query.

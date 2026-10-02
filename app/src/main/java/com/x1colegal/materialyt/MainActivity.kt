@@ -1629,7 +1629,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 if (availableStreams.isEmpty()) {
                     val msg = it.message.orEmpty()
                     error = if (msg.contains("VISIONOS", true) || msg.contains("bot", true)) {
-                        "Proteção contra bots do YouTube: Faça login na aba Account para assistir."
+                        "YouTube bot protection: Please sign in from the Account tab to play."
                     } else {
                         msg
                     }

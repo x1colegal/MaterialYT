@@ -16,8 +16,8 @@ android {
         applicationId = "com.x1colegal.materialyt"
         minSdk = 21
         targetSdk = 36
-        versionCode = 10
-        versionName = "1.2.6"
+        versionCode = 11
+        versionName = "1.2.7"
     }
     signingConfigs {
         getByName("debug") {
@@ -81,7 +81,13 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
-    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
+    implementation(files("libs/NewPipeExtractor-v0.26.5.jar"))
+    // NewPipeExtractor transitive dependencies
+    implementation("com.github.TeamNewPipe:nanojson:e9d656ddb49a412a5a0a5d5ef20ca7ef09549996")
+    implementation("org.jsoup:jsoup:1.18.3")
+    implementation("org.mozilla:rhino-engine:1.7.15")
+    implementation("com.google.protobuf:protobuf-javalite:4.29.3")
+    
     implementation("com.google.android.exoplayer:exoplayer:2.19.1")
     implementation("com.google.android.exoplayer:extension-okhttp:2.19.1")
     implementation("io.coil-kt:coil-compose:2.7.0")

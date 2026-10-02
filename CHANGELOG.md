@@ -2,7 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
-## [1.2.6] - 2026-10-02
+## [1.2.7] - 2026-10-02
+
+### Fixed
+
+- Fully fixed Android 7 (API 24) Java crash (`toUnmodifiableList`) that broke video and comment loading by manually patching the underlying extractor dependency.
 
 ### Added
 

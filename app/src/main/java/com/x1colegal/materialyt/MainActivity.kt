@@ -354,7 +354,11 @@ class MainActivity : ComponentActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         pipMode = isInPictureInPictureMode
-        if (isInPictureInPictureMode) visiblePlayerView?.hideController()
+        if (isInPictureInPictureMode) {
+            visiblePlayerView?.hideController()
+        } else {
+            applyFullscreenState()
+        }
     }
 
     fun videoPlayerActive(value: Boolean) { videoPlayerActive = value }
@@ -563,8 +567,9 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     // Render selected video on top of feed so miniplayer has feed content underneath
     val videoOverlay: @Composable () -> Unit = {
         if (selected != null) {
-            VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = {
+            VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode, onBack = {
                 selected = null
+                onPlayerMode(false)
                 query = ""
                 results = emptyList()
                 if (homeFeed.isNotEmpty()) {
@@ -688,7 +693,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    val videoOverlay: @Composable () -> Unit = { if (selected != null) VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = { selected = null }) }
+    val videoOverlay: @Composable () -> Unit = { if (selected != null) VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode, onBack = { selected = null; onPlayerMode(false) }) }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
@@ -1452,7 +1457,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 }
 
 @Composable
-private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onBack: () -> Unit) {
+private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var info by remember { mutableStateOf<StreamInfo?>(null) }
@@ -1476,6 +1481,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     if (channelUrl != null) { ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }; return }
     val player = remember { bufferedPlayer(context).also(onPlayer) }
     var isMinimized by remember { mutableStateOf(false) }
+    LaunchedEffect(isMinimized) { onPlayerMode?.invoke(!isMinimized) }
     var miniplayerDismissed by remember { mutableStateOf(false) }
     var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(true) }
@@ -1764,90 +1770,94 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture", tint = ComposeColor.White) }
             } }
         }
-    } else if (tablet) {
-        Row(Modifier.fillMaxSize()) {
-            Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
-                Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                    AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
-                }
-                Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
-                    IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
-                    if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
-                }
-                Text(info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
-                Text(
-                    if (info == null) "" else "${formatCount(info?.viewCount ?: 0)} views",
-                    Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
-                HorizontalDivider()
-                Row(Modifier.fillMaxWidth().clickable(enabled = !info?.uploaderUrl.isNullOrBlank()) { channelUrl = info?.uploaderUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url
-                    if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                    else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
-                    Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                        Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
-                        val subscribers = info?.uploaderSubscriberCount ?: -1
-                        if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    } else {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            if (tablet) {
+                Row(Modifier.fillMaxSize()) {
+                    Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
+                            AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
+                        }
+                        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
+                            Spacer(Modifier.weight(1f))
+                            IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
+                            IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
+                            if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
+                        }
+                        Text(info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            if (info == null) "" else "${formatCount(info?.viewCount ?: 0)} views",
+                            Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
+                        HorizontalDivider()
+                        Row(Modifier.fillMaxWidth().clickable(enabled = !info?.uploaderUrl.isNullOrBlank()) { channelUrl = info?.uploaderUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url
+                            if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                            else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
+                            Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
+                                Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
+                                val subscribers = info?.uploaderSubscriberCount ?: -1
+                                if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                     }
-                }
-            }
-            Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
-            Column(Modifier.weight(0.85f).fillMaxHeight()) {
-                Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
-                HorizontalDivider()
-                LazyColumn(Modifier.fillMaxSize()) {
-                    items(comments) { comment ->
-                        Column(Modifier.padding(16.dp, 10.dp)) {
-                            Text(comment.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge)
-                            Text((if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(comment.commentText.content, Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") Html.fromHtml(comment.commentText.content)).toString())
-                            Text(comment.textualLikeCount ?: "", style = MaterialTheme.typography.bodySmall)
+                    Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
+                    Column(Modifier.weight(0.85f).fillMaxHeight()) {
+                        Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
+                        HorizontalDivider()
+                        LazyColumn(Modifier.fillMaxSize()) {
+                            items(comments) { comment ->
+                                Column(Modifier.padding(16.dp, 10.dp)) {
+                                    Text(comment.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge)
+                                    Text((if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(comment.commentText.content, Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") Html.fromHtml(comment.commentText.content)).toString())
+                                    Text(comment.textualLikeCount ?: "", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
-    } else LazyColumn(Modifier.fillMaxSize()) {
-        item {
-            Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
-            }
-            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
-                IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
-                if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
-            }
-            Text(info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
-            Text(
-                if (info == null) "" else "${formatCount(info?.viewCount ?: 0)} views",
-                Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
-            HorizontalDivider()
-            Row(Modifier.fillMaxWidth().clickable(enabled = !info?.uploaderUrl.isNullOrBlank()) { channelUrl = info?.uploaderUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url
-                if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
-                Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                    Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
-                    val subscribers = info?.uploaderSubscriberCount ?: -1
-                    if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else LazyColumn(Modifier.fillMaxSize()) {
+                item {
+                    Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
+                        AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
+                    }
+                    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
+                        Spacer(Modifier.weight(1f))
+                        IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
+                        IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
+                        if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
+                    }
+                    Text(info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        if (info == null) "" else "${formatCount(info?.viewCount ?: 0)} views",
+                        Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
+                    HorizontalDivider()
+                    Row(Modifier.fillMaxWidth().clickable(enabled = !info?.uploaderUrl.isNullOrBlank()) { channelUrl = info?.uploaderUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url
+                        if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                        else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
+                        Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
+                            Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
+                            val subscribers = info?.uploaderSubscriberCount ?: -1
+                            if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    HorizontalDivider()
+                    Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
+                }
+                items(comments) { comment ->
+                    Column(Modifier.padding(16.dp, 10.dp)) { Text(comment.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge); Text((if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(comment.commentText.content, Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") Html.fromHtml(comment.commentText.content)).toString()); Text(comment.textualLikeCount ?: "", style = MaterialTheme.typography.bodySmall) }
                 }
             }
-            HorizontalDivider()
-            Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
-        }
-        items(comments) { comment ->
-            Column(Modifier.padding(16.dp, 10.dp)) { Text(comment.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge); Text((if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(comment.commentText.content, Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") Html.fromHtml(comment.commentText.content)).toString()); Text(comment.textualLikeCount ?: "", style = MaterialTheme.typography.bodySmall) }
         }
     }
     if (showPlayerSettings) AlertDialog(onDismissRequest = { showPlayerSettings = false }, confirmButton = { TextButton(onClick = { showPlayerSettings = false }) { Text("Done") } }, title = { Text("Playback settings") }, text = {

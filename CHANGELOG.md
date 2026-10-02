@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.3.4] - 2026-10-02
+
+### Fixed
+- Restored navigation bar and rail visibility when minimizing video or exiting PiP mode.
+- Fixed transparent background on VideoScreen by wrapping container in an opaque theme Surface.
+- Ensured system bars and navigation are properly restored on exiting Picture-in-Picture.
+
 ## [1.2.7] - 2026-10-02
 
 ### Fixed

@@ -35,32 +35,23 @@ object EjsChallengeSolver {
     }
 
     fun solveN(playerJavaScript: String, challenge: String): String {
-        return solveChallenge(playerJavaScript, "n", challenge)
-    }
-
-    fun solveSig(playerJavaScript: String, challenge: String): String {
-        return solveChallenge(playerJavaScript, "sig", challenge)
-    }
-
-    private fun solveChallenge(playerJavaScript: String, type: String, challenge: String): String {
         check(Looper.myLooper() != Looper.getMainLooper())
         check(ready.await(15, TimeUnit.SECONDS)) { "EJS runtime did not initialize" }
         val input = JSONObject()
             .put("type", "player")
             .put("player", playerJavaScript)
             .put("output_preprocessed", false)
-            .put("requests", JSONArray().put(JSONObject().put("type", type).put("challenges", JSONArray().put(challenge))))
+            .put("requests", JSONArray().put(JSONObject().put("type", "n").put("challenges", JSONArray().put(challenge))))
         val done = CountDownLatch(1)
         var callbackValue: String? = null
         main.post {
             webView.evaluateJavascript("JSON.stringify(jsc(${input}))") { value -> callbackValue = value; done.countDown() }
         }
-        check(done.await(30, TimeUnit.SECONDS)) { "EJS $type challenge timed out" }
+        check(done.await(30, TimeUnit.SECONDS)) { "EJS n challenge timed out" }
         val encoded = callbackValue ?: error("EJS returned no result")
         val decoded = JSONTokener(encoded).nextValue() as? String ?: error("EJS returned invalid JSON")
         val response = JSONObject(decoded).getJSONArray("responses").getJSONObject(0)
-        if (response.optString("type") != "result") error(response.optString("error", "EJS could not solve $type challenge"))
+        if (response.optString("type") != "result") error(response.optString("error", "EJS could not solve n challenge"))
         return response.getJSONObject("data").getString(challenge)
     }
 }
-

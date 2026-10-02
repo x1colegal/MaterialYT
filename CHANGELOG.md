@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.3.9] - 2026-10-02
+
+### Fixed
+- Set `MWEB` as the primary player client ahead of `VISIONOS` to avoid `VISIONOS player response is not valid`.
+
 ## [1.3.8] - 2026-10-02
 
 ### Fixed

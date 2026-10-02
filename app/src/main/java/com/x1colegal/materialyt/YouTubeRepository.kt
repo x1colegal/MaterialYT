@@ -273,13 +273,13 @@ object YouTubeRepository {
     fun playerStreams(videoId: String, music: Boolean = false): List<PlayableStream> {
         runCatching { bootstrap("https://www.youtube.com/watch?v=$videoId", "WEB") }
             .onFailure { AppLog.failure("player account bootstrap video=$videoId", it) }
-        var response = runCatching { visionOsPlayer(videoId) }.getOrDefault(JSONObject())
-        var clientUsed = "VISIONOS"
+        var response = runCatching { mwebPlayer(videoId) }.getOrDefault(JSONObject())
+        var clientUsed = "MWEB"
         var finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         var firstError = response.optJSONObject("playabilityStatus")?.optString("reason").takeUnless { it.isNullOrBlank() } ?: finalStatus
         if (finalStatus != "OK") {
-            response = runCatching { mwebPlayer(videoId) }.getOrDefault(JSONObject())
-            clientUsed = "MWEB"
+            response = runCatching { visionOsPlayer(videoId) }.getOrDefault(JSONObject())
+            clientUsed = "VISIONOS"
             finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         }
         if (finalStatus != "OK") {

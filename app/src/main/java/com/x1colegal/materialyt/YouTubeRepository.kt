@@ -554,6 +554,19 @@ object YouTubeRepository {
 
     private fun newPipeStreams(videoId: String): List<PlayableStream> {
         val info = StreamInfo.getInfo("https://www.youtube.com/watch?v=$videoId")
+        
+        synchronized(videoDetailsCache) {
+            if (!videoDetailsCache.containsKey(videoId)) {
+                videoDetailsCache[videoId] = VideoDetails(
+                    title = info.name.orEmpty(),
+                    author = info.uploaderName.orEmpty(),
+                    authorUrl = info.uploaderUrl.orEmpty(),
+                    viewCount = info.viewCount,
+                    durationSeconds = info.duration
+                )
+            }
+        }
+
         val result = mutableListOf<PlayableStream>()
         info.videoStreams.filter { it.isUrl }.forEach { stream ->
             result += PlayableStream(stream.content, stream.codec.orEmpty(), stream.height,

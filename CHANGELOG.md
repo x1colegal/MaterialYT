@@ -2,7 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
-## [1.2.3] - 2026-10-02
+## [1.2.4] - 2026-10-02
+
+### Changed
+
+- Made NewPipe stream extraction the primary player option, falling back to internal API extraction instead of the other way around.
 
 ### Fixed
 

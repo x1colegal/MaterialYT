@@ -86,6 +86,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.google.android.exoplayer2.ExoPlayer
@@ -1155,28 +1156,28 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         selected = stream
     }
     LaunchedEffect(item.id, codec, preferredAudioCodec, quality) {
-        val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(item.id) } }
-        extracted.onSuccess { result ->
-            audioTracks = result.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
-            audio = selectAudioStream(audioTracks, preferredAudioCodec)
-            streams = result.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }
-                .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-            selectVideoStream(streams, codec, quality)?.let(::play)
-        }.onFailure { error = it.message }
         val infoResult = runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo("https://www.youtube.com/watch?v=${item.id}") } }
         infoResult.onSuccess { 
             shortInfo = it 
-            if (streams.isEmpty()) {
-                audioTracks = it.audioStreams.map { track ->
-                    val trackName = track.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: track.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
-                    val original = track.audioTrackType?.name?.contains("ORIGINAL", true) == true || trackName.contains("original", true)
-                    PlayerChoice(track.content, track.codec.orEmpty(), 0, 0, track.bitrate, false, trackName, track.audioTrackId.orEmpty(), original)
-                }
-                audio = selectAudioStream(audioTracks, preferredAudioCodec)
-                streams = it.videoOnlyStreams.map { v -> PlayerChoice(v.content, v.codec.orEmpty(), v.height, v.fps, v.bitrate, true) }
-                    .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { s -> s.height }
-                selectVideoStream(streams, codec, quality)?.let { stream -> play(stream); error = null }
+            audioTracks = it.audioStreams.map { track ->
+                val trackName = track.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: track.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
+                val original = track.audioTrackType?.name?.contains("ORIGINAL", true) == true || trackName.contains("original", true)
+                PlayerChoice(track.content, track.codec.orEmpty(), 0, 0, track.bitrate, false, trackName, track.audioTrackId.orEmpty(), original)
             }
+            audio = selectAudioStream(audioTracks, preferredAudioCodec)
+            streams = it.videoOnlyStreams.map { v -> PlayerChoice(v.content, v.codec.orEmpty(), v.height, v.fps, v.bitrate, true) }
+                .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { s -> s.height }
+            selectVideoStream(streams, codec, quality)?.let { stream -> play(stream); error = null }
+        }.onFailure { error = it.message }
+        if (streams.isEmpty()) {
+            val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(item.id) } }
+            extracted.onSuccess { result ->
+                audioTracks = result.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
+                audio = selectAudioStream(audioTracks, preferredAudioCodec)
+                streams = result.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }
+                    .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
+            }.onFailure { if (streams.isEmpty()) error = it.message }
         }
     }
     LaunchedEffect(active) { if (active) player.play() else player.pause() }
@@ -1474,15 +1475,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     LaunchedEffect(url, codec, audioCodec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
         player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; error = null
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
-            audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
-            selectedAudio = selectAudioStream(audioStreams, audioCodec)
-            availableStreams = extracted.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-            selectVideoStream(availableStreams, codec, quality)?.let { play(it) }
-        }.onFailure { e ->
-            AppLog.failure("player repository streams video=$videoId", e)
-            if (availableStreams.isEmpty()) error = e.message
-        }
         runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo(url) } }.onSuccess { stream ->
             info = stream
             val newPipeAudio = stream.audioStreams.filter { it.content.startsWith("http") }.map {
@@ -1490,18 +1482,25 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
                 PlayerChoice(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, false, name, it.audioTrackId.orEmpty(), original)
             }
-            audioStreams = (audioStreams + newPipeAudio).distinctBy { "${it.audioTrackId}-${it.codec}-${it.bitrate}" }
-            if (selectedAudio == null || newPipeAudio.any { it.originalAudio }) {
-                selectedAudio = selectAudioStream(audioStreams, audioCodec)
-            }
-            if (availableStreams.isEmpty()) {
-                val fallbackVideo = (stream.videoOnlyStreams + stream.videoStreams).filter { it.content.startsWith("http") }
-                availableStreams = fallbackVideo.map { PlayerChoice(it.content, it.codec, it.height, it.fps, it.bitrate, it.isVideoOnly) }
-                    .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
-            }
+            audioStreams = newPipeAudio
+            selectedAudio = selectAudioStream(audioStreams, audioCodec)
+            val fallbackVideo = (stream.videoOnlyStreams + stream.videoStreams).filter { it.content.startsWith("http") }
+            availableStreams = fallbackVideo.map { PlayerChoice(it.content, it.codec, it.height, it.fps, it.bitrate, it.isVideoOnly) }
+                .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+            selectVideoStream(availableStreams, codec, quality)?.let { chosen -> play(chosen) }
         }.onFailure {
-            if (availableStreams.isEmpty() && error == null) error = it.message
+            error = it.message
+        }
+        if (availableStreams.isEmpty()) {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
+                audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
+                selectedAudio = selectAudioStream(audioStreams, audioCodec)
+                availableStreams = extracted.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
+            }.onFailure { e ->
+                AppLog.failure("player repository streams video=$videoId", e)
+                if (availableStreams.isEmpty()) error = e.message
+            }
         }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelInfo(videoId) } }.onSuccess { channelInfo = it }

@@ -278,6 +278,11 @@ object YouTubeRepository {
         var finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         var firstError = response.optJSONObject("playabilityStatus")?.optString("reason").takeUnless { it.isNullOrBlank() } ?: finalStatus
         if (finalStatus != "OK") {
+            response = runCatching { mwebPlayer(videoId) }.getOrDefault(JSONObject())
+            clientUsed = "MWEB"
+            finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        }
+        if (finalStatus != "OK") {
             response = runCatching { iosPlayer(videoId) }.getOrDefault(JSONObject())
             clientUsed = "IOS"
             finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
@@ -394,6 +399,42 @@ object YouTubeRepository {
 
     private fun visionOsPlayer(videoId: String): JSONObject {
         return mobilePlayer(videoId, "VISIONOS", "1.02", "101", "RealityDevice14,1", "visionOS", "25.6.0.23O471")
+    }
+
+    private fun mwebPlayer(videoId: String): JSONObject {
+        val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
+        val clientContext = JSONObject()
+            .put("clientName", "MWEB").put("clientVersion", "2.20240901.00.00")
+            .put("deviceModel", "Pixel 8 Pro").put("osName", "Android")
+            .put("osVersion", "14").put("platform", "MOBILE")
+            .put("clientScreen", "WATCH").put("hl", "en").put("gl", "US")
+            .apply { visitorData["https://www.youtube.com"]?.let { put("visitorData", it) } }
+        val body = JSONObject().put("context", JSONObject().put("client", clientContext))
+            .put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true)
+            .put("cpn", cpn)
+        val request = Request.Builder().url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false&id=$videoId")
+            .header("User-Agent", UA).header("Content-Type", "application/json")
+            .header("X-Youtube-Client-Name", "2").header("X-Youtube-Client-Version", "2.20240901.00.00")
+            .apply {
+                val accountOrigin = "https://www.youtube.com"
+                val accountCookies = cookies(accountOrigin)
+                if (accountCookies.isNotBlank()) header("Cookie", accountCookies)
+                authorization(accountOrigin)?.let { header("Authorization", it) }
+                header("Origin", accountOrigin)
+                header("X-Origin", accountOrigin)
+                header("X-Goog-AuthUser", "0")
+                header("X-Youtube-Bootstrap-Logged-In", signedIn().toString())
+                visitorData[accountOrigin]?.let { header("X-Goog-Visitor-Id", it) }
+            }
+            .post(body.toString().toRequestBody(jsonType)).build()
+        return client.newCall(request).execute().use {
+            val raw = it.body?.string().orEmpty()
+            if (!it.isSuccessful) {
+                val detail = runCatching { JSONObject(raw).optJSONObject("error")?.optString("message") }.getOrNull().orEmpty()
+                error("YouTube player returned HTTP ${it.code}${if (detail.isBlank()) "" else ": $detail"}")
+            }
+            JSONObject(raw).put("_materialytCpn", cpn)
+        }
     }
 
     private fun iosPlayer(videoId: String): JSONObject {

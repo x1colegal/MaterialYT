@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.3.7] - 2026-10-02
+
+### Fixed
+- Fixed `VISIONOS player response is not valid` by adding authenticated `MWEB` player client to the player stream pipeline.
+- Completely removed GitHub Actions CI workflow files.
+
 ## [1.3.6] - 2026-10-02
 
 ### Fixed

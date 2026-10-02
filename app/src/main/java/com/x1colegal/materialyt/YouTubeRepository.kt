@@ -15,7 +15,7 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
-data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false)
+data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "")
 data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "")
 data class ChannelInfo(val name: String, val thumbnail: String)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
@@ -79,19 +79,62 @@ object YouTubeRepository {
         return result.distinctBy { it.id }.also { AppLog.event("shorts reel items=${it.size}") }
     }
 
+    private data class ShortsMetadata(val title: String, val channel: String, val avatar: String, val channelUrl: String)
+
+    private fun findShortsMetadata(json: Any?): ShortsMetadata? {
+        var title = ""
+        var channel = ""
+        var avatar = ""
+        var channelUrl = ""
+        fun walk(value: Any?) {
+            when (value) {
+                is JSONObject -> {
+                    if (title.isBlank()) {
+                        value.optJSONObject("videoTitleHeaderViewModel")?.optJSONObject("videoTitle")?.optString("content")?.takeIf { it.isNotBlank() }?.let { title = it }
+                            ?: value.optJSONObject("pageHeaderViewModel")?.optJSONObject("title")?.optJSONObject("dynamicTextViewModel")?.optJSONObject("text")?.optString("content")?.takeIf { it.isNotBlank() }?.let { title = it }
+                    }
+                    value.optJSONObject("videoDescriptionHeaderRenderer")?.let { desc ->
+                        if (channel.isBlank()) desc.optJSONObject("channel")?.optString("simpleText")?.takeIf { it.isNotBlank() }?.let { channel = it }
+                        if (avatar.isBlank()) findThumbnail(desc.optJSONObject("channelThumbnail"))?.let { avatar = it }
+                        if (channelUrl.isBlank()) {
+                            val ep = desc.optJSONObject("channelNavigationEndpoint")?.optJSONObject("browseEndpoint")
+                            val cu = ep?.optString("canonicalBaseUrl").orEmpty().ifBlank { ep?.optString("browseId").orEmpty() }
+                            if (cu.isNotBlank()) channelUrl = if (cu.startsWith("http")) cu else "https://www.youtube.com${if (cu.startsWith("/")) "" else "/"}$cu"
+                        }
+                    }
+                    value.keys().forEach { k -> walk(value.opt(k)) }
+                }
+                is JSONArray -> for (i in 0 until value.length()) walk(value.opt(i))
+            }
+        }
+        walk(json)
+        return if (title.isNotBlank() || channel.isNotBlank()) ShortsMetadata(title, channel, avatar, channelUrl) else null
+    }
+
     private fun reelFeedItem(response: JSONObject, fallbackWatch: JSONObject? = null): FeedItem? {
         val watch = response.optJSONObject("replacementEndpoint")?.optJSONObject("reelWatchEndpoint") ?: fallbackWatch ?: return null
         val videoId = watch.optString("videoId").takeIf { it.length == 11 } ?: return null
         val header = response.optJSONObject("overlay")?.optJSONObject("reelPlayerOverlayRenderer")
             ?.optJSONObject("reelPlayerHeaderSupportedRenderers")?.optJSONObject("reelPlayerHeaderRenderer")
-        val title = header?.let { text(it.opt("reelTitleText")) }
+        var title = header?.let { text(it.opt("reelTitleText")) }
             ?: header?.let { text(it.optJSONObject("reelTitleOnClickCommand")?.opt("title")) }
-            ?: deepText(response.opt("engagementPanels"), "title") ?: "Short"
-        val channel = header?.let { text(it.opt("channelTitleText")) }
-            ?: deepText(response.opt("engagementPanels"), "channelName") ?: "YouTube"
+            ?: ""
+        var channel = header?.let { text(it.opt("channelTitleText")) } ?: ""
+        var channelThumbnail = header?.let { findThumbnail(it.opt("channelThumbnail")) }.orEmpty()
+        var channelUrl = ""
+
+        val meta = findShortsMetadata(response)
+        if (meta != null) {
+            if (title.isBlank()) title = meta.title
+            if (channel.isBlank()) channel = meta.channel
+            if (channelThumbnail.isBlank()) channelThumbnail = meta.avatar
+            if (channelUrl.isBlank()) channelUrl = meta.channelUrl
+        }
+        if (title.isBlank()) title = "Short"
+        if (channel.isBlank()) channel = "YouTube"
+
         val thumbnail = findThumbnail(watch.opt("thumbnail")) ?: "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
-        val channelThumbnail = header?.let { findThumbnail(it.opt("channelThumbnail")) }.orEmpty()
-        return FeedItem(videoId, title, channel, thumbnail, 9, 16, channelThumbnail, "https://www.youtube.com/shorts/$videoId")
+        return FeedItem(videoId, title, channel, thumbnail, 9, 16, channelThumbnail, "https://www.youtube.com/shorts/$videoId", channelUrl = channelUrl)
     }
     fun history(): List<FeedItem> = feed("history", "https://www.youtube.com/feed/history")
     fun ownChannelUrl(): String {

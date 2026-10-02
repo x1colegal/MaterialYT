@@ -31,6 +31,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.core.app.NotificationCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
@@ -190,7 +193,8 @@ class MainActivity : ComponentActivity() {
     private var player: ExoPlayer? = null
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
-    private var fullscreenEnabled = false
+    var isFullscreen by mutableStateOf(false)
+        private set
     var pipMode by mutableStateOf(false)
         private set
     private val pipReceiver = object : BroadcastReceiver() {
@@ -225,19 +229,21 @@ class MainActivity : ComponentActivity() {
     fun stopMusicNotification() { getSystemService(NotificationManager::class.java).cancel(72) }
 
     fun fullscreen(enabled: Boolean) {
-        fullscreenEnabled = enabled
+        isFullscreen = enabled
         requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         applyFullscreenState()
     }
 
     private fun applyFullscreenState() {
-        if (Build.VERSION.SDK_INT >= 30) window.insetsController?.let { controller ->
-            if (fullscreenEnabled) {
-                controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-            } else controller.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        if (isFullscreen) {
+            insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
         }
-        window.decorView.systemUiVisibility = if (fullscreenEnabled) {
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = if (isFullscreen) {
             View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
                 View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
         } else View.SYSTEM_UI_FLAG_VISIBLE
@@ -245,7 +251,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && fullscreenEnabled && !pipMode) applyFullscreenState()
+        if (hasFocus && isFullscreen && !pipMode) applyFullscreenState()
     }
 
     fun pip() {
@@ -285,6 +291,14 @@ class MainActivity : ComponentActivity() {
     }
 
     fun immersive(enabled: Boolean) {
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        if (enabled) {
+            insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
+        }
+        @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = if (enabled) View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY else View.SYSTEM_UI_FLAG_VISIBLE
     }
 
@@ -361,6 +375,7 @@ private fun AppScaffold(
     var tab by remember { mutableIntStateOf(0) }
     var authenticated by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     var playerMode by remember { mutableStateOf(false) }
+    val hideNavigation = playerMode || activity.isFullscreen
     val tabs = buildList {
         add("Home" to Icons.Default.OndemandVideo)
         add("Shorts" to Icons.Default.SmartDisplay)
@@ -369,7 +384,8 @@ private fun AppScaffold(
         add("Account" to Icons.Default.AccountCircle)
     }
     val content: @Composable (PaddingValues) -> Unit = { padding ->
-        Box(Modifier.padding(padding).fillMaxSize()) {
+        val effectivePadding = if (activity.isFullscreen) PaddingValues(0.dp) else padding
+        Box(Modifier.padding(effectivePadding).fillMaxSize()) {
             when (tabs.getOrNull(tab)?.first) {
                 "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }) { tab = tabs.indexOfFirst { it.first == "Account" } }
                 "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer) { playerMode = it }
@@ -382,16 +398,16 @@ private fun AppScaffold(
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     if (tablet) {
         Row(Modifier.fillMaxSize()) {
-            if (!playerMode) NavigationRail {
+            if (!hideNavigation) NavigationRail {
                 Spacer(Modifier.weight(1f))
                 tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
                 Spacer(Modifier.weight(1f))
             }
-            Scaffold(Modifier.weight(1f), bottomBar = { if (!playerMode) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } } }, content = content)
+            Scaffold(Modifier.weight(1f), bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } } }, content = content)
         }
     } else {
         Scaffold(bottomBar = {
-            if (!playerMode) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) } } }
+            if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) } } }
         }, content = content)
     }
 }
@@ -821,6 +837,7 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
 
 @Composable
 private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
     var channel by remember { mutableStateOf<org.schabi.newpipe.extractor.channel.ChannelInfo?>(null) }
     var channelItems by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
     var selected by remember { mutableStateOf<String?>(null) }
@@ -832,7 +849,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         loaded to items
     } }.onSuccess { (loaded, items) -> channel = loaded; channelItems = items }.onFailure { error = it.message } }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Channel", style = MaterialTheme.typography.headlineMedium) }
+        Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } }
         if (channel == null && error == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
         channel?.let { data ->
@@ -851,6 +868,11 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
 private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit) {
     var shorts by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
+    var channelUrl by remember { mutableStateOf<String?>(null) }
+    if (channelUrl != null) {
+        ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }
+        return
+    }
     LaunchedEffect(Unit) {
         onPlayerMode(false)
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.shorts() } }
@@ -865,13 +887,13 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
     }
     val pager = rememberPagerState(pageCount = { shorts.size })
     VerticalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
-        ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, audioCodec, quality, onPlayer)
+        ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, audioCodec, quality, onPlayer) { channelUrl = it }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit) {
+private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onOpenChannel: (String) -> Unit) {
     val context = LocalContext.current
     val player = remember(item.id) { bufferedPlayer(context).also(onPlayer) }
     var streams by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
@@ -933,10 +955,20 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             error?.let { Text(it, color = ComposeColor.White, modifier = Modifier.align(Alignment.Center).background(ComposeColor.Black.copy(alpha = .7f)).padding(16.dp)) }
             Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Bottom) {
                 Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                val target = item.channelUrl.ifBlank { shortInfo?.uploaderUrl.orEmpty() }
+                                if (target.isNotBlank()) onOpenChannel(target)
+                            }
+                            .padding(vertical = 4.dp, horizontal = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         val shortAvatar = shortInfo?.uploaderAvatars?.lastOrNull()?.url ?: item.channelThumbnail
                         if (shortAvatar.isNotBlank()) AsyncImage(shortAvatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                        Spacer(Modifier.width(10.dp)); Text(shortInfo?.uploaderName?.takeIf { it.isNotBlank() } ?: item.subtitle.ifBlank { "YouTube" }, color = ComposeColor.White, style = MaterialTheme.typography.titleSmall, maxLines = 1)
+                        Spacer(Modifier.width(10.dp))
+                        Text(shortInfo?.uploaderName?.takeIf { it.isNotBlank() } ?: item.subtitle.ifBlank { "YouTube" }, color = ComposeColor.White, style = MaterialTheme.typography.titleSmall, maxLines = 1)
                     }
                     Spacer(Modifier.height(10.dp))
                     Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, modifier = Modifier.clickable { expandedTitle = true })

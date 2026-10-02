@@ -1626,7 +1626,14 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
             }.onFailure {
-                if (availableStreams.isEmpty()) error = it.message
+                if (availableStreams.isEmpty()) {
+                    val msg = it.message.orEmpty()
+                    error = if (msg.contains("VISIONOS", true) || msg.contains("bot", true)) {
+                        "Proteção contra bots do YouTube: Faça login na aba Account para assistir."
+                    } else {
+                        msg
+                    }
+                }
             }
         }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }

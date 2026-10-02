@@ -2,6 +2,27 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.2.0] - 2026-10-01
+
+### Added
+
+- Native Shorts player with vertical paging, responsive tablet centering, live decoder settings, and audio codec preference options.
+- Embedded `yt-dlp/ejs` signature deciphering solver (`solveSig`) for videos with protected signature ciphers (e.g. kids channels and restricted content).
+- Multi-client player fallback chain (`VISIONOS` -> `IOS` -> `ANDROID`) and ExoPlayer automatic stream fallback on HTTP 403 or data source errors.
+- Tablet 2-column layout for YouTube Music (cover art & playback controls on left, synchronized lyrics on right) and 2-column layout for standard video player (player & metadata on left, comments on right).
+- Responsive 2-column grid for tablet Music track lists and left-aligned Material 3 `NavigationRail`.
+
+### Changed
+
+- Stream resolution now drops base URLs without valid deobfuscated signatures instead of failing with HTTP 403 Forbidden.
+- Media playback requests now provide standard web browser User-Agent, Origin, and Referer headers to ensure CDN compatibility.
+
+### Fixed
+
+- Fixed Shorts audio defaulting to OPUS regardless of user MP4A / AAC codec selection.
+- Fixed HTTP 403 playback errors on signature-ciphered videos.
+- Fixed UI layout clipping on small screens in the YouTube Music player.
+
 ## [1.1.0] - 2026-09-29
 
 ### Added

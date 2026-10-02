@@ -29,6 +29,7 @@ object YouTubeRepository {
     private val bootstrapCache = mutableMapOf<String, Pair<Long, Bootstrap>>()
     private val playerJavaScriptCache = mutableMapOf<String, String>()
     private val nChallengeCache = mutableMapOf<String, String>()
+    private val sigChallengeCache = mutableMapOf<String, String>()
     private data class PlaybackTracking(
         val playbackUrl: String,
         val watchtimeUrl: String,
@@ -193,6 +194,10 @@ object YouTubeRepository {
             response = iosPlayer(videoId)
             clientUsed = "IOS"
         }
+        if (response.optJSONObject("playabilityStatus")?.optString("status") != "OK") {
+            response = androidPlayer(videoId)
+            clientUsed = "ANDROID"
+        }
         val finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
         if (finalStatus != "OK") error(response.optJSONObject("playabilityStatus")?.optString("reason").takeUnless { it.isNullOrBlank() } ?: finalStatus)
@@ -214,13 +219,18 @@ object YouTubeRepository {
             val rawUrl = item.optString("url").takeIf { it.startsWith("http") } ?: run {
                 val cipher = item.optString("signatureCipher").split('&').mapNotNull { part -> part.split('=', limit = 2).takeIf { it.size == 2 }?.let { java.net.URLDecoder.decode(it[0], "UTF-8") to java.net.URLDecoder.decode(it[1], "UTF-8") } }.toMap()
                 val baseUrl = cipher["url"] ?: return@run null
-                val signature = cipher["s"]?.takeIf { it.isNotBlank() }?.let {
-                    YoutubeJavaScriptPlayerManager.deobfuscateSignature(videoId, it)
+                val encryptedSig = cipher["s"]?.takeIf { it.isNotBlank() } ?: return@run null
+                val signature = runCatching {
+                    YoutubeJavaScriptPlayerManager.deobfuscateSignature(videoId, encryptedSig)
+                }.getOrNull()?.takeIf { it.isNotBlank() } ?: runCatching {
+                    solveSigChallenge(videoId, encryptedSig)
+                }.getOrNull()?.takeIf { it.isNotBlank() }
+                if (signature == null) {
+                    AppLog.event("player signature decipher failed video=$videoId")
+                    return@run null
                 }
-                if (signature == null) baseUrl else {
-                    val separator = if ('?' in baseUrl) '&' else '?'
-                    "$baseUrl$separator${cipher["sp"] ?: "signature"}=${java.net.URLEncoder.encode(signature, "UTF-8")}"
-                }
+                val separator = if ('?' in baseUrl) '&' else '?'
+                "$baseUrl$separator${cipher["sp"] ?: "signature"}=${java.net.URLEncoder.encode(signature, "UTF-8")}"
             } ?: return@mapNotNull null
             val urlWithCpn = if (cpn.isBlank() || "cpn=" in rawUrl) rawUrl else "$rawUrl&cpn=$cpn"
             val streamUrl = runCatching {
@@ -259,6 +269,23 @@ object YouTubeRepository {
         }
         check(solved.isNotBlank() && solved != challenge) { "EJS returned an unchanged n challenge" }
         return parsed.newBuilder().setQueryParameter("n", solved).build().toString()
+    }
+
+    private fun solveSigChallenge(videoId: String, challenge: String): String {
+        val solved = synchronized(sigChallengeCache) { sigChallengeCache[challenge] } ?: run {
+            val watchHtml = get("https://www.youtube.com/watch?v=$videoId")
+            val encodedPlayerUrl = Regex("\\\"(?:jsUrl|PLAYER_JS_URL)\\\":\\\"([^\\\"]+)").find(watchHtml)?.groupValues?.get(1)
+                ?: error("YouTube did not expose its player JavaScript URL")
+            val playerPath = JSONObject("{\"value\":\"$encodedPlayerUrl\"}").getString("value")
+            val playerUrl = if (playerPath.startsWith("http")) playerPath else "https://www.youtube.com$playerPath"
+            val playerJavaScript = synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] }
+                ?: get(playerUrl).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
+            EjsChallengeSolver.solveSig(playerJavaScript, challenge).also { result ->
+                synchronized(sigChallengeCache) { sigChallengeCache[challenge] = result }
+            }
+        }
+        check(solved.isNotBlank() && solved != challenge) { "EJS returned an unchanged sig challenge" }
+        return solved
     }
 
     fun reportPlayback(videoId: String, fromMs: Long, toMs: Long) {
@@ -309,6 +336,10 @@ object YouTubeRepository {
 
     private fun iosPlayer(videoId: String): JSONObject {
         return mobilePlayer(videoId, "IOS", "21.03.2", "5", "iPhone16,2", "iOS", "18.7.2.22H124")
+    }
+
+    private fun androidPlayer(videoId: String): JSONObject {
+        return mobilePlayer(videoId, "ANDROID", "19.29.37", "3", "Pixel 8 Pro", "Android", "14")
     }
 
     private fun mobilePlayer(videoId: String, name: String, version: String, id: String, model: String, os: String, osVersion: String): JSONObject {
@@ -416,7 +447,9 @@ object YouTubeRepository {
     }
 
     fun mediaHeaders(): Map<String, String> = buildMap {
-        put("User-Agent", "com.google.ios.youtube/1.02 (iPhone; U; CPU iOS 25_6_0 like Mac OS X)")
+        put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+        put("Origin", "https://www.youtube.com")
+        put("Referer", "https://www.youtube.com/")
     }
 
     fun postComment(videoId: String, text: String) {

@@ -3,7 +3,7 @@
 [![Android 5.0+](https://img.shields.io/badge/Android-5.0%2B-3DDC84?logo=android&logoColor=white)](https://developer.android.com/)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.2-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/)
 [![Material 3](https://img.shields.io/badge/UI-Material_3-6750A4)](https://m3.material.io/)
-[![Release](https://img.shields.io/badge/release-1.1.0-FF0033)](https://github.com/x1colegal/MaterialYT/releases)
+[![Release](https://img.shields.io/badge/release-1.2.0-FF0033)](https://github.com/x1colegal/MaterialYT/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 MaterialYT is an independent native YouTube and YouTube Music client for Android. It combines a responsive Material 3 interface, NewPipe Extractor, authenticated internal YouTube responses, OkHttp, and ExoPlayer without requiring a YouTube Data API key.
@@ -15,19 +15,20 @@ MaterialYT is an independent native YouTube and YouTube Music client for Android
 
 - 📱 Android 5.0+ (`minSdk 21`) with legacy launcher icons and Android 8.0+ adaptive icons
 - 🏠 Native personalized Home and History feeds with channels, thumbnails, and comments
+- ⚡ Vertical Shorts player with live decoder options, audio codec controls, and tablet centering
 - 🎵 Native YouTube Music feed, search, playback, real artwork proportions, and timed lyrics
 - 🚘 Android Auto music browsing and playback through the media browser service
 - 🔎 Native YouTube search powered by NewPipe Extractor
 - ▶️ ExoPlayer video and music players with seeking, playback speed, fullscreen, and Android 8.0+ PiP
 - 🪟 Automatic PiP when leaving the app while a video is playing
 - 🎞️ H.264, HEVC, AV1, and VP9 preferences with quality, FPS, and bitrate details
-- ⚡ Fast-start playback with a large forward buffer and no automatic quality switching
+- ⚡ Fast-start playback with a large forward buffer, automatic 403 fallback, and signature cipher solving
 - 💬 Native comment reading and signed-in comment posting
 - 👤 Google sign-in used by the internal backend for personalized feeds, playback history, and comments
 - 🔄 Manual refresh actions for Home, History, and YT Music
 - 🎨 System, Light, Dark, and OLED Pure Black themes
 - 🌈 Strong Purple, YouTube Red, Bright Blue, Blue Cyan, Green, Orange, Pink, and Teal palettes
-- 📐 Bottom navigation on phones and a right-side navigation rail on tablets
+- 📐 Responsive tablet layouts: 2-column video & music players, 2-column music grid, and left-side navigation rail
 - 🌐 Selectable HTTP/1.0 compatibility, HTTP/1.1, and HTTP/2 backend modes
 
 ## 🧱 Technology
@@ -91,11 +92,12 @@ The generated debug APK is located at `app/build/outputs/apk/debug/app-debug.apk
 
 ```text
 app/src/main/java/com/x1colegal/materialyt/
-├── AutoMusicService.kt  # Android Auto music catalog and transport controls
-├── HttpBackend.kt       # Authenticated OkHttp backend for NewPipe Extractor
-├── MainActivity.kt      # Compose feeds, players, lyrics, account, and settings
-├── MaterialYtApp.kt     # Application and extractor initialization
-└── YouTubeRepository.kt # Home, History, Music, streams, and comments
+├── AutoMusicService.kt   # Android Auto music catalog and transport controls
+├── EjsChallengeSolver.kt # Embedded JavaScript challenge & signature cipher solver
+├── HttpBackend.kt        # Authenticated OkHttp backend for NewPipe Extractor
+├── MainActivity.kt       # Compose feeds, players, lyrics, account, and settings
+├── MaterialYtApp.kt      # Application and extractor initialization
+└── YouTubeRepository.kt  # Home, History, Music, streams, and comments
 ```
 
 ## ⚠️ Platform notes

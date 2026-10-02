@@ -55,6 +55,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 .putExtra("thumbnailHeight", track.thumbnailHeight).putExtra("codec", codec.name)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
         }
+        fun pause() { instance?.player?.let { if (it.isPlaying) it.pause() } }
         fun toggle() { instance?.player?.let { if (it.isPlaying) it.pause() else it.play() } }
         fun seekTo(value: Long) { instance?.player?.seekTo(value) }
         fun close() { instance?.stopPlayback() }

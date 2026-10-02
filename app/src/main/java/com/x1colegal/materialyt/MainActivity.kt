@@ -206,6 +206,14 @@ enum class AppColor(val title: String, val seed: Long) {
     BROWN("Cocoa", 0xFF805610), MAGENTA("Magenta", 0xFF9C3D88), SLATE("Slate", 0xFF526070)
 }
 
+
+object GlobalPlayerState {
+    var activeVideoUrl by mutableStateOf<String?>(null)
+    var videoMinimized by mutableStateOf(false)
+    var activeShortsUrl by mutableStateOf<String?>(null)
+    var shortsMinimized by mutableStateOf(false)
+}
+
 class MainActivity : ComponentActivity() {
     companion object { private const val ACTION_PIP_TOGGLE = "com.x1colegal.materialyt.PIP_TOGGLE" }
     private var player: ExoPlayer? = null
@@ -316,6 +324,14 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus && isFullscreen && !pipMode) applyFullscreenState()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!pipMode && !getSharedPreferences("settings", 0).getBoolean("background_play", false)) {
+            player?.pause()
+            AutoMusicService.pause()
+        }
     }
 
     fun pip() {
@@ -452,7 +468,7 @@ private fun AppScaffold(
         Box(Modifier.padding(effectivePadding).fillMaxSize()) {
             when (tabs.getOrNull(tab)?.first) {
                 "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }) { tab = tabs.indexOfFirst { it.first == "Account" } }
-                "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer) { playerMode = it }
+                "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer, onPlayerMode = { playerMode = it })
                 "YT Music" -> MusicScreen(activity, audioCodec, onPlayer) { playerMode = it }
                 "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, loader = { YouTubeRepository.history() })
                 else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, decoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onDecoderMode, onPlayer) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
@@ -460,19 +476,28 @@ private fun AppScaffold(
         }
     }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-    if (tablet) {
-        Row(Modifier.fillMaxSize()) {
-            if (!hideNavigation) NavigationRail {
-                Spacer(Modifier.weight(1f))
-                tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
-                Spacer(Modifier.weight(1f))
+    Box(Modifier.fillMaxSize()) {
+        if (tablet) {
+            Row(Modifier.fillMaxSize()) {
+                if (!hideNavigation) NavigationRail {
+                    Spacer(Modifier.weight(1f))
+                    tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
+                    Spacer(Modifier.weight(1f))
+                }
+                Scaffold(Modifier.weight(1f), bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } } }, content = content)
             }
-            Scaffold(Modifier.weight(1f), bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } } }, content = content)
+        } else {
+            Scaffold(bottomBar = {
+                if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
+            }, content = content)
         }
-    } else {
-        Scaffold(bottomBar = {
-            if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
-        }, content = content)
+        
+        if (GlobalPlayerState.activeVideoUrl != null) {
+            VideoScreen(activity, GlobalPlayerState.activeVideoUrl!!, codec, audioCodec, quality, onPlayer, minimized = GlobalPlayerState.videoMinimized, onMinimize = { GlobalPlayerState.videoMinimized = true; playerMode = false }, onMaximize = { GlobalPlayerState.videoMinimized = false; playerMode = true }, onClose = { GlobalPlayerState.activeVideoUrl = null; GlobalPlayerState.videoMinimized = false; playerMode = false })
+        }
+        if (GlobalPlayerState.activeShortsUrl != null) {
+            ShortsScreen(activity, codec, audioCodec, quality, onPlayer, onPlayerMode = { playerMode = it }, minimized = GlobalPlayerState.shortsMinimized, onMinimize = { GlobalPlayerState.shortsMinimized = true; playerMode = false }, onMaximize = { GlobalPlayerState.shortsMinimized = false; playerMode = true }, onClose = { GlobalPlayerState.activeShortsUrl = null; GlobalPlayerState.shortsMinimized = false; playerMode = false }, url = GlobalPlayerState.activeShortsUrl)
+        }
     }
 }
 
@@ -521,8 +546,11 @@ private fun MiniPlayer(openMusic: () -> Unit) {
                     Text(track.title, maxLines = 1, style = MaterialTheme.typography.titleSmall)
                     Text(track.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall)
                 }
-                IconButton(onClick = { AutoMusicService.toggle() }) {
+                                IconButton(onClick = { AutoMusicService.toggle() }) {
                     Icon(if (AutoMusicService.playing.value) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause")
+                }
+                IconButton(onClick = { AutoMusicService.close() }) {
+                    Icon(Icons.Default.Close, "Close")
                 }
             }
         }
@@ -538,29 +566,10 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var results by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
     var homeFeed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
-    var selected by remember { mutableStateOf<String?>(null) }
-    var selectedPlaylist by remember { mutableStateOf<String?>(null) }
+        var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var selectedResult by remember { mutableStateOf<InfoItem?>(null) }
-    LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    if (selected != null) {
-        VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = {
-            selected = null
-            query = ""
-            results = emptyList()
-            if (homeFeed.isNotEmpty()) {
-                feed = homeFeed
-            } else if (YouTubeRepository.signedIn()) {
-                scope.launch {
-                    loading = true
-                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
-                        .onSuccess { homeFeed = it; feed = it }
-                    loading = false
-                }
-            }
-        })
-        return
-    }
+    
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
     selectedResult?.let { item ->
@@ -614,14 +623,14 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
-                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> { GlobalPlayerState.activeVideoUrl = item.url; GlobalPlayerState.videoMinimized = false } } } } }
                 }
             } else {
                 LazyColumn {
                     if (results.isNotEmpty()) item { Text("Channels and playlists", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
                     items(results) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item { Text("Videos", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
-                    items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
+                    items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> { GlobalPlayerState.activeVideoUrl = item.url; GlobalPlayerState.videoMinimized = false } } } }
                 }
             }
         }
@@ -631,14 +640,12 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
 @Composable
 private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, onBack: (() -> Unit)? = null, loader: () -> List<FeedItem>) {
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
-    var selected by remember { mutableStateOf<String?>(null) }
-    var selectedPlaylist by remember { mutableStateOf<String?>(null) }
+        var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
-    LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    if (selected != null) { VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = { selected = null }); return }
+        
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
@@ -650,10 +657,10 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet) {
             LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp)) {
-                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> { GlobalPlayerState.activeVideoUrl = item.url; GlobalPlayerState.videoMinimized = false } } } } }
             }
         } else {
-            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> { GlobalPlayerState.activeVideoUrl = item.url; GlobalPlayerState.videoMinimized = false } } } } }
         }
     }
 }
@@ -666,8 +673,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     var selected by remember { mutableStateOf<FeedItem?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
+        if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
     fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { block() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
     LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
     Column(Modifier.fillMaxSize()) {
@@ -774,7 +780,19 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             }
         }
     }
-    if (showSettings) AlertDialog(onDismissRequest = { showSettings = false }, confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } }, title = { Text("Audio settings") }, text = { Column { Text("Original audio is used by default. Selecting a codec restarts this track with the best available matching stream."); Spacer(Modifier.height(12.dp)); AudioCodecChoice.entries.forEach { choice -> FilterChip(selectedCodec == choice, { selectedCodec = choice }, { Text(choice.label) }) } } })
+    if (showSettings) {
+        androidx.compose.material3.ModalBottomSheet(onDismissRequest = { showSettings = false }) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).navigationBarsPadding()) {
+                Text("Audio codec", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 16.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(AudioCodecChoice.entries) { choice ->
+                        FilterChip(selectedCodec == choice, { selectedCodec = choice; showSettings = false }, { Text(choice.label) })
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+        }
+    }
 }
 
 @Composable
@@ -1110,9 +1128,8 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
     BackHandler(onBack = onBack)
     var channel by remember { mutableStateOf<org.schabi.newpipe.extractor.channel.ChannelInfo?>(null) }
     var channelItems by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
-    var selected by remember { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    if (selected != null) { VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer) { selected = null }; return }
+        var error by remember { mutableStateOf<String?>(null) }
+    
     LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) {
         val loaded = org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url)
         val items = loaded.tabs.firstOrNull()?.let { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getInfo(NewPipe.getService(0), it).relatedItems }.orEmpty()
@@ -1129,13 +1146,13 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                 if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(data.description.orEmpty(), maxLines = 5, style = MaterialTheme.typography.bodyMedium)
             }
-            LazyColumn { items(channelItems) { item -> ResultRow(item, showSubtitle = false) { if (item.infoType == InfoItem.InfoType.STREAM) selected = item.url } } }
+            LazyColumn { items(channelItems) { item -> ResultRow(item, showSubtitle = false) { if (item.infoType == InfoItem.InfoType.STREAM) { GlobalPlayerState.activeVideoUrl = item.url; GlobalPlayerState.videoMinimized = false } } } }
         }
     }
 }
 
 @Composable
-private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit) {
+private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, minimized: Boolean = false, onMinimize: () -> Unit = {}, onMaximize: () -> Unit = {}, onClose: () -> Unit = {}, url: String? = null) {
     var shorts by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
@@ -1155,7 +1172,34 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
         }
         return
     }
+    BackHandler {
+        if (!minimized) onMinimize()
+        else { onClose(); activity.videoPlayerActive(false) }
+    }
     val pager = rememberPagerState(pageCount = { shorts.size })
+    if (minimized) {
+        Box(Modifier.fillMaxSize()) {
+            var downwardDrag by remember { mutableFloatStateOf(0f) }
+            val animatedOffset by animateFloatAsState(targetValue = downwardDrag.coerceAtLeast(0f), animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+            Surface(Modifier.align(Alignment.BottomCenter).padding(bottom = if (LocalConfiguration.current.smallestScreenWidthDp >= 600) 0.dp else 80.dp).fillMaxWidth().height(96.dp).offset { IntOffset(0, animatedOffset.roundToInt()) }.graphicsLayer { alpha = (1f - (animatedOffset / 100f)).coerceIn(0f, 1f) }.pointerInput(Unit) { detectVerticalDragGestures(onDragStart = { downwardDrag = 0f }, onVerticalDrag = { change, amount -> change.consume(); downwardDrag += amount }, onDragEnd = { if (downwardDrag > 48f) { onClose(); activity.videoPlayerActive(false) }; downwardDrag = 0f }, onDragCancel = { downwardDrag = 0f }) }.clickable { onMaximize() }, tonalElevation = 6.dp) {
+                val currentShort = shorts.getOrNull(pager.currentPage)
+                Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    currentShort?.let { track ->
+                        AsyncImage(track.thumbnail, null, Modifier.width(60.dp).fillMaxHeight().clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(track.title, maxLines = 1, style = MaterialTheme.typography.titleSmall)
+                            Text(track.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    IconButton(onClick = { onClose(); activity.videoPlayerActive(false) }) {
+                        Icon(Icons.Default.Close, "Close")
+                    }
+                }
+            }
+        }
+        return
+    }
     VerticalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
         ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, audioCodec, quality, onPlayer) { channelUrl = it }
     }
@@ -1385,7 +1429,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 }
 
 @Composable
-private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onBack: () -> Unit) {
+private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, minimized: Boolean = false, onMinimize: () -> Unit = {}, onMaximize: () -> Unit = {}, onClose: () -> Unit = {}) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var info by remember { mutableStateOf<StreamInfo?>(null) }
@@ -1553,6 +1597,37 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
     }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    if (minimized) {
+        Box(Modifier.fillMaxSize()) {
+            var downwardDrag by remember { mutableFloatStateOf(0f) }
+            val animatedOffset by animateFloatAsState(targetValue = downwardDrag.coerceAtLeast(0f), animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+            Surface(Modifier.align(Alignment.BottomCenter).padding(bottom = if (LocalConfiguration.current.smallestScreenWidthDp >= 600) 0.dp else 80.dp).fillMaxWidth().height(96.dp).offset { IntOffset(0, animatedOffset.roundToInt()) }.graphicsLayer { alpha = (1f - (animatedOffset / 100f)).coerceIn(0f, 1f) }.pointerInput(Unit) { detectVerticalDragGestures(onDragStart = { downwardDrag = 0f }, onVerticalDrag = { change, amount -> change.consume(); downwardDrag += amount }, onDragEnd = { if (downwardDrag > 48f) { onClose(); activity.videoPlayerActive(false) }; downwardDrag = 0f }, onDragCancel = { downwardDrag = 0f }) }.clickable { onMaximize() }, tonalElevation = 6.dp) {
+                Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AndroidView({ PlayerView(it).apply { this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER); currentPlayerView = this; activity.visiblePlayerView(this) } }, Modifier.width(130.dp).fillMaxHeight().clip(RoundedCornerShape(8.dp)), update = { currentPlayerView = it; it.useController = false; it.hideController(); activity.visiblePlayerView(it) })
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(info?.name ?: "Video", maxLines = 1, style = MaterialTheme.typography.titleSmall)
+                        Text(info?.uploaderName ?: "", maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                    }
+                    var playing by remember { mutableStateOf(player.isPlaying) }
+                    DisposableEffect(player) {
+                        val listener = object : Player.Listener {
+                            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+                        }
+                        player.addListener(listener)
+                        onDispose { player.removeListener(listener) }
+                    }
+                    IconButton(onClick = { if (playing) player.pause() else player.play() }) {
+                        Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause")
+                    }
+                    IconButton(onClick = { onClose(); activity.videoPlayerActive(false) }) {
+                        Icon(Icons.Default.Close, "Close")
+                    }
+                }
+            }
+        }
+        return
+    }
     if (activity.pipMode) {
         AndroidView(
             factory = { PlayerView(it).apply { this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER); currentPlayerView = this; activity.visiblePlayerView(this) } },
@@ -1585,7 +1660,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
                 }
                 Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
+                    IconButton(onClick = onMinimize) { Icon(Icons.Default.ArrowBack, "Back") }
                     Spacer(Modifier.weight(1f))
                     IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
                     IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
@@ -1632,7 +1707,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
             }
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
+                IconButton(onClick = onMinimize) { Icon(Icons.Default.ArrowBack, "Back") }
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
                 IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }

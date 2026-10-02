@@ -560,23 +560,25 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var selectedResult by remember { mutableStateOf<InfoItem?>(null) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    if (selected != null) {
-        VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = {
-            selected = null
-            query = ""
-            results = emptyList()
-            if (homeFeed.isNotEmpty()) {
-                feed = homeFeed
-            } else if (YouTubeRepository.signedIn()) {
-                scope.launch {
-                    loading = true
-                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
-                        .onSuccess { homeFeed = it; feed = it }
-                    loading = false
+    // Render selected video on top of feed so miniplayer has feed content underneath
+    val videoOverlay: @Composable () -> Unit = {
+        if (selected != null) {
+            VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = {
+                selected = null
+                query = ""
+                results = emptyList()
+                if (homeFeed.isNotEmpty()) {
+                    feed = homeFeed
+                } else if (YouTubeRepository.signedIn()) {
+                    scope.launch {
+                        loading = true
+                        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
+                            .onSuccess { homeFeed = it; feed = it }
+                        loading = false
+                    }
                 }
-            }
-        })
-        return
+            })
+        }
     }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
@@ -595,7 +597,8 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             loading = false
         }
     }
-    Column(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             val keyboardController = LocalSoftwareKeyboardController.current
             val focusManager = LocalFocusManager.current
@@ -670,6 +673,8 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 }
             }
         }
+        }
+        videoOverlay()
     }
 }
 
@@ -683,11 +688,12 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    if (selected != null) { VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = { selected = null }); return }
+    val videoOverlay: @Composable () -> Unit = { if (selected != null) VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = { selected = null }) }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
-    Column(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } else Icon(icon, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(8.dp)); Text(title, Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); IconButton(onClick = { refreshKey++ }) { Icon(Icons.Default.Refresh, "Refresh") } }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
@@ -700,6 +706,8 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         } else {
             LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
         }
+        }
+        videoOverlay()
     }
 }
 
@@ -1643,22 +1651,21 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
 
     if (isMinimized) {
-        val miniOffset = if (tablet) 0.dp else 80.dp
-        Box(Modifier.fillMaxSize()) {
-            var downwardDrag by remember { mutableFloatStateOf(0f) }
-            val animatedOffset by animateFloatAsState(
-                targetValue = downwardDrag.coerceAtLeast(0f),
-                animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                label = "video_mini_drag"
-            )
-            val miniAlpha = (1f - (animatedOffset / 100f)).coerceIn(0f, 1f)
+        val miniBottomPadding = if (tablet) 0.dp else 80.dp
+        var downwardDrag by remember { mutableFloatStateOf(0f) }
+        val animatedOffset by animateFloatAsState(
+            targetValue = downwardDrag.coerceAtLeast(0f),
+            animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+            label = "video_mini_drag"
+        )
+        val miniAlpha = (1f - (animatedOffset / 100f)).coerceIn(0f, 1f)
 
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
             Surface(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = miniOffset)
+                    .padding(bottom = miniBottomPadding)
                     .fillMaxWidth()
-                    .height(72.dp)
+                    .height(66.dp)
                     .offset { IntOffset(0, animatedOffset.roundToInt()) }
                     .graphicsLayer { alpha = miniAlpha }
                     .pointerInput(Unit) {
@@ -1679,18 +1686,13 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         )
                     }
                     .clickable { isMinimized = false },
-                tonalElevation = 8.dp,
-                shadowElevation = 8.dp
+                tonalElevation = 6.dp
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .width(108.dp)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(6.dp))
+                            .size(50.dp)
+                            .clip(RoundedCornerShape(8.dp))
                             .background(ComposeColor.Black)
                     ) {
                         AndroidView(
@@ -1698,7 +1700,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                 PlayerView(it).apply {
                                     this.player = player
                                     useController = false
-                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                                     setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
                                     currentPlayerView = this
                                     activity.visiblePlayerView(this)
@@ -1713,10 +1715,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             }
                         )
                     }
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
+                    Column(Modifier.padding(horizontal = 10.dp).weight(1f)) {
                         Text(info?.name ?: "Video", maxLines = 1, style = MaterialTheme.typography.titleSmall)
-                        Text(info?.uploaderName ?: "", maxLines = 1, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(info?.uploaderName ?: "", maxLines = 1, style = MaterialTheme.typography.bodySmall)
                     }
                     var playing by remember { mutableStateOf(player.isPlaying) }
                     DisposableEffect(player) {

@@ -106,8 +106,8 @@ All notable changes to MaterialYT are documented in this file.
 - System, Light, Dark, and OLED Pure Black themes.
 - Twelve selectable Material color palettes with responsive single-line controls.
 - Android 5.0+ support.
-## [1.3.2] - 2026-10-02
+## [1.3.3] - 2026-10-02
 
-### Added
-- Working in-app Video Miniplayer: Pressing back or the back arrow in video playback minimizes the video into a bottom miniplayer with live video playback, play/pause controls, and an 'X' button to dismiss. Clicking it restores the full video player.
-- Ensured background playback strictly adheres to the 'Continue Playing while not in PiP or app in foreground' setting by pausing both active ExoPlayer instances and AutoMusicService immediately on app backgrounding if disabled.
+### Fixed
+- Fixed black screen behind minimized video player by retaining the underlying feed layout when video is minimized.
+- Styled video miniplayer to exactly match YT Music MiniPlayer dimensions (66dp height, 50dp rounded thumbnail box, and matching tonal elevations).

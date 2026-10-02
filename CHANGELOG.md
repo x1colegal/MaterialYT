@@ -106,3 +106,11 @@ All notable changes to MaterialYT are documented in this file.
 - System, Light, Dark, and OLED Pure Black themes.
 - Twelve selectable Material color palettes with responsive single-line controls.
 - Android 5.0+ support.
+## [1.2.9] - 2026-10-02
+### Added
+- In-App Picture-in-Picture (PiP) for Videos and Shorts. Navigate away and the video keeps playing in a miniplayer!
+- "Continue playing in background" setting in Account screen (default: off). Controls whether audio keeps playing when the app goes to the background.
+- "X" (Close) button to the YT Music miniplayer.
+
+### Changed
+- Replaced the YT Music Audio Settings dialog with a ModalBottomSheet (matches Video and Shorts settings).

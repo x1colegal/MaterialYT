@@ -35,6 +35,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private lateinit var player: ExoPlayer
     private var tracks = emptyList<FeedItem>()
     private var currentTrack: FeedItem? = null
+    private var currentArtwork: android.graphics.Bitmap? = null
 
     companion object {
         const val CHANNEL_ID = "materialyt_playback"
@@ -149,6 +150,16 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         scope.launch {
             currentTrack = track
             nowPlaying.value = track
+            currentArtwork = runCatching {
+                withContext(Dispatchers.IO) {
+                    if (track.thumbnail.isNotBlank()) {
+                        val conn = java.net.URL(track.thumbnail).openConnection()
+                        conn.connectTimeout = 5000
+                        conn.readTimeout = 5000
+                        android.graphics.BitmapFactory.decodeStream(conn.getInputStream())
+                    } else null
+                }
+            }.getOrNull()
             publishMetadata()
             startForeground(NOTIFICATION_ID, notification())
             val audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
@@ -164,22 +175,30 @@ class AutoMusicService : MediaBrowserServiceCompat() {
 
     private fun publishMetadata() {
         val track = currentTrack ?: return
-        session.setMetadata(MediaMetadataCompat.Builder().putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, track.id)
+        val builder = MediaMetadataCompat.Builder().putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, track.id)
             .putString(MediaMetadataCompat.METADATA_KEY_TITLE, track.title).putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, track.title)
             .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, track.subtitle).putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, track.subtitle)
             .putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, track.thumbnail).putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON_URI, track.thumbnail)
-            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, player.duration.coerceAtLeast(0L)).build())
+            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, player.duration.coerceAtLeast(0L))
+        currentArtwork?.let {
+            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it)
+            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, it)
+            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, it)
+        }
+        session.setMetadata(builder.build())
     }
 
     private fun notification(): android.app.Notification {
         val track = currentTrack
         val launch = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
-        return NotificationCompat.Builder(this, CHANNEL_ID).setSmallIcon(R.drawable.ic_notification)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID).setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(track?.title ?: "MaterialYT").setContentText(track?.subtitle ?: "Loading music…")
             .setContentIntent(launch).setOnlyAlertOnce(true).setOngoing(player.isPlaying)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-            .setStyle(MediaStyle().setMediaSession(session.sessionToken)).build()
+            .setStyle(MediaStyle().setMediaSession(session.sessionToken))
+        currentArtwork?.let { builder.setLargeIcon(it) }
+        return builder.build()
     }
 
     private fun publishState() {
@@ -196,7 +215,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     private fun stopPlayback() {
-        player.stop(); currentTrack = null; nowPlaying.value = null; playing.value = false
+        player.stop(); currentTrack = null; currentArtwork = null; nowPlaying.value = null; playing.value = false
         stopForeground(true); getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
     }
 

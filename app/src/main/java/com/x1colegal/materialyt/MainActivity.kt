@@ -37,8 +37,18 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -215,18 +225,64 @@ class MainActivity : ComponentActivity() {
         setContent { MaterialYtRoot(this) { player = it } }
     }
 
-    fun showMusicNotification(session: MediaSessionCompat, track: FeedItem, playing: Boolean) {
+    private val artworkCache = mutableMapOf<String, android.graphics.Bitmap>()
+    private val playbackNotificationScope = kotlinx.coroutines.CoroutineScope(Dispatchers.Main + kotlinx.coroutines.SupervisorJob())
+
+    fun showPlaybackNotification(session: MediaSessionCompat, title: String, subtitle: String, thumbnailUrl: String?, playing: Boolean) {
         val channelId = "materialyt_app_playback"
         val manager = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(channelId, "Music playback", NotificationManager.IMPORTANCE_LOW))
+        if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(channelId, "Playback", NotificationManager.IMPORTANCE_LOW))
         val launch = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
-        manager.notify(72, NotificationCompat.Builder(this, channelId).setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(track.title).setContentText(track.subtitle).setContentIntent(launch).setOnlyAlertOnce(true)
-            .setOngoing(playing).setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-            .setStyle(MediaStyle().setMediaSession(session.sessionToken)).build())
+
+        fun notifyWithBitmap(bitmap: android.graphics.Bitmap?) {
+            val builder = NotificationCompat.Builder(this, channelId).setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(title).setContentText(subtitle).setContentIntent(launch).setOnlyAlertOnce(true)
+                .setOngoing(playing).setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+                .setStyle(MediaStyle().setMediaSession(session.sessionToken))
+            val metaBuilder = MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, subtitle)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, subtitle)
+            if (bitmap != null) {
+                builder.setLargeIcon(bitmap)
+                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
+                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, bitmap)
+                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, bitmap)
+            }
+            if (!thumbnailUrl.isNullOrBlank()) {
+                metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, thumbnailUrl)
+                metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON_URI, thumbnailUrl)
+            }
+            session.setMetadata(metaBuilder.build())
+            manager.notify(72, builder.build())
+        }
+
+        val cached = thumbnailUrl?.let { artworkCache[it] }
+        notifyWithBitmap(cached)
+        if (cached == null && !thumbnailUrl.isNullOrBlank()) {
+            playbackNotificationScope.launch {
+                val loaded = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val conn = java.net.URL(thumbnailUrl).openConnection()
+                        conn.connectTimeout = 5000
+                        conn.readTimeout = 5000
+                        android.graphics.BitmapFactory.decodeStream(conn.getInputStream())
+                    }.getOrNull()
+                }
+                if (loaded != null) {
+                    artworkCache[thumbnailUrl] = loaded
+                    notifyWithBitmap(loaded)
+                }
+            }
+        }
     }
 
-    fun stopMusicNotification() { getSystemService(NotificationManager::class.java).cancel(72) }
+    fun stopPlaybackNotification() { getSystemService(NotificationManager::class.java).cancel(72) }
+    fun showMusicNotification(session: MediaSessionCompat, track: FeedItem, playing: Boolean) {
+        showPlaybackNotification(session, track.title, track.subtitle, track.thumbnail, playing)
+    }
+    fun stopMusicNotification() { stopPlaybackNotification() }
 
     fun fullscreen(enabled: Boolean) {
         isFullscreen = enabled
@@ -416,14 +472,51 @@ private fun AppScaffold(
 private fun MiniPlayer(openMusic: () -> Unit) {
     val track = AutoMusicService.nowPlaying.value ?: return
     var downwardDrag by remember { mutableFloatStateOf(0f) }
-    Surface(Modifier.fillMaxWidth().height(66.dp).pointerInput(track.id) { detectVerticalDragGestures(
-        onDragStart = { downwardDrag = 0f }, onVerticalDrag = { change, amount -> change.consume(); downwardDrag += amount },
-        onDragEnd = { if (downwardDrag > 48f) AutoMusicService.close(); downwardDrag = 0f }, onDragCancel = { downwardDrag = 0f }
-    ) }.clickable(onClick = openMusic), tonalElevation = 6.dp) {
-        Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            AsyncImage(track.thumbnail, null, Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
-            Column(Modifier.padding(horizontal = 10.dp).weight(1f)) { Text(track.title, maxLines = 1, style = MaterialTheme.typography.titleSmall); Text(track.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall) }
-            IconButton(onClick = { AutoMusicService.toggle() }) { Icon(if (AutoMusicService.playing.value) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause") }
+    val animatedOffset by animateFloatAsState(
+        targetValue = downwardDrag.coerceAtLeast(0f),
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "miniplayer_drag"
+    )
+    val alpha = (1f - (animatedOffset / 100f)).coerceIn(0f, 1f)
+
+    AnimatedVisibility(
+        visible = true,
+        enter = slideInVertically { it } + fadeIn(),
+        exit = slideOutVertically { it } + fadeOut()
+    ) {
+        Surface(
+            Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(0, animatedOffset.roundToInt()) }
+                .graphicsLayer { this.alpha = alpha }
+                .height(66.dp)
+                .pointerInput(track.id) {
+                    detectVerticalDragGestures(
+                        onDragStart = { downwardDrag = 0f },
+                        onVerticalDrag = { change, amount ->
+                            change.consume()
+                            downwardDrag += amount
+                        },
+                        onDragEnd = {
+                            if (downwardDrag > 48f) AutoMusicService.close()
+                            downwardDrag = 0f
+                        },
+                        onDragCancel = { downwardDrag = 0f }
+                    )
+                }
+                .clickable(onClick = openMusic),
+            tonalElevation = 6.dp
+        ) {
+            Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                AsyncImage(track.thumbnail, null, Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
+                Column(Modifier.padding(horizontal = 10.dp).weight(1f)) {
+                    Text(track.title, maxLines = 1, style = MaterialTheme.typography.titleSmall)
+                    Text(track.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                }
+                IconButton(onClick = { AutoMusicService.toggle() }) {
+                    Icon(if (AutoMusicService.playing.value) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause")
+                }
+            }
         }
     }
 }
@@ -435,6 +528,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var results by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
+    var homeFeed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selected by remember { mutableStateOf<String?>(null) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
@@ -442,7 +536,21 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var selectedResult by remember { mutableStateOf<InfoItem?>(null) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     if (selected != null) {
-        VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = { selected = null })
+        VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onBack = {
+            selected = null
+            query = ""
+            results = emptyList()
+            if (homeFeed.isNotEmpty()) {
+                feed = homeFeed
+            } else if (YouTubeRepository.signedIn()) {
+                scope.launch {
+                    loading = true
+                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
+                        .onSuccess { homeFeed = it; feed = it }
+                    loading = false
+                }
+            }
+        })
         return
     }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
@@ -456,9 +564,9 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         return
     }
     LaunchedEffect(Unit) {
-        if (YouTubeRepository.signedIn()) {
+        if (YouTubeRepository.signedIn() && homeFeed.isEmpty()) {
             loading = true
-            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }.onSuccess { homeFeed = it; if (query.isBlank()) feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
             loading = false
         }
     }
@@ -478,7 +586,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 scope.launch {
                     loading = true; error = null; results = emptyList()
                     runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
-                        .onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+                        .onSuccess { homeFeed = it; feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
                     loading = false
                 }
             }) { Icon(Icons.Default.Refresh, "Refresh") }
@@ -792,10 +900,13 @@ private fun TopicChips(labels: List<String>) {
 }
 
 @Composable
-private fun ResultRow(item: InfoItem, click: () -> Unit) {
+private fun ResultRow(item: InfoItem, showSubtitle: Boolean = true, click: () -> Unit) {
     Row(Modifier.fillMaxWidth().clickable(onClick = click).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
         AsyncImage(item.thumbnails.firstOrNull()?.url, null, Modifier.size(132.dp, 76.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
-        Column(Modifier.padding(start = 12.dp)) { Text(item.name, style = MaterialTheme.typography.titleSmall); Text(item.infoType.name.lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodySmall) }
+        Column(Modifier.padding(start = 12.dp)) {
+            Text(item.name, style = MaterialTheme.typography.titleSmall)
+            if (showSubtitle) Text(item.infoType.name.lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 
@@ -859,7 +970,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                 if (data.subscriberCount >= 0) Text("${data.subscriberCount} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(data.description.orEmpty(), maxLines = 5, style = MaterialTheme.typography.bodyMedium)
             }
-            LazyColumn { items(channelItems) { item -> ResultRow(item) { if (item.infoType == InfoItem.InfoType.STREAM) selected = item.url } } }
+            LazyColumn { items(channelItems) { item -> ResultRow(item, showSubtitle = false) { if (item.infoType == InfoItem.InfoType.STREAM) selected = item.url } } }
         }
     }
 }
@@ -895,7 +1006,7 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
 @Composable
 private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onOpenChannel: (String) -> Unit) {
     val context = LocalContext.current
-    val player = remember(item.id) { bufferedPlayer(context).also(onPlayer) }
+    val player = remember(item.id) { bufferedPlayer(context).apply { repeatMode = Player.REPEAT_MODE_ONE }.also(onPlayer) }
     var streams by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var selected by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
     var audio by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
@@ -909,6 +1020,9 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var comments by remember(item.id) { mutableStateOf<List<CommentsInfoItem>>(emptyList()) }
     var commentsLoading by remember { mutableStateOf(false) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
+    var showPlayPauseIndicator by remember { mutableStateOf(false) }
+    var lastActionWasPlay by remember { mutableStateOf(false) }
+    var indicatorKey by remember { mutableIntStateOf(0) }
 
     fun play(stream: PlayerChoice) {
         val video = ProgressiveMediaSource.Factory(videoDataSourceFactory()).createMediaSource(MediaItem.fromUri(stream.url))
@@ -942,16 +1056,79 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             }
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, player) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE || event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                player.pause()
+            } else if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && active) {
+                player.play()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        val playbackListener = object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_ENDED) {
+                    player.seekTo(0L)
+                    player.play()
+                }
+            }
+        }
+        player.addListener(playbackListener)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            player.removeListener(playbackListener)
+            player.pause()
+            player.stop()
+            player.release()
+        }
+    }
 
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     Box(Modifier.fillMaxSize().background(ComposeColor.Black), contentAlignment = Alignment.Center) {
         Box(Modifier.fillMaxHeight().then(if (tablet) Modifier.widthIn(max = 480.dp).aspectRatio(9f / 16f) else Modifier.fillMaxWidth())) {
             AndroidView(factory = { PlayerView(it).apply {
-                this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); hideController()
             } }, update = { it.useController = false; it.hideController() }, modifier = Modifier.fillMaxSize())
-            Box(Modifier.fillMaxSize().clickable { if (player.isPlaying) player.pause() else player.play() })
+            Box(Modifier.fillMaxSize().clickable {
+                if (player.isPlaying) {
+                    player.pause()
+                    lastActionWasPlay = false
+                } else {
+                    player.play()
+                    lastActionWasPlay = true
+                }
+                indicatorKey++
+                showPlayPauseIndicator = true
+            })
+            LaunchedEffect(indicatorKey) {
+                if (indicatorKey > 0) {
+                    delay(650)
+                    showPlayPauseIndicator = false
+                }
+            }
+            AnimatedVisibility(
+                visible = showPlayPauseIndicator,
+                enter = scaleIn(initialScale = 0.5f) + fadeIn(),
+                exit = scaleOut(targetScale = 1.3f) + fadeOut(),
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = ComposeColor.Black.copy(alpha = 0.6f),
+                    modifier = Modifier.size(72.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = if (lastActionWasPlay) Icons.Default.PlayArrow else Icons.Default.Pause,
+                            contentDescription = null,
+                            tint = ComposeColor.White,
+                            modifier = Modifier.size(44.dp)
+                        )
+                    }
+                }
+            }
             error?.let { Text(it, color = ComposeColor.White, modifier = Modifier.align(Alignment.Center).background(ComposeColor.Black.copy(alpha = .7f)).padding(16.dp)) }
             Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Bottom) {
                 Column(Modifier.weight(1f)) {
@@ -1084,11 +1261,42 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position); player.setPlaybackSpeed(speed); player.playWhenReady = true
         selectedStream = stream
     }
+    val mediaSession = remember { MediaSessionCompat(context, "MaterialYT Video") }
+    LaunchedEffect(info, channelInfo) {
+        if (info != null) {
+            val title = info?.name ?: "Video"
+            val author = info?.uploaderName ?: channelInfo?.name ?: ""
+            val thumb = info?.thumbnails?.lastOrNull()?.url
+            activity.showPlaybackNotification(mediaSession, title, author, thumb, player.isPlaying)
+        }
+    }
     DisposableEffect(Unit) {
         activity.videoPlayerActive(true)
+        mediaSession.setCallback(object : MediaSessionCompat.Callback() {
+            override fun onPlay() = player.play()
+            override fun onPause() = player.pause()
+            override fun onStop() = player.stop()
+            override fun onSeekTo(pos: Long) = player.seekTo(pos)
+        })
+        mediaSession.isActive = true
         val listener = object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) { playbackState = state; if (state == Player.STATE_ENDED && playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1) }
-            override fun onIsPlayingChanged(isPlaying: Boolean) { activity.updatePipAction() }
+            override fun onPlaybackStateChanged(state: Int) {
+                playbackState = state
+                if (state == Player.STATE_ENDED && playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1)
+                mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
+                    .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO)
+                    .setState(if (player.isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED, player.currentPosition.coerceAtLeast(0L), if (player.isPlaying) 1f else 0f).build())
+            }
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                activity.updatePipAction()
+                val title = info?.name ?: "Video"
+                val author = info?.uploaderName ?: channelInfo?.name ?: ""
+                val thumb = info?.thumbnails?.lastOrNull()?.url
+                activity.showPlaybackNotification(mediaSession, title, author, thumb, isPlaying)
+                mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
+                    .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO)
+                    .setState(if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED, player.currentPosition.coerceAtLeast(0L), if (isPlaying) 1f else 0f).build())
+            }
             override fun onPlayerError(cause: PlaybackException) {
                 Log.e("MaterialYT", "video player ${cause.errorCodeName}", cause)
                 val is403 = cause.cause is HttpDataSource.InvalidResponseCodeException
@@ -1106,7 +1314,16 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
         }
         player.addListener(listener)
-        onDispose { activity.fullscreen(false); activity.videoPlayerActive(false); activity.visiblePlayerView(null); player.removeListener(listener); player.release() }
+        onDispose {
+            activity.stopPlaybackNotification()
+            mediaSession.isActive = false
+            mediaSession.release()
+            activity.fullscreen(false)
+            activity.videoPlayerActive(false)
+            activity.visiblePlayerView(null)
+            player.removeListener(listener)
+            player.release()
+        }
     }
     BackHandler(fullscreen) { fullscreen = false; activity.fullscreen(false) }
     LaunchedEffect(player) {

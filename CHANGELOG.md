@@ -2,6 +2,14 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.2.3] - 2026-10-02
+
+### Fixed
+
+- Fixed Shorts playback failing silently when internal YouTube players fail due to bot attestation. Shorts now fall back to NewPipe stream extraction just like standard videos.
+- Decreased the font size of the `NavigationBar` items so they don't clip off the bottom edge of the screen.
+- Fixed an issue where channel avatars in search results wouldn't load because they lacked an HTTP protocol prefix.
+
 ## [1.2.2] - 2026-10-02
 
 ### Fixed

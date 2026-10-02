@@ -465,7 +465,7 @@ private fun AppScaffold(
         }
     } else {
         Scaffold(bottomBar = {
-            if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) } } }
+            if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
         }, content = content)
     }
 }
@@ -1163,8 +1163,21 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
             selectVideoStream(streams, codec, quality)?.let(::play)
         }.onFailure { error = it.message }
-        runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo("https://www.youtube.com/watch?v=${item.id}") } }
-            .onSuccess { shortInfo = it }
+        val infoResult = runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo("https://www.youtube.com/watch?v=${item.id}") } }
+        infoResult.onSuccess { 
+            shortInfo = it 
+            if (streams.isEmpty()) {
+                audioTracks = it.audioStreams.map { track ->
+                    val trackName = track.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: track.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
+                    val original = track.audioTrackType?.name?.contains("ORIGINAL", true) == true || trackName.contains("original", true)
+                    PlayerChoice(track.content, track.codec.orEmpty(), 0, 0, track.bitrate, false, trackName, track.audioTrackId.orEmpty(), original)
+                }
+                audio = selectAudioStream(audioTracks, preferredAudioCodec)
+                streams = it.videoOnlyStreams.map { v -> PlayerChoice(v.content, v.codec.orEmpty(), v.height, v.fps, v.bitrate, true) }
+                    .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { s -> s.height }
+                selectVideoStream(streams, codec, quality)?.let { stream -> play(stream); error = null }
+            }
+        }
     }
     LaunchedEffect(active) { if (active) player.play() else player.pause() }
     LaunchedEffect(active, item.id) {

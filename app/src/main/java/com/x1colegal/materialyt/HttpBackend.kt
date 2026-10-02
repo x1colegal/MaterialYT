@@ -40,15 +40,42 @@ object HttpBackend : Downloader() {
             .readTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)
             .addInterceptor { chain ->
-                val builder = chain.request().newBuilder().header("User-Agent", "Mozilla/5.0 (Android) MaterialYT/1.0")
+                val req = chain.request()
+                val url = req.url.toString()
+                val builder = req.newBuilder()
+                val isYouTube = url.contains("youtube.com") || url.contains("googlevideo.com") || url.contains("youtubei")
+                if (req.header("User-Agent").isNullOrBlank()) {
+                    builder.header("User-Agent", if (isYouTube) YouTubeRepository.UA else "Mozilla/5.0 (Android) MaterialYT/1.0")
+                }
                 if (mode == Mode.HTTP_1_0) builder.header("Connection", "close")
                 chain.proceed(builder.build())
             }.build()
     }
 
     override fun execute(request: Request): Response {
-        val builder = okhttp3.Request.Builder().url(request.url())
+        val url = request.url()
+        val builder = okhttp3.Request.Builder().url(url)
         request.headers().forEach { (name, values) -> values.forEach { builder.addHeader(name, it) } }
+
+        val isYouTube = url.contains("youtube.com") || url.contains("googlevideo.com") || url.contains("youtubei")
+        if (isYouTube) {
+            val origin = if (url.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
+            val accountCookies = YouTubeRepository.cookies(origin)
+            if (accountCookies.isNotBlank()) {
+                val existingCookie = builder.build().header("Cookie")
+                val mergedCookie = if (existingCookie.isNullOrBlank()) accountCookies else "$existingCookie; $accountCookies"
+                builder.header("Cookie", mergedCookie)
+            }
+            YouTubeRepository.authorization(origin)?.let { builder.header("Authorization", it) }
+            builder.header("Origin", origin)
+            builder.header("X-Origin", origin)
+            builder.header("X-Goog-AuthUser", "0")
+            builder.header("X-Youtube-Bootstrap-Logged-In", YouTubeRepository.signedIn().toString())
+            if (builder.build().header("User-Agent").isNullOrBlank()) {
+                builder.header("User-Agent", YouTubeRepository.UA)
+            }
+        }
+
         val bytes = request.dataToSend()
         val body = bytes?.toRequestBody(builder.build().header("Content-Type")?.toMediaTypeOrNull())
         builder.method(request.httpMethod(), if (request.httpMethod() in listOf("GET", "HEAD")) null else body ?: ByteArray(0).toRequestBody())

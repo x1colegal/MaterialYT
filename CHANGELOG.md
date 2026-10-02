@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.3.6] - 2026-10-02
+
+### Fixed
+- Fixed bot attestation `LOGIN_REQUIRED: Sign-in to confirm you're not a robot` by injecting signed-in cookies, SAPISIDHASH authorization, and headers into all NewPipeExtractor HTTP requests.
+- Integrated NewPipeExtractor stream extraction as a fallback for `playerStreams` when mobile players encounter bot verification.
+- Fixed GitHub Actions CI build failure (`debug.keystore not found for signing config 'debug'`).
+
 ## [1.3.5] - 2026-10-02
 
 ### Fixed

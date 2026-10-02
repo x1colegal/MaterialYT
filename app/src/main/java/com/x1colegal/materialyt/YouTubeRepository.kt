@@ -21,7 +21,7 @@ data class ChannelInfo(val name: String, val thumbnail: String)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 
 object YouTubeRepository {
-    private const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
+    const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val clientVersions = mutableMapOf<String, String>()
@@ -288,7 +288,14 @@ object YouTubeRepository {
             finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         }
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
-        if (finalStatus != "OK") error(firstError)
+        if (finalStatus != "OK") {
+            val npStreams = runCatching { newPipeStreams(videoId) }.getOrNull()
+            if (!npStreams.isNullOrEmpty()) {
+                AppLog.event("player fallback to newPipeStreams video=$videoId streams=${npStreams.size}")
+                return npStreams
+            }
+            error(firstError)
+        }
         val cpn = response.optString("_materialytCpn")
         // The regular WEB tracking client is the path YouTube reliably commits to
         // the account's shared watch history, including music videos.
@@ -593,9 +600,9 @@ object YouTubeRepository {
         }
     }
 
-    private fun cookies(url: String): String = CookieManager.getInstance().getCookie(url).orEmpty()
+    fun cookies(url: String): String = CookieManager.getInstance().getCookie(url).orEmpty()
 
-    private fun authorization(origin: String): String? {
+    fun authorization(origin: String): String? {
         val all = cookies(origin).split(';').mapNotNull { p -> p.trim().split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } }.toMap()
         val time = System.currentTimeMillis() / 1000
         fun token(label: String, value: String): String {

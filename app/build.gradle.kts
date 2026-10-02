@@ -16,8 +16,8 @@ android {
         applicationId = "com.x1colegal.materialyt"
         minSdk = 21
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.2.7"
+        versionCode = 12
+        versionName = "1.2.8"
     }
     signingConfigs {
         getByName("debug") {
@@ -67,7 +67,7 @@ tasks.named("preBuild").configure { dependsOn(generateEjsAssets) }
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
 
 dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.2")
     // This Compose line retains Android 5.0 (API 21) support.
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
     implementation(composeBom)

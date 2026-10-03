@@ -412,14 +412,12 @@ object YouTubeRepository {
         return parsed.newBuilder().setQueryParameter("n", solved).build().toString()
     }
 
-fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false) {
+    fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false) {
         if (!signedIn() || toMs <= fromMs) return
         val tracking = synchronized(playbackTracking) { playbackTracking[videoId] } ?: return
         val first = synchronized(tracking) { if (!tracking.started) { tracking.started = true; true } else false }
-        val origin = "https://www.youtube.com"
-        val clientName = "IOS"
-        fun statsUrl(base: String, playback: Boolean): okhttp3.HttpUrl? = base.replace("https://s.youtube.com", origin)
-            .toHttpUrlOrNull()?.newBuilder()
+        val clientName = if (tracking.music) "WEB_REMIX" else "TVHTML5"
+        fun statsUrl(base: String, playback: Boolean): okhttp3.HttpUrl? = base.toHttpUrlOrNull()?.newBuilder()
             ?.setQueryParameter("ver", "2")
             ?.setQueryParameter("c", clientName)
             ?.setQueryParameter("cpn", tracking.cpn)
@@ -434,6 +432,7 @@ fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = 
                 }
             }?.build()
         fun send(url: okhttp3.HttpUrl) {
+            val origin = if (tracking.music) "https://music.youtube.com" else "https://www.youtube.com"
             val request = Request.Builder().url(url).apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }.build()
             client.newCall(request).execute().use { response ->
                 AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (paused) "paused" else "playing"} HTTP ${response.code}")
@@ -497,39 +496,18 @@ fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = 
         return mobilePlayer(videoId, "ANDROID", "20.05.35", "3", "Pixel 8 Pro", "Android", "14")
     }
 
-private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
-        val name = "IOS"
-        val version = "19.33.2"
-        val id = "5"
-        val model = "iPhone14,3"
-        val os = "iOS"
-        val osVersion = "16.2"
-        val ua = "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
-        val clientContext = JSONObject()
-            .put("clientName", name).put("clientVersion", version)
-            .put("deviceModel", model).put("osName", os)
-            .put("osVersion", osVersion).put("platform", "MOBILE")
-            .put("clientScreen", "WATCH").put("hl", "en").put("gl", "US")
-        val body = JSONObject().put("context", JSONObject().put("client", clientContext))
-            .put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true)
-            .put("cpn", cpn)
-        val request = Request.Builder().url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
-            .header("User-Agent", ua).header("Content-Type", "application/json")
-            .header("X-Youtube-Client-Name", id).header("X-Youtube-Client-Version", version)
-            .apply {
-                val accountOrigin = "https://www.youtube.com"
-                val accountCookies = cookies(accountOrigin)
-                val loggedIn = accountCookies.isNotBlank()
-                if (loggedIn) header("Cookie", accountCookies)
-                authorization(accountOrigin)?.let { header("Authorization", it) }
-                header("Origin", accountOrigin)
-                header("X-Origin", accountOrigin)
-                header("X-Goog-AuthUser", "0")
-                header("X-Youtube-Bootstrap-Logged-In", loggedIn.toString())
-                if (!loggedIn) visitorData[accountOrigin]?.let { header("X-Goog-Visitor-Id", it) }
-            }
-            .post(body.toString().toRequestBody(jsonType)).build()
-        val response = client.newCall(request).execute().use { JSONObject(it.body?.string().orEmpty()) }
+    private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
+        val origin = if (music) "https://music.youtube.com" else "https://www.youtube.com"
+        val clientName = if (music) "WEB_REMIX" else "TVHTML5"
+        val version = if (music) bootstrap(origin, clientName).version else "7.20240502.16.00"
+        val body = JSONObject().put("context", JSONObject().put("client", JSONObject()
+            .put("clientName", clientName).put("clientVersion", version)
+            .put("hl", "en").put("gl", "US").put("deviceMake", "LG").put("deviceModel", "42LA660S-ZA").put("userAgent", "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebkit/538.1 (KHTML, like Gecko) SamsungBrowser/1.1 TV Safari/538.1")
+        ))
+            .put("videoId", videoId).put("cpn", cpn)
+            .put("contentCheckOk", true).put("racyCheckOk", true)
+        val key = bootstrap(origin, clientName).key
+        val response = post("$origin/youtubei/v1/player?key=$key", body, origin)
         return response.optJSONObject("playbackTracking")
     }
 

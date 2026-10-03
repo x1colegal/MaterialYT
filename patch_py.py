@@ -3,7 +3,14 @@ with open('app/src/main/java/com/x1colegal/materialyt/YouTubeRepository.kt', 'r'
     content = f.read()
 
 content = re.sub(
-    r'    fun reportPlayback\(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false\) \{.*?\n    \}',
+    r'(?:    )*private fun authenticatedPlayerTracking\(videoId: String, cpn: String, music: Boolean\): JSONObject\? \{.*?\}',
+    open('patch_auth.txt').read().strip(),
+    content,
+    flags=re.DOTALL
+)
+
+content = re.sub(
+    r'(?:    )*fun reportPlayback\(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false\) \{.*?\}',
     open('patch_report.txt').read().strip(),
     content,
     flags=re.DOTALL

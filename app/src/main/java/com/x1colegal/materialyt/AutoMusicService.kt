@@ -95,8 +95,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 publishState()
                 val id = currentTrack?.id
                 if (!isPlaying && id != null) {
-                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                        val pos = player.currentPosition
+                    // ExoPlayer must only be read on its application looper. Capture the
+                    // position here, then move only the network report to the IO dispatcher.
+                    val pos = player.currentPosition.coerceAtLeast(0L)
+                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                         runCatching { YouTubeRepository.reportPlayback(id, maxOf(0, pos - 1000L), pos, paused = true) }
                     }
                 }

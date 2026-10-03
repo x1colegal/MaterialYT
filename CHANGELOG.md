@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.16] - 2026-10-03
+
+### Fixed
+- Fixed pausing YT Music terminating the app by keeping all ExoPlayer state reads on its application thread.
+- Moved only the paused watch-history network report to the IO dispatcher.
+
 ## [1.4.15] - 2026-10-03
 
 ### Fixed

@@ -2,13 +2,12 @@ with open('app/src/main/java/com/x1colegal/materialyt/YouTubeRepository.kt', 'r'
     lines = f.readlines()
 
 new_lines = []
-skip = False
 in_auth = False
 in_report = False
 brace_count = 0
 
 for line in lines:
-    if "private fun authenticatedPlayerTracking(" in line:
+    if "private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject?" in line:
         in_auth = True
         brace_count = line.count('{') - line.count('}')
         new_lines.append("""    private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
@@ -30,7 +29,7 @@ for line in lines:
             in_auth = False
         continue
 
-    if "fun reportPlayback(videoId: String," in line:
+    if "fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false) {" in line:
         in_report = True
         brace_count = line.count('{') - line.count('}')
         new_lines.append("""    fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false) {

@@ -296,6 +296,17 @@ object YouTubeRepository {
             finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         }
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
+
+        val cpn = response.optString("_materialytCpn").takeIf { it.isNotBlank() } ?: java.util.UUID.randomUUID().toString().replace("-", "").take(16)
+        val trackingAsMusic = false
+        val authenticatedTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, trackingAsMusic) }
+            .onFailure { AppLog.failure("authenticated tracking video=$videoId music=$music", it) }.getOrNull()
+        (authenticatedTracking ?: response.optJSONObject("playbackTracking"))?.let { tracking ->
+            val playback = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl").orEmpty()
+            val watchtime = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl").orEmpty()
+            if (playback.isNotBlank() && watchtime.isNotBlank()) synchronized(playbackTracking) { playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, trackingAsMusic) }
+        }
+
         if (finalStatus != "OK") {
             val npStreams = runCatching { newPipeStreams(videoId) }.getOrNull()
             if (!npStreams.isNullOrEmpty()) {
@@ -320,17 +331,6 @@ object YouTubeRepository {
                     durationSeconds = length
                 )
             }
-        }
-        val cpn = response.optString("_materialytCpn")
-        // The regular WEB tracking client is the path YouTube reliably commits to
-        // the account's shared watch history, including music videos.
-        val trackingAsMusic = false
-        val authenticatedTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, trackingAsMusic) }
-            .onFailure { AppLog.failure("authenticated tracking video=$videoId music=$music", it) }.getOrNull()
-        (authenticatedTracking ?: response.optJSONObject("playbackTracking"))?.let { tracking ->
-            val playback = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl").orEmpty()
-            val watchtime = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl").orEmpty()
-            if (playback.isNotBlank() && watchtime.isNotBlank()) synchronized(playbackTracking) { playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, trackingAsMusic) }
         }
         val data = response.optJSONObject("streamingData")
         if (data == null) {
@@ -416,7 +416,7 @@ object YouTubeRepository {
         if (!signedIn() || toMs <= fromMs) return
         val tracking = synchronized(playbackTracking) { playbackTracking[videoId] } ?: return
         val first = synchronized(tracking) { if (!tracking.started) { tracking.started = true; true } else false }
-        val clientName = if (tracking.music) "WEB_REMIX" else "TVHTML5"
+        val clientName = "WEB"
         fun statsUrl(base: String, playback: Boolean): okhttp3.HttpUrl? = base.toHttpUrlOrNull()?.newBuilder()
             ?.setQueryParameter("ver", "2")
             ?.setQueryParameter("c", clientName)
@@ -432,7 +432,7 @@ object YouTubeRepository {
                 }
             }?.build()
         fun send(url: okhttp3.HttpUrl) {
-            val origin = if (tracking.music) "https://music.youtube.com" else "https://www.youtube.com"
+            val origin = "https://www.youtube.com"
             val request = Request.Builder().url(url).apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }.build()
             client.newCall(request).execute().use { response ->
                 AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (paused) "paused" else "playing"} HTTP ${response.code}")
@@ -497,18 +497,13 @@ object YouTubeRepository {
     }
 
     private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
-        val origin = if (music) "https://music.youtube.com" else "https://www.youtube.com"
-        val clientName = if (music) "WEB_REMIX" else "TVHTML5"
-        val version = if (music) bootstrap(origin, clientName).version else "7.20240502.16.00"
-        val body = JSONObject().put("context", JSONObject().put("client", JSONObject()
-            .put("clientName", clientName).put("clientVersion", version)
-            .put("hl", "en").put("gl", "US").put("deviceMake", "LG").put("deviceModel", "42LA660S-ZA").put("userAgent", "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebkit/538.1 (KHTML, like Gecko) SamsungBrowser/1.1 TV Safari/538.1")
-        ))
-            .put("videoId", videoId).put("cpn", cpn)
-            .put("contentCheckOk", true).put("racyCheckOk", true)
-        val key = bootstrap(origin, clientName).key
-        val response = post("$origin/youtubei/v1/player?key=$key", body, origin)
-        return response.optJSONObject("playbackTracking")
+        val origin = "https://www.youtube.com"
+        val html = runCatching { get("$origin/watch?v=$videoId") }.getOrNull() ?: return null
+        val match = Regex("ytInitialPlayerResponse\\s*=\\s*(\\{.+?\\});").find(html)?.groupValues?.get(1) ?: return null
+        val response = runCatching { JSONObject(match) }.getOrNull() ?: return null
+        val tracking = response.optJSONObject("playbackTracking")
+        AppLog.event("tracking_fetch WEB_HTML video=$videoId tracking_found=${tracking != null}")
+        return tracking
     }
 
 

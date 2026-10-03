@@ -2,7 +2,7 @@
         if (!signedIn() || toMs <= fromMs) return
         val tracking = synchronized(playbackTracking) { playbackTracking[videoId] } ?: return
         val first = synchronized(tracking) { if (!tracking.started) { tracking.started = true; true } else false }
-        val clientName = "IOS"
+        val clientName = if (tracking.music) "WEB_REMIX" else "TVHTML5"
         fun statsUrl(base: String, playback: Boolean): okhttp3.HttpUrl? = base.toHttpUrlOrNull()?.newBuilder()
             ?.setQueryParameter("ver", "2")
             ?.setQueryParameter("c", clientName)
@@ -18,7 +18,7 @@
                 }
             }?.build()
         fun send(url: okhttp3.HttpUrl) {
-            val origin = "https://www.youtube.com" // we still pass this to authenticatedHeaders so it grabs cookies
+            val origin = if (tracking.music) "https://music.youtube.com" else "https://www.youtube.com"
             val request = Request.Builder().url(url).apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }.build()
             client.newCall(request).execute().use { response ->
                 AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (paused) "paused" else "playing"} HTTP ${response.code}")

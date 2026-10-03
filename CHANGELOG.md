@@ -2,6 +2,17 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.17] - 2026-10-03
+
+### Changed
+- Embedded the NewPipe Extractor source as a local Gradle module so YouTube extraction fixes can ship with MaterialYT.
+- Integrated WEB PoToken acquisition into NewPipe's player fallback for regular videos, Shorts, and YT Music.
+- Routed NewPipe adaptive stream URLs through MaterialYT's current EJS challenge solver.
+
+### Fixed
+- Fixed NewPipe playback failing while the WEB fallback still worked after YouTube requested bot verification.
+- Preserved adaptive qualities by applying both the streaming PoToken and resolved `n` parameter to extracted URLs.
+
 ## [1.4.16] - 2026-10-03
 
 ### Fixed

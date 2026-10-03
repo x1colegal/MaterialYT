@@ -113,7 +113,7 @@ Issues and pull requests are welcome. Keep source code, app text, documentation,
 
 ## 📄 License
 
-MaterialYT is released under the [MIT License](LICENSE). NewPipe Extractor and all other dependencies retain their respective licenses.
+MaterialYT's original source is released under the [MIT License](LICENSE). The embedded NewPipe Extractor module is licensed under [GPL-3.0-or-later](newpipe-extractor/LICENSE), and combined APK distributions are subject to the GPL terms. Other dependencies retain their respective licenses.
 
 ---
 

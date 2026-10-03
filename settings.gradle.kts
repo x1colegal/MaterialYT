@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral(); maven("https://jitpack.io") }
 }
 rootProject.name = "MaterialYT"
-include(":app")
+include(":app", ":newpipe-extractor")

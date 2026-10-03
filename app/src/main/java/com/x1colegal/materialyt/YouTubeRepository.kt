@@ -22,7 +22,6 @@ data class VideoDetails(val title: String, val author: String, val authorUrl: St
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 
 object YouTubeRepository {
-    private const val POTOKEN_WARMUP_VIDEO_ID = "jNQXAC9IVRw"
     const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
@@ -455,13 +454,10 @@ object YouTubeRepository {
             StreamInfo.getInfo(url)
         } catch (first: Throwable) {
             if (!isLoginRequired(first)) throw first
-            AppLog.event("NewPipe LOGIN_REQUIRED; warming WEB PoToken session video=$videoId")
+            AppLog.event("NewPipe LOGIN_REQUIRED; refreshing integrated PoToken video=$videoId")
             NewPipePoTokenProvider.reset()
-            runCatching { webPoPlayer(POTOKEN_WARMUP_VIDEO_ID) }
-                .onFailure { AppLog.failure("WEB PoToken warmup", it) }
-                .getOrThrow()
             StreamInfo.getInfo(url).also {
-                AppLog.event("NewPipe retry after WEB PoToken warmup succeeded video=$videoId")
+                AppLog.event("NewPipe retry after integrated PoToken refresh succeeded video=$videoId")
             }
         }
     }
@@ -554,6 +550,9 @@ object YouTubeRepository {
         synchronized(nChallengeCache) { nChallengeCache[cacheKey] = solved }
         return parsed.newBuilder().setQueryParameter("n", solved).build().toString()
     }
+
+    fun resolveNewPipeStreamUrl(videoId: String, streamingUrl: String): String =
+        solveNChallenge(videoId, streamingUrl)
 
     fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false) {
         if (!signedIn() || toMs <= fromMs) return

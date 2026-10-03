@@ -17,6 +17,7 @@ class MaterialYtApp : Application() {
         HttpBackend.initialize(this)
         NewPipe.init(HttpBackend)
         YoutubeStreamExtractor.setPoTokenProvider(NewPipePoTokenProvider)
+        YoutubeStreamExtractor.setStreamUrlResolver(YouTubeRepository::resolveNewPipeStreamUrl)
         EjsChallengeSolver.initialize(this)
     }
 }

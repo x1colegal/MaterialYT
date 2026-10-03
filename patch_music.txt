@@ -1,0 +1,9 @@
+        AppSearchBar(
+            query = query,
+            onQueryChange = { query = it },
+            onSearch = { if (query.isNotBlank()) load { YouTubeRepository.musicSearch(query) } },
+            placeholder = "Search music",
+            trailingIcon = {
+                IconButton(onClick = { query = ""; load { YouTubeRepository.music() } }) { Icon(Icons.Default.Refresh, "Refresh") }
+            }
+        )

@@ -1,0 +1,39 @@
+@Composable
+fun CommentNode(comment: CommentsInfoItem) {
+    var showReplies by remember { mutableStateOf(false) }
+    var replies by remember { mutableStateOf<List<CommentsInfoItem>?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    Column(Modifier.padding(16.dp, 10.dp)) {
+        Text(comment.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge)
+        Text((if (android.os.Build.VERSION.SDK_INT >= 24) android.text.Html.fromHtml(comment.commentText.content, android.text.Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") android.text.Html.fromHtml(comment.commentText.content)).toString())
+        Text(comment.textualLikeCount ?: "", style = MaterialTheme.typography.bodySmall)
+
+        if (comment.replyCount > 0) {
+            TextButton(onClick = {
+                showReplies = !showReplies
+                if (showReplies && replies == null) {
+                    loading = true
+                    scope.launch {
+                        replies = runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { org.schabi.newpipe.extractor.comments.CommentsInfo.getInfo(comment.url)?.relatedItems } }.getOrNull()
+                        loading = false
+                    }
+                }
+            }) {
+                Text(if (showReplies) "Hide replies" else "View ${comment.replyCount} replies")
+            }
+        }
+
+        if (showReplies) {
+            if (loading) CircularProgressIndicator(Modifier.padding(16.dp).size(24.dp))
+            replies?.forEach { reply ->
+                Column(Modifier.padding(start = 32.dp, top = 8.dp, bottom = 8.dp)) {
+                    Text(reply.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge)
+                    Text((if (android.os.Build.VERSION.SDK_INT >= 24) android.text.Html.fromHtml(reply.commentText.content, android.text.Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") android.text.Html.fromHtml(reply.commentText.content)).toString())
+                    Text(reply.textualLikeCount ?: "", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}

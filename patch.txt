@@ -1,0 +1,25 @@
+        AppSearchBar(
+            query = query,
+            onQueryChange = { query = it },
+            onSearch = { 
+                if (query.isNotBlank()) scope.launch { 
+                    loading = true; error = null
+                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }
+                        .onSuccess { feed = it; results = it }
+                        .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }
+                    loading = false 
+                } 
+            },
+            placeholder = "Search ${title}",
+            trailingIcon = {
+                IconButton(onClick = { 
+                    query = ""
+                    scope.launch {
+                        loading = true; error = null; results = emptyList()
+                        runCatching { withContext(Dispatchers.IO) { loader?.invoke() ?: YouTubeRepository.home() } }
+                            .onSuccess { homeFeed = it; feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+                        loading = false
+                    }
+                }) { Icon(Icons.Default.Refresh, "Refresh") }
+            }
+        )

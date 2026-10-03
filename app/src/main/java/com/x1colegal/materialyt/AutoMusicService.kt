@@ -67,9 +67,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_LOW)
         )
-        player = ExoPlayer.Builder(this).setLoadControl(DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15_000, 180_000, 750, 1_500)
-            .setPrioritizeTimeOverSizeThresholds(true).build()).build()
+        player = PlayerFactory.bufferedPlayer(this)
         session = MediaSessionCompat(this, "MaterialYT Auto").apply {
             setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS)
             setCallback(object : MediaSessionCompat.Callback() {

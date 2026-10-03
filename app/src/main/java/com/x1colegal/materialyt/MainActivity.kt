@@ -1279,7 +1279,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (!isPlaying) {
                     val pos = player.currentPosition
-                    scope.launch { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.reportPlayback(item.id, maxOf(0, pos - 1000L), pos, paused = true) } } }
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { YouTubeRepository.reportPlayback(item.id, maxOf(0, pos - 1000L), pos, paused = true) } }
                 }
             }
             override fun onPlaybackStateChanged(state: Int) {
@@ -1506,7 +1506,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 activity.updatePipAction()
                 if (!isPlaying) {
                     val pos = player.currentPosition
-                    scope.launch { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.reportPlayback(videoId, maxOf(0, pos - 1000L), pos, paused = true) } } }
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { YouTubeRepository.reportPlayback(videoId, maxOf(0, pos - 1000L), pos, paused = true) } }
                 }
                 val title = info?.name ?: videoMetadata?.title ?: "Video"
                 val author = info?.uploaderName ?: channelInfo?.name ?: videoMetadata?.author ?: ""

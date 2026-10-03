@@ -90,7 +90,16 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         }
         sessionToken = session.sessionToken
         player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) = publishState()
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                publishState()
+                val id = currentTrack?.id
+                if (!isPlaying && id != null) {
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                        val pos = player.currentPosition
+                        runCatching { YouTubeRepository.reportPlayback(id, maxOf(0, pos - 1000L), pos, paused = true) }
+                    }
+                }
+            }
             override fun onPlaybackStateChanged(playbackState: Int) { publishState(); publishMetadata() }
         })
         publishState()

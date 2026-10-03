@@ -412,12 +412,12 @@ object YouTubeRepository {
         return parsed.newBuilder().setQueryParameter("n", solved).build().toString()
     }
 
-    fun reportPlayback(videoId: String, fromMs: Long, toMs: Long) {
+    fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false) {
         if (!signedIn() || toMs <= fromMs) return
         val tracking = synchronized(playbackTracking) { playbackTracking[videoId] } ?: return
         val first = synchronized(tracking) { if (!tracking.started) { tracking.started = true; true } else false }
         val origin = if (tracking.music) "https://music.youtube.com" else "https://www.youtube.com"
-        val clientName = if (tracking.music) "WEB_REMIX" else "WEB"
+        val clientName = if (tracking.music) "WEB_REMIX" else "TVHTML5"
         fun statsUrl(base: String, playback: Boolean): okhttp3.HttpUrl? = (if (tracking.music) base else base.replace("https://s.youtube.com", origin))
             .toHttpUrlOrNull()?.newBuilder()
             ?.setQueryParameter("ver", "2")
@@ -430,13 +430,13 @@ object YouTubeRepository {
                 if (!playback) {
                     setQueryParameter("st", "%.3f".format(java.util.Locale.US, fromMs / 1000.0))
                     setQueryParameter("et", "%.3f".format(java.util.Locale.US, toMs / 1000.0))
-                    setQueryParameter("state", "playing")
+                    setQueryParameter("state", if (paused) "paused" else "playing")
                 }
             }?.build()
         fun send(url: okhttp3.HttpUrl) {
             val request = Request.Builder().url(url).apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }.build()
             client.newCall(request).execute().use { response ->
-                AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} HTTP ${response.code}")
+                AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (paused) "paused" else "playing"} HTTP ${response.code}")
             }
         }
         if (first) statsUrl(tracking.playbackUrl, true)?.let(::send)

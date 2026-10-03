@@ -1276,6 +1276,12 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         val playbackListener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (!isPlaying) {
+                    val pos = player.currentPosition
+                    scope.launch { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.reportPlayback(item.id, maxOf(0, pos - 1000L), pos, paused = true) } } }
+                }
+            }
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_ENDED) {
                     player.seekTo(0L)
@@ -1498,6 +1504,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 activity.updatePipAction()
+                if (!isPlaying) {
+                    val pos = player.currentPosition
+                    scope.launch { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.reportPlayback(videoId, maxOf(0, pos - 1000L), pos, paused = true) } } }
+                }
                 val title = info?.name ?: videoMetadata?.title ?: "Video"
                 val author = info?.uploaderName ?: channelInfo?.name ?: videoMetadata?.author ?: ""
                 val thumb = info?.thumbnails?.lastOrNull()?.url ?: videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }

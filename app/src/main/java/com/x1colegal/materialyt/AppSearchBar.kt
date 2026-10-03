@@ -31,6 +31,11 @@ fun AppSearchBar(
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
     val scope = rememberCoroutineScope()
     var searchJob by remember { mutableStateOf<Job?>(null) }
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    LaunchedEffect(Unit) {
+        delay(100)
+        focusManager.clearFocus()
+    }
     val keyboard = LocalSoftwareKeyboardController.current
 
     SearchBar(

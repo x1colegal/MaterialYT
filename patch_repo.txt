@@ -1,0 +1,14 @@
+    private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
+        val origin = if (music) "https://music.youtube.com" else "https://www.youtube.com"
+        val clientName = if (music) "WEB_REMIX" else "TVHTML5"
+        val version = if (music) bootstrap(origin, clientName).version else "7.20240502.16.00"
+        val key = bootstrap(origin, clientName).key
+        val body = JSONObject().put("context", JSONObject().put("client", JSONObject()
+            .put("clientName", clientName).put("clientVersion", version)
+            .put("hl", "en").put("gl", "US").put("deviceMake", "LG").put("deviceModel", "42LA660S-ZA").put("userAgent", "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebkit/538.1 (KHTML, like Gecko) SamsungBrowser/1.1 TV Safari/538.1")
+        ))
+            .put("videoId", videoId).put("cpn", cpn)
+            .put("contentCheckOk", true).put("racyCheckOk", true)
+        val response = post("$origin/youtubei/v1/player?key=$key", body, origin)
+        return response.optJSONObject("playbackTracking")
+    }

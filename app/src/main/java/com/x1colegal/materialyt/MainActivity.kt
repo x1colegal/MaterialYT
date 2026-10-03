@@ -1210,6 +1210,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var expandedTitle by remember { mutableStateOf(false) }
     
     var showComments by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var comments by remember(item.id) { mutableStateOf<List<CommentsInfoItem>>(emptyList()) }
     var commentsLoading by remember { mutableStateOf(false) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
@@ -1921,8 +1922,8 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
         item { ChoiceSection("Preferred video codec", CodecChoice.entries, codec, { it.label }, onCodec) }
         item { ChoiceSection("Preferred audio codec", AudioCodecChoice.entries, audioCodec, { it.label }, onAudioCodec) }
         item { ChoiceSection("Default video quality", QualityChoice.entries, quality, { it.label }, onQuality) }
-        item { ChoiceSection("Video decoder", DecoderMode.entries, videoDecoderMode, { it.label }, onVideoDecoderMode)
-        item { ChoiceSection("Audio decoder", DecoderMode.entries, audioDecoderMode, { it.label }, onAudioDecoderMode) } }
+        item { ChoiceSection("Video decoder", DecoderMode.entries, videoDecoderMode, { it.label }, onVideoDecoderMode) }
+        item { ChoiceSection("Audio decoder", DecoderMode.entries, audioDecoderMode, { it.label }, onAudioDecoderMode) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }
         item { Text("HTTP/1.0 compatibility disables connection reuse but uses an HTTP/1.1 request line because OkHttp intentionally cannot emit HTTP/1.0. The HTTP/2 mode advertises HTTP/2 with HTTP/1.1 fallback.", style = MaterialTheme.typography.bodySmall) }
     }

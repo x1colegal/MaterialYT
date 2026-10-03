@@ -51,7 +51,7 @@ object YouTubeRepository {
         AppLog.event("feed=home started")
         return try {
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
-            val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap(origin, clientName).key}",
+            val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "FEwhat_to_watch"), bootstrap.origin)
             homeToken = findContinuationToken(data)
             val uniqueItems = parseItems(data).distinctBy { it.id }
@@ -67,7 +67,7 @@ object YouTubeRepository {
         val token = homeToken ?: return emptyList()
         return try {
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
-            val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap(origin, clientName).key}",
+            val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), bootstrap.origin)
             val nextToken = findContinuationToken(data)
             homeToken = if (nextToken != token) nextToken else null
@@ -80,8 +80,8 @@ object YouTubeRepository {
     fun shorts(): List<FeedItem> {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
-        val itemEndpoint = "$origin/youtubei/v1/reel/reel_item_watch?key=${bootstrap(origin, clientName).key}"
-        val sequenceEndpoint = "$origin/youtubei/v1/reel/reel_watch_sequence?key=${bootstrap(origin, clientName).key}"
+        val itemEndpoint = "$origin/youtubei/v1/reel/reel_item_watch?key=${bootstrap.key}"
+        val sequenceEndpoint = "$origin/youtubei/v1/reel/reel_watch_sequence?key=${bootstrap.key}"
         val seed = post(itemEndpoint, JSONObject()
             .put("context", context("WEB", bootstrap.version))
             .put("disablePlayerResponse", true)
@@ -191,12 +191,12 @@ object YouTubeRepository {
             ?.let { return "$origin/channel/$it" }
         val bootstrap = bootstrap(origin, "WEB")
         val accountMenu = runCatching {
-            post("$origin/youtubei/v1/account/account_menu?key=${bootstrap(origin, clientName).key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
+            post("$origin/youtubei/v1/account/account_menu?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
         }.getOrNull()
         accountMenu?.let(::findFirstChannelId)?.let { return "$origin/channel/$it" }
         accountMenu?.let { findString(it, "channelHandle") }?.trim()?.takeIf { it.startsWith("@") }
             ?.let { return "$origin/$it" }
-        val guide = post("$origin/youtubei/v1/guide?key=${bootstrap(origin, clientName).key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
+        val guide = post("$origin/youtubei/v1/guide?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
         val channelId = findOwnChannelId(guide) ?: findFirstChannelId(guide) ?: error("YouTube did not expose the signed-in channel")
         return "$origin/channel/$channelId"
     }
@@ -214,11 +214,11 @@ object YouTubeRepository {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
         val accountMenu = runCatching {
-            post("$origin/youtubei/v1/account/account_menu?key=${bootstrap(origin, clientName).key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
+            post("$origin/youtubei/v1/account/account_menu?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
         }.getOrNull()
         val handle = accountMenu?.let { findString(it, "channelHandle") }?.trim()?.takeIf { it.startsWith("@") }
         if (handle != null) return feed("your videos", "$origin/$handle/videos")
-        val guide = post("$origin/youtubei/v1/guide?key=${bootstrap(origin, clientName).key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
+        val guide = post("$origin/youtubei/v1/guide?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)), origin)
         val channelId = findOwnChannelId(guide) ?: error("YouTube did not expose the signed-in channel")
         return feed("your videos", "$origin/channel/$channelId/videos")
     }
@@ -227,13 +227,13 @@ object YouTubeRepository {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
         val normalizedId = playlistId.removePrefix("VL")
-        var page = post("$origin/youtubei/v1/browse?key=${bootstrap(origin, clientName).key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "VL$normalizedId"), origin)
+        var page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "VL$normalizedId"), origin)
         val items = parseItems(page).filterNot { it.playlist }.toMutableList()
         val seen = mutableSetOf<String>()
         repeat(8) {
             val token = findContinuationToken(page) ?: return@repeat
             if (!seen.add(token)) return@repeat
-            page = post("$origin/youtubei/v1/browse?key=${bootstrap(origin, clientName).key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), origin)
+            page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), origin)
             items += parseItems(page).filterNot { it.playlist }
         }
         return items.distinctBy { it.id }
@@ -241,7 +241,7 @@ object YouTubeRepository {
     fun search(query: String): List<FeedItem> {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
-        return parseItems(post("$origin/youtubei/v1/search?key=${bootstrap(origin, clientName).key}", JSONObject()
+        return parseItems(post("$origin/youtubei/v1/search?key=${bootstrap.key}", JSONObject()
             .put("context", context("WEB", bootstrap.version)).put("query", query), origin))
     }
     fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home"))
@@ -252,7 +252,7 @@ object YouTubeRepository {
         val origin = "https://music.youtube.com"
         val bootstrap = bootstrap(origin, "WEB_REMIX")
         val body = fields.put("context", context("WEB_REMIX", bootstrap.version))
-        val response = post("$origin/youtubei/v1/$endpoint?key=${bootstrap(origin, clientName).key}", body, origin)
+        val response = post("$origin/youtubei/v1/$endpoint?key=${bootstrap.key}", body, origin)
         return parseItems(response).also { AppLog.event("music endpoint=$endpoint items=${it.size}") }
     }
 
@@ -261,7 +261,7 @@ object YouTubeRepository {
         return try {
             val browseId = when (name) { "home" -> "FEwhat_to_watch"; "history" -> "FEhistory"; "playlists" -> "FEplaylist_aggregation"; else -> null }
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
-            val data = if (browseId != null) post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap(origin, clientName).key}",
+            val data = if (browseId != null) post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", browseId), bootstrap.origin)
             else initialData(get(url))
             val uniqueItems = parseItems(data).distinctBy { it.id }
@@ -507,7 +507,8 @@ object YouTubeRepository {
         ))
             .put("videoId", videoId).put("cpn", cpn)
             .put("contentCheckOk", true).put("racyCheckOk", true)
-        val response = post("$origin/youtubei/v1/player?key=${bootstrap(origin, clientName).key}", body, origin)
+        val key = bootstrap(origin, clientName).key
+        val response = post("$origin/youtubei/v1/player?key=$key", body, origin)
         return response.optJSONObject("playbackTracking")
     }
 
@@ -592,7 +593,7 @@ object YouTubeRepository {
     fun lyrics(videoId: String): List<LyricLine> {
         val origin = "https://music.youtube.com"
         val bootstrap = bootstrap(origin, "WEB_REMIX")
-        val next = post("$origin/youtubei/v1/next?key=${bootstrap(origin, clientName).key}", JSONObject().put("context", context("WEB_REMIX", bootstrap.version)).put("videoId", videoId), origin)
+        val next = post("$origin/youtubei/v1/next?key=${bootstrap.key}", JSONObject().put("context", context("WEB_REMIX", bootstrap.version)).put("videoId", videoId), origin)
         val browseId = findLyricsBrowseId(next) ?: error("Lyrics are not available for this track")
         val mobileContext = JSONObject().put("client", JSONObject().put("clientName", "ANDROID_MUSIC")
             .put("clientVersion", "7.01.05").put("androidSdkVersion", 35).put("hl", "en").put("gl", "US"))
@@ -616,7 +617,7 @@ object YouTubeRepository {
     fun channelInfo(videoId: String): ChannelInfo {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap("$origin/watch?v=$videoId", "WEB")
-        val response = post("$origin/youtubei/v1/next?key=${bootstrap(origin, clientName).key}",
+        val response = post("$origin/youtubei/v1/next?key=${bootstrap.key}",
             JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId), origin)
         val owner = findObject(response, "videoOwnerRenderer")?.optJSONObject("videoOwnerRenderer")
         val name = owner?.let { text(it.opt("title")) }
@@ -645,18 +646,18 @@ object YouTubeRepository {
         val watchHtml = get(watchUrl)
         val bootstrap = bootstrap(watchUrl, "WEB")
         val nextBody = JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId)
-        val next = post("https://www.youtube.com/youtubei/v1/next?key=${bootstrap(origin, clientName).key}", nextBody, bootstrap.origin)
+        val next = post("https://www.youtube.com/youtubei/v1/next?key=${bootstrap.key}", nextBody, bootstrap.origin)
         val params = findString(next, "createCommentParams")
             ?: runCatching { findString(initialData(watchHtml), "createCommentParams") }.getOrNull()
             ?: error("Comments are disabled or this account cannot comment on this video")
         val body = JSONObject().put("context", context("WEB", bootstrap.version)).put("createCommentParams", params).put("commentText", text)
-        post("https://www.youtube.com/youtubei/v1/comment/create_comment?key=${bootstrap(origin, clientName).key}", body, bootstrap.origin)
+        post("https://www.youtube.com/youtubei/v1/comment/create_comment?key=${bootstrap.key}", body, bootstrap.origin)
     }
 
     private fun browse(origin: String, browseId: String, clientName: String): List<FeedItem> {
         val bootstrap = bootstrap(origin, clientName)
         val body = JSONObject().put("context", context(clientName, bootstrap.version)).put("browseId", browseId)
-        return parseItems(post("$origin/youtubei/v1/browse?key=${bootstrap(origin, clientName).key}", body, origin))
+        return parseItems(post("$origin/youtubei/v1/browse?key=${bootstrap.key}", body, origin))
     }
 
     private data class Bootstrap(val key: String, val version: String, val origin: String)

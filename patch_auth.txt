@@ -1,0 +1,35 @@
+    private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
+        val name = "IOS"
+        val version = "19.33.2"
+        val id = "5"
+        val model = "iPhone14,3"
+        val os = "iOS"
+        val osVersion = "16.2"
+        val ua = "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
+        val clientContext = JSONObject()
+            .put("clientName", name).put("clientVersion", version)
+            .put("deviceModel", model).put("osName", os)
+            .put("osVersion", osVersion).put("platform", "MOBILE")
+            .put("clientScreen", "WATCH").put("hl", "en").put("gl", "US")
+        val body = JSONObject().put("context", JSONObject().put("client", clientContext))
+            .put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true)
+            .put("cpn", cpn)
+        val request = Request.Builder().url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+            .header("User-Agent", ua).header("Content-Type", "application/json")
+            .header("X-Youtube-Client-Name", id).header("X-Youtube-Client-Version", version)
+            .apply {
+                val accountOrigin = "https://www.youtube.com"
+                val accountCookies = cookies(accountOrigin)
+                val loggedIn = accountCookies.isNotBlank()
+                if (loggedIn) header("Cookie", accountCookies)
+                authorization(accountOrigin)?.let { header("Authorization", it) }
+                header("Origin", accountOrigin)
+                header("X-Origin", accountOrigin)
+                header("X-Goog-AuthUser", "0")
+                header("X-Youtube-Bootstrap-Logged-In", loggedIn.toString())
+                if (!loggedIn) visitorData[accountOrigin]?.let { header("X-Goog-Visitor-Id", it) }
+            }
+            .post(body.toString().toRequestBody(jsonType)).build()
+        val response = client.newCall(request).execute().use { JSONObject(it.body?.string().orEmpty()) }
+        return response.optJSONObject("playbackTracking")
+    }

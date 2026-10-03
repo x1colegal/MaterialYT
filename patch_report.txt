@@ -2,9 +2,9 @@
         if (!signedIn() || toMs <= fromMs) return
         val tracking = synchronized(playbackTracking) { playbackTracking[videoId] } ?: return
         val first = synchronized(tracking) { if (!tracking.started) { tracking.started = true; true } else false }
-        val origin = if (tracking.music) "https://music.youtube.com" else "https://www.youtube.com"
-        val clientName = if (tracking.music) "WEB_REMIX" else "TVHTML5"
-        fun statsUrl(base: String, playback: Boolean): okhttp3.HttpUrl? = (if (tracking.music) base else base.replace("https://s.youtube.com", origin))
+        val origin = "https://www.youtube.com"
+        val clientName = "IOS"
+        fun statsUrl(base: String, playback: Boolean): okhttp3.HttpUrl? = base.replace("https://s.youtube.com", origin)
             .toHttpUrlOrNull()?.newBuilder()
             ?.setQueryParameter("ver", "2")
             ?.setQueryParameter("c", clientName)

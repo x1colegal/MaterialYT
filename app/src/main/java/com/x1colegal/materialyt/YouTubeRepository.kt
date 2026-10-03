@@ -22,6 +22,7 @@ data class VideoDetails(val title: String, val author: String, val authorUrl: St
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 
 object YouTubeRepository {
+    private const val POTOKEN_WARMUP_VIDEO_ID = "jNQXAC9IVRw"
     const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
@@ -276,10 +277,16 @@ object YouTubeRepository {
     fun playerStreams(videoId: String, music: Boolean = false): List<PlayableStream> {
         runCatching { bootstrap("https://www.youtube.com/watch?v=$videoId", "WEB") }
             .onFailure { AppLog.failure("player account bootstrap video=$videoId", it) }
-        var response = runCatching { mwebPlayer(videoId) }.getOrDefault(JSONObject())
-        var clientUsed = "MWEB"
+        var response = runCatching { webPoPlayer(videoId) }
+            .onFailure { AppLog.failure("WEB PoToken player video=$videoId", it) }.getOrDefault(JSONObject())
+        var clientUsed = "WEB_POT"
         var finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         var firstError = response.optJSONObject("playabilityStatus")?.optString("reason").takeUnless { it.isNullOrBlank() } ?: finalStatus
+        if (finalStatus != "OK") {
+            response = runCatching { mwebPlayer(videoId) }.getOrDefault(JSONObject())
+            clientUsed = "MWEB"
+            finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        }
         if (finalStatus != "OK") {
             response = runCatching { visionOsPlayer(videoId) }.getOrDefault(JSONObject())
             clientUsed = "VISIONOS"
@@ -294,6 +301,48 @@ object YouTubeRepository {
             response = runCatching { androidPlayer(videoId) }.getOrDefault(JSONObject())
             clientUsed = "ANDROID"
             finalStatus = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        }
+
+        fun streamScore(candidate: JSONObject): Int {
+            if (candidate.optJSONObject("playabilityStatus")?.optString("status") != "OK") return -1
+            val streaming = candidate.optJSONObject("streamingData") ?: return -1
+            var playable = 0
+            var audio = 0
+            var maxHeight = 0
+            listOf("formats", "adaptiveFormats").forEach { key ->
+                streaming.optJSONArray(key)?.let { array ->
+                    for (index in 0 until array.length()) array.optJSONObject(index)?.let { format ->
+                        val hasUrl = format.optString("url").startsWith("http") || format.optString("signatureCipher").contains("url=")
+                        if (hasUrl) {
+                            playable++
+                            if (format.optString("mimeType").startsWith("audio/")) audio++
+                            maxHeight = maxOf(maxHeight, format.optInt("height"))
+                        }
+                    }
+                }
+            }
+            return playable * 10_000 + audio * 1_000 + maxHeight
+        }
+
+        var bestScore = streamScore(response)
+        if (bestScore < 21_000) {
+            listOf(
+                "TV_DOWNGRADED" to { tvDowngradedPlayer(videoId) },
+                "MWEB" to { mwebPlayer(videoId) },
+                "VISIONOS" to { visionOsPlayer(videoId) },
+                "IOS" to { iosPlayer(videoId) },
+                "ANDROID" to { androidPlayer(videoId) }
+            ).forEach { (name, request) ->
+                val candidate = runCatching(request).onFailure { AppLog.failure("player candidate=$name video=$videoId", it) }.getOrNull() ?: return@forEach
+                val score = streamScore(candidate)
+                AppLog.event("player candidate=$name score=$score status=${candidate.optJSONObject("playabilityStatus")?.optString("status")} reason=${candidate.optJSONObject("playabilityStatus")?.optString("reason")} video=$videoId")
+                if (score > bestScore) {
+                    response = candidate
+                    clientUsed = name
+                    finalStatus = "OK"
+                    bestScore = score
+                }
+            }
         }
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
 
@@ -343,7 +392,15 @@ object YouTubeRepository {
         }
         val formats = mutableListOf<JSONObject>()
         listOf("formats", "adaptiveFormats").forEach { key -> data.optJSONArray(key)?.let { array -> for (i in 0 until array.length()) array.optJSONObject(i)?.let(formats::add) } }
-        val playerJsLazy by lazy { runCatching { playerJavaScript(videoId) }.getOrNull() }
+        // Android VR exposes the adaptive formats that WEB currently withholds, but its
+        // googlevideo URLs must be transformed with a compatible TV-family player. Using
+        // the WEB base.js here yields an invalid `n` value and an immediate CDN 403.
+        val playerJsLazy by lazy {
+            runCatching {
+                if (clientUsed == "TV_DOWNGRADED") tvPlayerJavaScript() else playerJavaScript(videoId)
+            }.onFailure { AppLog.failure("player JavaScript client=$clientUsed video=$videoId", it) }
+                .getOrNull()
+        }
         val streams = formats.mapNotNull { item ->
             val rawUrl = item.optString("url").takeIf { it.startsWith("http") } ?: run {
                 val cipher = item.optString("signatureCipher").split('&').mapNotNull { part -> part.split('=', limit = 2).takeIf { it.size == 2 }?.let { java.net.URLDecoder.decode(it[0], "UTF-8") to java.net.URLDecoder.decode(it[1], "UTF-8") } }.toMap()
@@ -363,11 +420,14 @@ object YouTubeRepository {
                 }
             } ?: return@mapNotNull null
             val urlWithCpn = if (cpn.isBlank() || "cpn=" in rawUrl) rawUrl else "$rawUrl&cpn=$cpn"
-            val streamUrl = runCatching {
-                solveNChallenge(videoId, urlWithCpn, playerJsLazy)
+            var streamUrl = runCatching {
+                solveNChallenge(videoId, urlWithCpn, playerJsLazy, clientUsed == "TV_DOWNGRADED")
             }.getOrElse {
                 AppLog.failure("player n parameter video=$videoId", it)
                 rawUrl
+            }
+            response.optString("_materialytStreamingPot").takeIf { it.isNotBlank() && "pot=" !in streamUrl }?.let {
+                streamUrl += "${if ('?' in streamUrl) '&' else '?'}pot=${java.net.URLEncoder.encode(it, "UTF-8")}"
             }
             val mime = item.optString("mimeType")
             val codec = Regex("codecs=\"([^\"]+)").find(mime)?.groupValues?.get(1).orEmpty()
@@ -389,6 +449,28 @@ object YouTubeRepository {
         return streams
     }
 
+    fun newPipeStreamInfo(videoId: String): StreamInfo {
+        val url = "https://www.youtube.com/watch?v=$videoId"
+        return try {
+            StreamInfo.getInfo(url)
+        } catch (first: Throwable) {
+            if (!isLoginRequired(first)) throw first
+            AppLog.event("NewPipe LOGIN_REQUIRED; warming WEB PoToken session video=$videoId")
+            NewPipePoTokenProvider.reset()
+            runCatching { webPoPlayer(POTOKEN_WARMUP_VIDEO_ID) }
+                .onFailure { AppLog.failure("WEB PoToken warmup", it) }
+                .getOrThrow()
+            StreamInfo.getInfo(url).also {
+                AppLog.event("NewPipe retry after WEB PoToken warmup succeeded video=$videoId")
+            }
+        }
+    }
+
+    private fun isLoginRequired(error: Throwable): Boolean = generateSequence(error) { it.cause }.any {
+        val text = "${it.javaClass.simpleName}: ${it.message}".lowercase()
+        "login_required" in text || "login required" in text || "sign in to confirm" in text || "not a bot" in text
+    }
+
     private fun playerJavaScript(videoId: String): String {
         val watchHtml = get("https://www.youtube.com/watch?v=$videoId")
         val encodedPlayerUrl = Regex("\\\"(?:jsUrl|PLAYER_JS_URL)\\\":\\\"([^\\\"]+)").find(watchHtml)?.groupValues?.get(1)
@@ -399,16 +481,77 @@ object YouTubeRepository {
             ?: get(playerUrl).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
     }
 
-    private fun solveNChallenge(videoId: String, streamingUrl: String, playerJs: String? = null): String {
+    private fun tvPlayerJavaScript(): String {
+        // This is the current first validated common-n player used by MediaServiceCore.
+        // Keep the lookup isolated from WEB player discovery: the n transform is tied to
+        // the client family that issued the adaptive stream URLs.
+        val playerUrl = "https://www.youtube.com/s/player/7460dd14/tv-player-es6.vflset/tv-player-es6.js"
+        return synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] }
+            ?: get(playerUrl).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
+    }
+
+    private fun tvDowngradedPlayer(videoId: String): JSONObject {
+        val origin = "https://www.youtube.com"
+        val version = "5.20260901"
+        val userAgent = "Mozilla/5.0 (DirectFB; Linux x86_64) Cobalt/4.13031-qa (unlike Gecko) Starboard/1"
+        val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
+        val clientContext = JSONObject()
+            .put("clientName", "TVHTML5").put("clientVersion", version)
+            .put("clientScreen", "WATCH").put("platform", "TV")
+            .put("browserName", "Cobalt").put("browserVersion", "4.13031-qa")
+            .put("userAgent", userAgent).put("hl", "en").put("gl", "US")
+        val accountCookies = cookies(origin)
+        if (accountCookies.isBlank()) visitorData[origin]?.let { clientContext.put("visitorData", it) }
+        val body = JSONObject().put("context", JSONObject()
+            .put("client", clientContext)
+            .put("user", JSONObject().put("enableSafetyMode", false).put("lockedSafetyMode", false)))
+            .put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true)
+            .put("cpn", cpn)
+        val request = Request.Builder()
+            .url("$origin/youtubei/v1/player?prettyPrint=false&id=$videoId")
+            .header("User-Agent", userAgent).header("Content-Type", "application/json")
+            .header("Referer", "$origin/tv/watch#/watch?v=$videoId")
+            .header("Origin", origin).header("X-Origin", origin)
+            .header("X-Youtube-Client-Name", "7").header("X-Youtube-Client-Version", version)
+            .apply {
+                if (accountCookies.isNotBlank()) header("Cookie", accountCookies)
+                authorization(origin)?.let { header("Authorization", it) }
+                header("X-Goog-AuthUser", "0")
+                header("X-Youtube-Bootstrap-Logged-In", accountCookies.isNotBlank().toString())
+                if (accountCookies.isBlank()) visitorData[origin]?.let { header("X-Goog-Visitor-Id", it) }
+            }
+            .post(body.toString().toRequestBody(jsonType)).build()
+        return client.newCall(request).execute().use {
+            val raw = it.body?.string().orEmpty()
+            if (!it.isSuccessful) {
+                val detail = runCatching { JSONObject(raw).optJSONObject("error")?.optString("message") }.getOrNull().orEmpty()
+                error("YouTube TV player returned HTTP ${it.code}${if (detail.isBlank()) "" else ": $detail"}")
+            }
+            JSONObject(raw).put("_materialytCpn", cpn)
+        }
+    }
+
+    private fun solveNChallenge(videoId: String, streamingUrl: String, playerJs: String? = null, clientSpecific: Boolean = false): String {
         val parsed = streamingUrl.toHttpUrlOrNull() ?: return streamingUrl
         val challenge = parsed.queryParameter("n") ?: return streamingUrl
-        val solved = synchronized(nChallengeCache) { nChallengeCache[challenge] } ?: run {
-            val js = playerJs ?: playerJavaScript(videoId)
-            EjsChallengeSolver.solveN(js, challenge).also { result ->
-                synchronized(nChallengeCache) { nChallengeCache[challenge] = result }
+        val cacheKey = "${if (clientSpecific) playerJs?.hashCode() ?: "client" else "web"}:$challenge"
+        synchronized(nChallengeCache) { nChallengeCache[cacheKey] }?.let { solved ->
+            return parsed.newBuilder().setQueryParameter("n", solved).build().toString()
+        }
+        val newPipeUrl = if (clientSpecific) null else runCatching {
+            YoutubeJavaScriptPlayerManager.getUrlWithThrottlingParameterDeobfuscated(videoId, streamingUrl)
+        }.onFailure { AppLog.failure("NewPipe n parameter video=$videoId", it) }.getOrNull()
+        if (!newPipeUrl.isNullOrBlank()) {
+            val solved = newPipeUrl.toHttpUrlOrNull()?.queryParameter("n")
+            if (!solved.isNullOrBlank() && solved != challenge) {
+                synchronized(nChallengeCache) { nChallengeCache[cacheKey] = solved }
+                return newPipeUrl
             }
         }
+        val js = playerJs ?: playerJavaScript(videoId)
+        val solved = EjsChallengeSolver.solveN(js, challenge)
         check(solved.isNotBlank() && solved != challenge) { "EJS returned an unchanged n challenge" }
+        synchronized(nChallengeCache) { nChallengeCache[cacheKey] = solved }
         return parsed.newBuilder().setQueryParameter("n", solved).build().toString()
     }
 
@@ -488,12 +631,41 @@ object YouTubeRepository {
         }
     }
 
+    private fun webPoPlayer(videoId: String): JSONObject {
+        val token = NewPipePoTokenProvider.getWebClientPoToken(videoId)
+            ?: error("BotGuard did not produce a PoToken")
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
+        val body = JSONObject().put("context", context("WEB", bootstrap.version).also {
+            it.getJSONObject("client").put("visitorData", token.visitorData)
+        }).put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true)
+            .put("cpn", cpn)
+            .put("serviceIntegrityDimensions", JSONObject().put("poToken", token.playerRequestPoToken))
+        val request = Request.Builder().url("$origin/youtubei/v1/player?key=${bootstrap.key}&prettyPrint=false")
+            .header("User-Agent", UA).header("Content-Type", "application/json")
+            .header("X-Youtube-Client-Name", "1").header("X-Youtube-Client-Version", bootstrap.version)
+            .header("X-Goog-Visitor-Id", token.visitorData)
+            .apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }
+            .post(body.toString().toRequestBody(jsonType)).build()
+        return client.newCall(request).execute().use {
+            val raw = it.body.string()
+            check(it.isSuccessful) { "WEB PoToken player HTTP ${it.code}" }
+            JSONObject(raw).put("_materialytCpn", cpn)
+                .put("_materialytStreamingPot", token.streamingDataPoToken.orEmpty())
+        }
+    }
+
     private fun iosPlayer(videoId: String): JSONObject {
         return mobilePlayer(videoId, "IOS", "20.05.1", "5", "iPhone16,2", "iOS", "18.7.2.22H124")
     }
 
     private fun androidPlayer(videoId: String): JSONObject {
         return mobilePlayer(videoId, "ANDROID", "20.05.35", "3", "Pixel 8 Pro", "Android", "14")
+    }
+
+    private fun androidVrPlayer(videoId: String): JSONObject {
+        return mobilePlayer(videoId, "ANDROID_VR", "1.65.10", "28", "Quest 3", "Android", "12")
     }
 
     private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
@@ -508,7 +680,11 @@ object YouTubeRepository {
 
 
     private fun mobilePlayer(videoId: String, name: String, version: String, id: String, model: String, os: String, osVersion: String): JSONObject {
-        val ua = if (name == "ANDROID") "com.google.android.youtube/$version (Linux; U; Android $osVersion)" else "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
+        val ua = when (name) {
+            "ANDROID_VR" -> "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+            "ANDROID" -> "com.google.android.youtube/$version (Linux; U; Android $osVersion) gzip"
+            else -> "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
+        }
         val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
         val clientContext = JSONObject()
             .put("clientName", name).put("clientVersion", version)
@@ -518,8 +694,12 @@ object YouTubeRepository {
             .apply { 
                 val accountOrigin = "https://www.youtube.com"
                 val accountCookies = cookies(accountOrigin)
-                val loggedIn = accountCookies.isNotBlank()
+                val loggedIn = accountCookies.isNotBlank() && name != "ANDROID_VR"
                 if (!loggedIn) visitorData[accountOrigin]?.let { put("visitorData", it) }
+                if (name == "ANDROID_VR") {
+                    put("androidSdkVersion", 32)
+                    put("deviceMake", "Oculus")
+                }
             }
         val body = JSONObject().put("context", JSONObject().put("client", clientContext))
             .put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true)
@@ -530,9 +710,9 @@ object YouTubeRepository {
             .apply {
                 val accountOrigin = "https://www.youtube.com"
                 val accountCookies = cookies(accountOrigin)
-                val loggedIn = accountCookies.isNotBlank()
+                val loggedIn = accountCookies.isNotBlank() && name != "ANDROID_VR"
                 if (loggedIn) header("Cookie", accountCookies)
-                authorization(accountOrigin)?.let { header("Authorization", it) }
+                if (loggedIn) authorization(accountOrigin)?.let { header("Authorization", it) }
                 header("Origin", accountOrigin)
                 header("X-Origin", accountOrigin)
                 header("X-Goog-AuthUser", "0")
@@ -551,7 +731,7 @@ object YouTubeRepository {
     }
 
     private fun newPipeStreams(videoId: String): List<PlayableStream> {
-        val info = StreamInfo.getInfo("https://www.youtube.com/watch?v=$videoId")
+        val info = newPipeStreamInfo(videoId)
         
         synchronized(videoDetailsCache) {
             if (!videoDetailsCache.containsKey(videoId)) {

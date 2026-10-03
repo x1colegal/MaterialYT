@@ -170,8 +170,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             }.getOrNull()
             publishMetadata()
             startForeground(NOTIFICATION_ID, notification())
-            var audioStreams = runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.stream.StreamInfo.getInfo("https://www.youtube.com/watch?v=${track.id}") } }
-                .getOrNull()?.audioStreams?.map {
+            var audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
+                .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
                     val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
                     val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
                     PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())

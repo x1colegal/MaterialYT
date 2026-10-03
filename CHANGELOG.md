@@ -2,6 +2,20 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.14] - 2026-10-03
+
+### Added
+- Added automatic WEB PoToken session warm-up and one-time NewPipe retry after YouTube returns `LOGIN_REQUIRED`.
+
+### Changed
+- Restored NewPipe-first adaptive stream extraction for regular videos, Shorts, YT Music, and Android Auto playback.
+- Kept the authenticated internal player pipeline as a fallback instead of accepting its 360p combined format first.
+
+### Fixed
+- Fixed higher qualities and codecs disappearing after a playback error.
+- Fixed Shorts initially remaining paused instead of starting playback.
+- Fixed comment reply threads mixing normal top-level comments into replies.
+
 ## [1.4.1] - 2026-10-02
 
 ### Fixed

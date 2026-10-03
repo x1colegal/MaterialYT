@@ -851,16 +851,16 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
         onDispose { player.removeListener(listener); activity.stopMusicNotification(); mediaSession.isActive = false; mediaSession.release(); activity.immersive(false); player.release() }
     }
     LaunchedEffect(track.id) {
-        var audioStreams = runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.stream.StreamInfo.getInfo("https://www.youtube.com/watch?v=${track.id}") } }
-            .getOrNull()?.audioStreams?.map {
+        // Match the v1.2.8 video path: NewPipe exposes the full audio format set first.
+        var audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
+            .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
                 val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
                 val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
                 PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
             }.orEmpty()
         if (audioStreams.isEmpty()) {
-            val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
-            audioStreams = extracted.getOrNull()?.filter { it.audio }.orEmpty()
-            extracted.exceptionOrNull()?.let { if (audioStreams.isEmpty()) error = it.message }
+            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
+                .getOrNull()?.filter { it.audio }.orEmpty()
         }
         val audio = audioStreams.maxByOrNull { it.bitrate }
         if (audio != null) {
@@ -1152,7 +1152,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         val items = loaded.tabs.firstOrNull()?.let { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getInfo(NewPipe.getService(0), it).relatedItems }.orEmpty()
         loaded to items
     } }.onSuccess { (loaded, items) -> channel = loaded; channelItems = items }.onFailure { error = it.message } }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } }
         if (channel == null && error == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
@@ -1226,19 +1226,22 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         selected = stream
     }
     LaunchedEffect(item.id, codec, preferredAudioCodec, quality) {
-        val infoResult = runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo("https://www.youtube.com/watch?v=${item.id}") } }
+        streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; error = null
+        val infoResult = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(item.id) } }
         infoResult.onSuccess { 
             shortInfo = it 
-            audioTracks = it.audioStreams.map { track ->
+            audioTracks = it.audioStreams.filter { track -> track.content.startsWith("http") }.map { track ->
                 val trackName = track.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: track.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
                 val original = track.audioTrackType?.name?.contains("ORIGINAL", true) == true || trackName.contains("original", true)
                 PlayerChoice(track.content, track.codec.orEmpty(), 0, 0, track.bitrate, false, trackName, track.audioTrackId.orEmpty(), original)
             }
             audio = selectAudioStream(audioTracks, preferredAudioCodec)
-            streams = it.videoOnlyStreams.map { v -> PlayerChoice(v.content, v.codec.orEmpty(), v.height, v.fps, v.bitrate, true) }
+            streams = (it.videoOnlyStreams + it.videoStreams).filter { v -> v.content.startsWith("http") }
+                .map { v -> PlayerChoice(v.content, v.codec.orEmpty(), v.height, v.fps, v.bitrate, v.isVideoOnly) }
                 .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { s -> s.height }
             selectVideoStream(streams, codec, quality)?.let { stream -> play(stream); error = null }
-        }.onFailure { error = it.message }
+            AppLog.event("shorts NewPipe primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
+        }.onFailure { AppLog.failure("shorts NewPipe primary video=${item.id}", it) }
         if (streams.isEmpty()) {
             val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(item.id) } }
             extracted.onSuccess { result ->
@@ -1250,7 +1253,12 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             }.onFailure { if (streams.isEmpty()) error = it.message }
         }
     }
-    LaunchedEffect(active) { if (active) player.play() else player.pause() }
+    LaunchedEffect(active, selected) {
+        if (active && selected != null) {
+            player.playWhenReady = true
+            player.play()
+        } else if (!active) player.pause()
+    }
     LaunchedEffect(active, item.id) {
         if (!active) return@LaunchedEffect
         var last = 0L
@@ -1518,17 +1526,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             override fun onPlayerError(cause: PlaybackException) {
                 Log.e("MaterialYT", "video player ${cause.errorCodeName}", cause)
-                val is403 = cause.cause is HttpDataSource.InvalidResponseCodeException
-                    || cause.cause?.message?.contains("403") == true
-                    || cause.localizedMessage?.contains("403") == true
-                if (is403 && availableStreams.size > 1) {
-                    val fallback = availableStreams.firstOrNull { it != selectedStream }
-                    if (fallback != null) {
-                        availableStreams = availableStreams.filter { it != selectedStream }
-                        play(fallback)
-                        return
-                    }
-                }
                 error = "${cause.errorCodeName}: ${cause.cause?.message ?: cause.localizedMessage}"
             }
         }
@@ -1566,37 +1563,39 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
     LaunchedEffect(url, codec, audioCodec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
-        var loaded = false
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
-            if (extracted.isNotEmpty()) {
+        // v1.2.8 behavior: NewPipe is the primary source because it exposes the complete
+        // adaptive format set (AVC, VP9 and AV1). The authenticated player path remains a
+        // fallback only; accepting its combined WEB format first collapses the UI to 360p.
+        player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; error = null
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(videoId) } }.onSuccess { stream ->
+            info = stream
+            audioStreams = stream.audioStreams.filter { it.content.startsWith("http") }.map {
+                val name = it.audioTrackName?.takeIf(String::isNotBlank) ?: it.audioLocale?.displayName?.takeIf(String::isNotBlank).orEmpty()
+                val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
+                PlayerChoice(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, false, name, it.audioTrackId.orEmpty(), original)
+            }
+            selectedAudio = selectAudioStream(audioStreams, audioCodec)
+            availableStreams = (stream.videoOnlyStreams + stream.videoStreams)
+                .filter { it.content.startsWith("http") }
+                .map { PlayerChoice(it.content, it.codec.orEmpty(), it.height, it.fps, it.bitrate, it.isVideoOnly) }
+                .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+            selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
+            AppLog.event("player NewPipe primary video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
+        }.onFailure { e ->
+            AppLog.failure("player NewPipe primary video=$videoId", e)
+        }
+        if (availableStreams.isEmpty()) {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
                 audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
                 selectedAudio = selectAudioStream(audioStreams, audioCodec)
-                availableStreams = extracted.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-                val details = YouTubeRepository.videoDetails(videoId)
-                if (details != null && (videoMetadata == null || videoMetadata?.title?.isBlank() == true)) {
-                    videoMetadata = details
-                }
-                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen); loaded = true }
-            }
-        }.onFailure { e ->
-            AppLog.failure("player repository streams video=$videoId", e)
-        }
-        if (!loaded || availableStreams.isEmpty()) {
-            runCatching { withContext(Dispatchers.IO) { StreamInfo.getInfo(url) } }.onSuccess { stream ->
-                info = stream
-                val newPipeAudio = stream.audioStreams.filter { it.content.startsWith("http") }.map {
-                    val name = it.audioTrackName?.takeIf(String::isNotBlank) ?: it.audioLocale?.displayName?.takeIf(String::isNotBlank).orEmpty()
-                    val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
-                    PlayerChoice(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, false, name, it.audioTrackId.orEmpty(), original)
-                }
-                audioStreams = newPipeAudio
-                selectedAudio = selectAudioStream(audioStreams, audioCodec)
-                val fallbackVideo = (stream.videoOnlyStreams + stream.videoStreams).filter { it.content.startsWith("http") }
-                availableStreams = fallbackVideo.map { PlayerChoice(it.content, it.codec, it.height, it.fps, it.bitrate, it.isVideoOnly) }
+                availableStreams = extracted.filter { !it.audio && it.height > 0 }
+                    .map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = it }
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
-            }.onFailure {
-                if (availableStreams.isEmpty()) error = it.message.orEmpty()
+            }.onFailure { e ->
+                AppLog.failure("player repository fallback video=$videoId", e)
+                if (availableStreams.isEmpty()) error = e.message.orEmpty()
             }
         }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }
@@ -1954,7 +1953,14 @@ fun CommentNode(comment: CommentsInfoItem) {
                 if (showReplies && replies == null) {
                     loading = true
                     scope.launch {
-                        replies = runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { org.schabi.newpipe.extractor.comments.CommentsInfo.getInfo(comment.url)?.relatedItems } }.getOrNull()
+                        replies = runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            val repliesPage = comment.replies ?: return@withContext emptyList()
+                            org.schabi.newpipe.extractor.comments.CommentsInfo.getMoreItems(
+                                org.schabi.newpipe.extractor.NewPipe.getService(comment.serviceId),
+                                comment.url,
+                                repliesPage
+                            ).items
+                        } }.getOrNull()
                         loading = false
                     }
                 }

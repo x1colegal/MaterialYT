@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.15] - 2026-10-03
+
+### Fixed
+- Fixed the YT Music miniplayer close button and downward swipe unexpectedly terminating the app.
+- Made miniplayer dismissal asynchronous and idempotent to avoid mutating ExoPlayer during Compose pointer dispatch.
+- Added consistent horizontal and vertical spacing between YT Music cards on tablets.
+
 ## [1.4.14] - 2026-10-03
 
 ### Added

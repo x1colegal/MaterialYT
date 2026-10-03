@@ -716,7 +716,13 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet) {
-            LazyVerticalGrid(GridCells.Adaptive(minSize = 300.dp), modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp)) {
+            LazyVerticalGrid(
+                GridCells.Adaptive(minSize = 300.dp),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 gridItems(tracks) { track -> FeedRow(track) { selected = track } }
             }
         } else {

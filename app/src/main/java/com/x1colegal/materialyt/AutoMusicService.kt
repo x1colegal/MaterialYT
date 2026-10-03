@@ -36,6 +36,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private var tracks = emptyList<FeedItem>()
     private var currentTrack: FeedItem? = null
     private var currentArtwork: android.graphics.Bitmap? = null
+    private var closingPlayback = false
 
     companion object {
         const val CHANNEL_ID = "materialyt_playback"
@@ -58,7 +59,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         fun pause() { instance?.player?.let { if (it.isPlaying) it.pause() } }
         fun toggle() { instance?.player?.let { if (it.isPlaying) it.pause() else it.play() } }
         fun seekTo(value: Long) { instance?.player?.seekTo(value) }
-        fun close() { instance?.stopPlayback() }
+        fun close() { instance?.requestClosePlayback() }
     }
 
     override fun onCreate() {
@@ -230,9 +231,32 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         if (currentTrack != null) getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
     }
 
-    private fun stopPlayback() {
-        player.stop(); currentTrack = null; currentArtwork = null; nowPlaying.value = null; playing.value = false
-        stopForeground(true); getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+    private fun requestClosePlayback() {
+        if (closingPlayback) return
+        closingPlayback = true
+        // Remove the Compose miniplayer before mutating ExoPlayer. Stopping the player
+        // synchronously from the nested close/drag gesture can invalidate its own UI tree.
+        nowPlaying.value = null
+        playing.value = false
+        currentTrack = null
+        currentArtwork = null
+        position.longValue = 0L
+        bufferedPosition.longValue = 0L
+        duration.longValue = 0L
+        scope.launch {
+            kotlinx.coroutines.yield()
+            runCatching {
+                player.pause()
+                player.clearMediaItems()
+                session.setMetadata(null)
+                session.setPlaybackState(PlaybackStateCompat.Builder()
+                    .setActions(PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH)
+                    .setState(PlaybackStateCompat.STATE_STOPPED, 0L, 0f).build())
+                stopForeground(true)
+                getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+            }.onFailure { AppLog.failure("close music miniplayer", it) }
+            closingPlayback = false
+        }
     }
 
     override fun onDestroy() { instance = null; nowPlaying.value = null; playing.value = false; scope.cancel(); player.release(); session.release(); super.onDestroy() }

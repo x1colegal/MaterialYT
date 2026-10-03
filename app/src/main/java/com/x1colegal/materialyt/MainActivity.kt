@@ -1596,14 +1596,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
             }.onFailure {
-                if (availableStreams.isEmpty()) {
-                    val msg = it.message.orEmpty()
-                    error = if (msg.contains("VISIONOS", true) || msg.contains("bot", true)) {
-                        "YouTube bot protection: Please sign in from the Account tab to play."
-                    } else {
-                        msg
-                    }
-                }
+                if (availableStreams.isEmpty()) error = it.message.orEmpty()
             }
         }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }

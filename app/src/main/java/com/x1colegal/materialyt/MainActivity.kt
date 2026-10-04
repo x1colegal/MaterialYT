@@ -858,13 +858,13 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
     }
     LaunchedEffect(track.id) {
         // Match the v1.2.8 video path: NewPipe exposes the full audio format set first.
-        var audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
+        var audioStreams = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
             .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
                 val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
                 val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
                 PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
-            }.orEmpty()
-        if (audioStreams.isEmpty()) {
+            }.orEmpty() else emptyList()
+        if (audioStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
             audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
                 .getOrNull()?.filter { it.audio }.orEmpty()
         }
@@ -1233,7 +1233,8 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     }
     LaunchedEffect(item.id, codec, preferredAudioCodec, quality) {
         streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; error = null
-        val infoResult = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(item.id) } }
+        val infoResult = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(item.id) } }
+            else Result.failure(IllegalStateException("NewPipe disabled by playback backend setting"))
         infoResult.onSuccess { 
             shortInfo = it 
             audioTracks = it.audioStreams.filter { track -> track.content.startsWith("http") }.map { track ->
@@ -1248,7 +1249,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             selectVideoStream(streams, codec, quality)?.let { stream -> play(stream); error = null }
             AppLog.event("shorts NewPipe primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
         }.onFailure { AppLog.failure("shorts NewPipe primary video=${item.id}", it) }
-        if (streams.isEmpty()) {
+        if (streams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
             val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(item.id) } }
             extracted.onSuccess { result ->
                 audioTracks = result.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
@@ -1573,7 +1574,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         // adaptive format set (AVC, VP9 and AV1). The authenticated player path remains a
         // fallback only; accepting its combined WEB format first collapses the UI to 360p.
         player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; error = null
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(videoId) } }.onSuccess { stream ->
+        val newPipeResult = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(videoId) } }
+            else Result.failure(IllegalStateException("NewPipe disabled by playback backend setting"))
+        newPipeResult.onSuccess { stream ->
             info = stream
             audioStreams = stream.audioStreams.filter { it.content.startsWith("http") }.map {
                 val name = it.audioTrackName?.takeIf(String::isNotBlank) ?: it.audioLocale?.displayName?.takeIf(String::isNotBlank).orEmpty()
@@ -1590,7 +1593,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }.onFailure { e ->
             AppLog.failure("player NewPipe primary video=$videoId", e)
         }
-        if (availableStreams.isEmpty()) {
+        if (availableStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
                 audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
                 selectedAudio = selectAudioStream(audioStreams, audioCodec)
@@ -1893,6 +1896,7 @@ private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCo
 private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onAuth: (Boolean) -> Unit) {
     var destination by remember { mutableStateOf("account") }
     var signedIn by remember { mutableStateOf(YouTubeRepository.signedIn()) }
+    var playbackBackend by remember { mutableStateOf(PlaybackBackendPreferences.backend) }
     if (destination == "login") { LoginScreen({ destination = "account" }) { signedIn = true; onAuth(true); destination = "account" }; return }
     if (destination == "your_account") { OwnAccountScreen(activity, codec, audioCodec, quality, onPlayer) { destination = "account" }; return }
     if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, {}, { destination = "account" }) { YouTubeRepository.library() }; return }
@@ -1932,6 +1936,11 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
         item { ChoiceSection("Default video quality", QualityChoice.entries, quality, { it.label }, onQuality) }
         item { ChoiceSection("Video decoder", DecoderMode.entries, videoDecoderMode, { it.label }, onVideoDecoderMode) }
         item { ChoiceSection("Audio decoder", DecoderMode.entries, audioDecoderMode, { it.label }, onAudioDecoderMode) }
+        item { ChoiceSection("Playback backend", PlaybackBackend.entries, playbackBackend, { it.label }) {
+            playbackBackend = it
+            PlaybackBackendPreferences.set(activity, it)
+        } }
+        item { Text("Fallback is disabled by default. Force NewPipe never uses WEB+PoToken. NewPipe + WEB fallback permits WEB+PoToken only after the NewPipe clients fail. Force WEB bypasses NewPipe and may be limited to 360p for some videos.", style = MaterialTheme.typography.bodySmall) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }
         item { Text("HTTP/1.0 compatibility disables connection reuse but uses an HTTP/1.1 request line because OkHttp intentionally cannot emit HTTP/1.0. The HTTP/2 mode advertises HTTP/2 with HTTP/1.1 fallback.", style = MaterialTheme.typography.bodySmall) }
     }

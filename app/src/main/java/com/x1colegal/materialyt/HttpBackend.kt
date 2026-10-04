@@ -54,6 +54,7 @@ object HttpBackend : Downloader() {
 
     override fun execute(request: Request): Response {
         val url = request.url()
+        val bytes = request.dataToSend()
         val builder = okhttp3.Request.Builder().url(url)
         request.headers().forEach { (name, values) -> values.forEach { builder.addHeader(name, it) } }
 
@@ -61,6 +62,8 @@ object HttpBackend : Downloader() {
         if (isYouTube) {
             val origin = if (url.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
             val accountCookies = YouTubeRepository.cookies(origin)
+            val isPoTokenPlayerRequest = url.contains("youtubei/v1/player")
+                    && bytes?.toString(Charsets.UTF_8)?.contains("serviceIntegrityDimensions") == true
             
             // Only inject cookies globally for googlevideo.com (ExoPlayer). 
             // YouTubeRepository handles its own cookies, and injecting into youtubei ruins NewPipe's anonymous requests.
@@ -68,6 +71,15 @@ object HttpBackend : Downloader() {
                 val existingCookie = builder.build().header("Cookie")
                 val mergedCookie = if (existingCookie.isNullOrBlank()) accountCookies else "$existingCookie; $accountCookies"
                 builder.header("Cookie", mergedCookie)
+            }
+
+            // NewPipe's WEB PoToken player request must use the same signed-in browser context
+            // as MaterialYT's working WEB player request. Keep the other NewPipe clients
+            // anonymous because mobile/VisionOS client identities reject browser credentials.
+            if (isPoTokenPlayerRequest) {
+                YouTubeRepository.authenticatedHeaders(origin).forEach { (name, value) ->
+                    builder.header(name, value)
+                }
             }
             
             if (url.contains("googlevideo.com")) {
@@ -83,7 +95,6 @@ object HttpBackend : Downloader() {
             }
         }
 
-        val bytes = request.dataToSend()
         val body = bytes?.toRequestBody(builder.build().header("Content-Type")?.toMediaTypeOrNull())
         builder.method(request.httpMethod(), if (request.httpMethod() in listOf("GET", "HEAD")) null else body ?: ByteArray(0).toRequestBody())
         client.newCall(builder.build()).execute().use { response ->

@@ -15,6 +15,7 @@ class MaterialYtApp : Application() {
             kotlin.system.exitProcess(10)
         }
         HttpBackend.initialize(this)
+        PlaybackBackendPreferences.initialize(this)
         NewPipe.init(HttpBackend)
         YoutubeStreamExtractor.setPoTokenProvider(NewPipePoTokenProvider)
         YoutubeStreamExtractor.setStreamUrlResolver(YouTubeRepository::resolveNewPipeStreamUrl)

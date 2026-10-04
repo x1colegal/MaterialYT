@@ -43,4 +43,11 @@ final class ClientsConstants {
     // See https://theapplewiki.com/wiki/Firmware/Apple_Vision/26.x
     static final String VISIONOS_VERSION = "26.6.0.23O770";
     static final String VISIONOS_USER_AGENT_VERSION = "26_6_0";
+
+    static final String IOS_CLIENT_ID = "5";
+    static final String IOS_CLIENT_NAME = "IOS";
+    static final String IOS_CLIENT_VERSION = "21.03.2";
+    static final String IOS_DEVICE_MODEL = "iPhone16,2";
+    static final String IOS_OS_VERSION = "18.7.2.22H124";
+
 }

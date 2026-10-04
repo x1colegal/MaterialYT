@@ -136,6 +136,31 @@ public final class YoutubeStreamHelper {
                 getDownloader().postWithContentTypeJson(url, headers, body, localization)));
     }
 
+    public static JsonObject getIosPlayerResponse(
+            @Nonnull final ContentCountry contentCountry,
+            @Nonnull final Localization localization,
+            @Nonnull final String videoId,
+            @Nonnull final String cpn) throws IOException, ExtractionException {
+        final InnertubeClientRequestInfo requestInfo = InnertubeClientRequestInfo.ofIosClient();
+        final Map<String, List<String>> headers = org.schabi.newpipe.extractor.Compat.mapOf(
+                "User-Agent", org.schabi.newpipe.extractor.Compat.listOf(
+                        "com.google.ios.youtube/21.03.2 "
+                                + "(iPhone16,2; U; CPU iOS 18_7_2 like Mac OS X)"),
+                "X-Goog-Api-Format-Version", org.schabi.newpipe.extractor.Compat.listOf("2"));
+        requestInfo.clientInfo.visitorData = YoutubeParsingHelper.getVisitorDataFromInnertube(
+                requestInfo, localization, contentCountry, headers,
+                YOUTUBEI_V1_GAPIS_URL, null, false);
+        final JsonBuilder<JsonObject> builder = prepareJsonBuilder(localization, contentCountry,
+                requestInfo, null);
+        addVideoIdCpnAndOkChecks(builder, videoId, cpn);
+        final byte[] body = JsonWriter.string(builder.done()).getBytes(StandardCharsets.UTF_8);
+        final String url = YOUTUBEI_V1_GAPIS_URL + PLAYER + "?"
+                + DISABLE_PRETTY_PRINT_PARAMETER + "&t=" + generateTParameter()
+                + "&id=" + videoId;
+        return JsonUtils.toJsonObject(getValidJsonResponseBody(
+                getDownloader().postWithContentTypeJson(url, headers, body, localization)));
+    }
+
     private static void addVideoIdCpnAndOkChecks(@Nonnull final JsonBuilder<JsonObject> builder,
                                                  @Nonnull final String videoId,
                                                  @Nullable final String cpn) {

@@ -173,13 +173,13 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             }.getOrNull()
             publishMetadata()
             startForeground(NOTIFICATION_ID, notification())
-            var audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
+            var audioStreams = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
                 .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
                     val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
                     val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
                     PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
-                }.orEmpty()
-            if (audioStreams.isEmpty()) {
+                }.orEmpty() else emptyList()
+            if (audioStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
                 audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
                     .getOrNull()?.filter { it.audio }.orEmpty()
             }

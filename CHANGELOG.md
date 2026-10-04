@@ -2,6 +2,19 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.18] - 2026-10-03
+
+### Fixed
+- Fixed NewPipe's integrated WEB PoToken request using an anonymous HTTP context after the signed-in WEB player had already proven playable.
+- Limited browser authentication injection to the NewPipe PoToken player request so the iOS extraction client remains anonymous.
+- Replaced the VisionOS player client with iOS across NewPipe playback, restoring made-for-kids videos and adaptive qualities up to 1080p where available.
+- Standardized NewPipe extraction on iOS without internal client fallbacks.
+
+### Added
+- Added playback backend settings for Force NewPipe, NewPipe with WEB fallback, and Force WEB.
+- Disabled WEB fallback by default and documented that forced backends may be limited to 360p for some videos.
+- Restricted WEB PoToken extraction to Force WEB and NewPipe with WEB fallback modes.
+
 ## [1.4.17] - 2026-10-03
 
 ### Changed

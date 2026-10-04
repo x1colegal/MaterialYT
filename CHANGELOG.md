@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.25] - 2026-10-04
+
+### Changed
+- Added automatic repeating marquee animation with pauses for overflowing video and YT Music miniplayer titles and channel or artist names.
+- Added explicit ellipsis overflow to titles and subtitles across Home, search, channel, playlist, Shorts, and player layouts.
+
 ## [1.4.24] - 2026-10-04
 
 ### Fixed

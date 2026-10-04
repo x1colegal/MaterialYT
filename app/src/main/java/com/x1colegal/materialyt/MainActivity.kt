@@ -53,6 +53,8 @@ import kotlin.math.roundToInt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -174,6 +176,13 @@ private fun formatTime(milliseconds: Long): String {
     val totalSeconds = (milliseconds.coerceAtLeast(0L) / 1000)
     return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
 }
+
+@OptIn(ExperimentalFoundationApi::class)
+private fun Modifier.autoMarquee(): Modifier = basicMarquee(
+    iterations = Int.MAX_VALUE,
+    initialDelayMillis = 1_500,
+    repeatDelayMillis = 2_000
+)
 enum class AppColor(val title: String, val seed: Long) {
     PURPLE("Purple", 0xFF8B5CF6), RED("YouTube Red", 0xFFFF1744), BLUE("Bright Blue", 0xFF2196F3), BLUE_CYAN("Blue Cyan", 0xFF00B8D4),
     GREEN("Forest", 0xFF43A047), ORANGE("Amber", 0xFFFF8F00), PINK("Rose", 0xFFFF4081), TEAL("Teal", 0xFF00A896),
@@ -513,8 +522,8 @@ private fun MiniPlayer(openMusic: () -> Unit) {
             Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 AsyncImage(track.thumbnail, null, Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
                 Column(Modifier.padding(horizontal = 10.dp).weight(1f)) {
-                    Text(track.title, maxLines = 1, style = MaterialTheme.typography.titleSmall)
-                    Text(track.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                    Text(track.title, Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
+                    Text(track.subtitle, Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.bodySmall)
                 }
                 IconButton(onClick = { AutoMusicService.toggle() }) {
                     Icon(if (AutoMusicService.playing.value) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause")
@@ -789,7 +798,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                 Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
                     Column(Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                         AsyncImage(track.thumbnail, null, Modifier.sizeIn(maxWidth = 360.dp, maxHeight = 360.dp).aspectRatio(1f).clip(RoundedCornerShape(20.dp)), contentScale = ContentScale.Crop)
-                        Spacer(Modifier.height(18.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(18.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(14.dp))
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
@@ -816,7 +825,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                         else items(lines.size) { index -> Text(lines[index].text, Modifier.clickable(enabled = lines[index].startMs >= 0) { AutoMusicService.seekTo(lines[index].startMs) }, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .48f), style = if (index == currentLine) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge) }
                     } else Column(Modifier.fillMaxSize().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                         AsyncImage(track.thumbnail, null, Modifier.sizeIn(maxWidth = 320.dp, maxHeight = 320.dp).aspectRatio(1f).clip(RoundedCornerShape(20.dp)), contentScale = ContentScale.Crop)
-                        Spacer(Modifier.height(22.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(22.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
                             drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)
@@ -929,7 +938,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
                 } else {
                     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                         AsyncImage(track.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(track.thumbnailWidth.toFloat() / track.thumbnailHeight.coerceAtLeast(1)).clip(RoundedCornerShape(20.dp)), contentScale = ContentScale.Crop)
-                        Spacer(Modifier.height(24.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), style = MaterialTheme.typography.bodyLarge)
+                        Spacer(Modifier.height(24.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         AnimatedVisibility(error != null, enter = fadeIn(), exit = fadeOut()) { Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp)) }
                         val duration = player.duration.takeIf { it > 0 } ?: 0L
                         Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
@@ -1057,9 +1066,9 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
             if (item.channelThumbnail.isNotBlank()) AsyncImage(item.channelThumbnail, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
             else Surface(Modifier.size(38.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(8.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer) }
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 2)
+                Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(3.dp))
-                Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+                Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             Icon(Icons.Default.MoreVert, "More options", tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -1110,7 +1119,7 @@ private fun ResultRow(item: InfoItem, showSubtitle: Boolean = true, click: () ->
         }
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
-            Text(item.name, style = MaterialTheme.typography.titleMedium, maxLines = 2)
+            Text(item.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (showSubtitle) {
                 Spacer(Modifier.height(2.dp))
                 Text(item.infoType.name.lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1152,7 +1161,7 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
                 Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodyMedium)
                 if (playlistItems.isNotEmpty()) Button(onClick = { selectedIndex = 0 }, Modifier.fillMaxWidth()) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play") }
             } }
-            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall) } } }
+            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) } } }
         }
       }
       selectedIndex?.let { selected ->
@@ -1187,7 +1196,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         channel?.let { data ->
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(104.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
-                Text(data.name, style = MaterialTheme.typography.headlineSmall)
+                Text(data.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                 if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(data.description.orEmpty(), maxLines = 5, style = MaterialTheme.typography.bodyMedium)
             }
@@ -1397,10 +1406,10 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                         val shortAvatar = shortInfo?.uploaderAvatars?.lastOrNull()?.url ?: item.channelThumbnail
                         if (shortAvatar.isNotBlank()) AsyncImage(shortAvatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                         Spacer(Modifier.width(10.dp))
-                        Text(shortInfo?.uploaderName?.takeIf { it.isNotBlank() } ?: item.subtitle.ifBlank { "YouTube" }, color = ComposeColor.White, style = MaterialTheme.typography.titleSmall, maxLines = 1)
+                        Text(shortInfo?.uploaderName?.takeIf { it.isNotBlank() } ?: item.subtitle.ifBlank { "YouTube" }, color = ComposeColor.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(Modifier.height(10.dp))
-                    Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, modifier = Modifier.clickable { expandedTitle = true })
+                    Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     IconButton(onClick = {
@@ -1728,8 +1737,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         )
                     }
                     Column(Modifier.padding(horizontal = 10.dp).weight(1f)) {
-                        Text(info?.name ?: videoMetadata?.title ?: "Video", maxLines = 1, style = MaterialTheme.typography.titleSmall)
-                        Text(info?.uploaderName ?: videoMetadata?.author ?: "", maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                        Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
+                        Text(info?.uploaderName ?: videoMetadata?.author ?: "", Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.bodySmall)
                     }
                     var playing by remember { mutableStateOf(player.isPlaying) }
                     DisposableEffect(player) {

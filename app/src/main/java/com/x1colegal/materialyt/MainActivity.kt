@@ -1185,14 +1185,18 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
 
 @Composable
 private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onBack: () -> Unit) {
-    BackHandler(onBack = onBack)
     var channel by remember { mutableStateOf<org.schabi.newpipe.extractor.channel.ChannelInfo?>(null) }
     var channelItems by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
     var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
     var selectedTab by remember { mutableStateOf("videos") }
-    var selected by remember { mutableStateOf<String?>(null) }
+    var selectedVideo by remember { mutableStateOf<String?>(null) }
+    var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
+    var tabHandler by remember { mutableStateOf<org.schabi.newpipe.extractor.linkhandler.ListLinkHandler?>(null) }
+    var nextPage by remember { mutableStateOf<org.schabi.newpipe.extractor.Page?>(null) }
+    var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    if (selected != null) { VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer) { selected = null }; return }
+    val scope = rememberCoroutineScope()
+    BackHandler { when { selectedShort != null -> selectedShort = null; selectedVideo != null -> selectedVideo = null; else -> onBack() } }
     LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url) } }
         .onSuccess { channel = it }.onFailure { error = it.message } }
     LaunchedEffect(channel, selectedTab) {
@@ -1202,14 +1206,37 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPosts(url) } }
                 .onSuccess { posts = it }.onFailure { error = it.message }
         } else {
+            channelItems = emptyList()
+            nextPage = null
             val handler = loaded.tabs.firstOrNull { it.contentFilters.firstOrNull()?.equals(selectedTab, true) == true }
                 ?: if (selectedTab == "videos") loaded.tabs.firstOrNull() else null
-            runCatching { withContext(Dispatchers.IO) { handler?.let { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getInfo(NewPipe.getService(0), it).relatedItems }.orEmpty() } }
-                .onSuccess { channelItems = it }.onFailure { error = it.message }
+            tabHandler = handler
+            runCatching { withContext(Dispatchers.IO) { handler?.let { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getInfo(NewPipe.getService(0), it) } } }
+                .onSuccess { info -> channelItems = info?.relatedItems.orEmpty(); nextPage = info?.nextPage }
+                .onFailure { error = it.message }
         }
     }
     val hasShorts = channel?.tabs?.any { it.contentFilters.firstOrNull()?.equals("shorts", true) == true } == true
-    LazyColumn(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentPadding = PaddingValues(bottom = 24.dp)) {
+    fun loadMore() {
+        val handler = tabHandler ?: return
+        val page = nextPage?.takeIf { org.schabi.newpipe.extractor.Page.isValid(it) } ?: return
+        if (loadingMore || selectedTab == "posts") return
+        loadingMore = true
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getMoreItems(NewPipe.getService(0), handler, page) } }
+                .onSuccess { result -> channelItems = (channelItems + result.items).distinctBy { it.url }; nextPage = result.nextPage }
+                .onFailure { error = it.message }
+            loadingMore = false
+        }
+    }
+    val listState = rememberLazyListState()
+    LaunchedEffect(listState, channelItems.size, selectedTab) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+            if (last >= listState.layoutInfo.totalItemsCount - 4) loadMore()
+        }
+    }
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
         item { Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } } }
         if (channel == null && error == null) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
         error?.let { message -> item { Text(message, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) } }
@@ -1236,11 +1263,61 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Text(post.text, style = MaterialTheme.typography.bodyLarge)
                             if (post.image.isNotBlank()) AsyncImage(post.image, null, Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Fit)
-                            Text(listOf(post.published, post.views, post.comments).joinToString(" • "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(listOf(post.published, post.likes, post.comments).joinToString(" • "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            CommunityCommentsButton(post)
                         }
                     }
                 }
-            } else items(channelItems) { item -> ResultRow(item, showSubtitle = false) { if (item.infoType == InfoItem.InfoType.STREAM) selected = item.url } }
+            } else {
+                items(channelItems) { item -> ResultRow(item, showSubtitle = false) {
+                    if (item.infoType == InfoItem.InfoType.STREAM) {
+                        if (selectedTab == "shorts") {
+                            val stream = item as? org.schabi.newpipe.extractor.stream.StreamInfoItem
+                            val id = Regex("(?:shorts/|[?&]v=)([A-Za-z0-9_-]{11})").find(item.url)?.groupValues?.get(1) ?: item.url.substringAfterLast('/').substringBefore('?')
+                            selectedShort = FeedItem(id, item.name, stream?.uploaderName.orEmpty(), item.thumbnails.lastOrNull()?.url.orEmpty(), 9, 16,
+                                stream?.uploaderAvatars?.lastOrNull()?.url.orEmpty(), item.url, channelUrl = stream?.uploaderUrl.orEmpty())
+                        } else selectedVideo = item.url
+                    }
+                } }
+                if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
+            }
+        }
+    }
+    selectedVideo?.let { selected -> VideoScreen(activity, selected, codec, audioCodec, quality, onPlayer) { selectedVideo = null } }
+    selectedShort?.let { short -> ShortPlayer(activity, short, true, codec, audioCodec, quality, onPlayer) { } }
+    }
+}
+
+@Composable
+private fun CommunityCommentsButton(post: CommunityPost) {
+    var expanded by remember(post.id) { mutableStateOf(false) }
+    var loading by remember(post.id) { mutableStateOf(false) }
+    var loaded by remember(post.id) { mutableStateOf(false) }
+    var comments by remember(post.id) { mutableStateOf<List<CommunityComment>>(emptyList()) }
+    var error by remember(post.id) { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    TextButton(onClick = {
+        expanded = !expanded
+        if (expanded && !loaded && !loading) {
+            loading = true
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.communityPostComments(post.id) } }
+                    .onSuccess { comments = it; loaded = true }
+                    .onFailure { error = it.message }
+                loading = false
+            }
+        }
+    }) { Icon(Icons.Default.Comment, null); Spacer(Modifier.width(8.dp)); Text(if (expanded) "Hide comments" else "View comments") }
+    if (expanded) {
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        if (loaded && comments.isEmpty()) Text("No comments were returned.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        comments.forEach { comment ->
+            Column(Modifier.fillMaxWidth().padding(start = 12.dp, top = 8.dp)) {
+                Text(comment.author, style = MaterialTheme.typography.labelLarge)
+                Text(comment.text, style = MaterialTheme.typography.bodyMedium)
+                Text(listOf(comment.published, comment.likes).filter { it.isNotBlank() }.joinToString(" • "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

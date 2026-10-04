@@ -2,6 +2,14 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.28] - 2026-10-04
+
+### Fixed
+- Preserved the channel page behind video playback so minimizing a channel video no longer reveals a black screen.
+- Opened channel Shorts in the native vertical Shorts player instead of the regular video player.
+- Replaced unavailable Community Post views with likes and added expandable real comment threads.
+- Added automatic continuation loading to channel Videos and Shorts tabs.
+
 ## [1.4.27] - 2026-10-04
 
 ### Added

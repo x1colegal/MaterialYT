@@ -20,7 +20,8 @@ data class PlayableStream(val url: String, val codec: String, val height: Int, v
 data class ChannelInfo(val name: String, val thumbnail: String)
 data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
-data class CommunityPost(val id: String, val text: String, val published: String, val views: String, val comments: String, val image: String = "")
+data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "")
+data class CommunityComment(val id: String, val author: String, val text: String, val published: String, val likes: String)
 
 object YouTubeRepository {
     const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
@@ -277,16 +278,21 @@ object YouTubeRepository {
                 is JSONObject -> {
                     val renderer = value.optJSONObject("backstagePostRenderer") ?: value.optJSONObject("postRenderer")
                     if (renderer != null) {
+                        fun nestedText(node: Any?, keys: Set<String>): String? = when (node) {
+                            is JSONObject -> node.keys().asSequence().mapNotNull { key ->
+                                if (key in keys) text(node.opt(key))?.takeIf { it.isNotBlank() } else nestedText(node.opt(key), keys)
+                            }.firstOrNull()
+                            is JSONArray -> (0 until node.length()).asSequence().mapNotNull { nestedText(node.opt(it), keys) }.firstOrNull()
+                            else -> null
+                        }
                         val content = text(renderer.opt("contentText")) ?: text(renderer.opt("text")).orEmpty()
                         val id = renderer.optString("postId").ifBlank { content.hashCode().toString() }
                         if (content.isNotBlank()) posts.putIfAbsent(id, CommunityPost(
                             id = id,
                             text = content,
                             published = text(renderer.opt("publishedTimeText")).orEmpty().ifBlank { "Date unavailable" },
-                            views = text(renderer.opt("viewCountText")).orEmpty().ifBlank { "Views unavailable" },
-                            comments = text(renderer.opt("replyCountText")).orEmpty().ifBlank {
-                                text(renderer.opt("commentCountText")).orEmpty().ifBlank { "Comments unavailable" }
-                            },
+                            likes = nestedText(renderer, setOf("voteCount", "likeCount", "likeCountText")).orEmpty().ifBlank { "0 likes" },
+                            comments = nestedText(renderer, setOf("replyCount", "replyCountText", "commentCount", "commentCountText")).orEmpty().ifBlank { "Comments" },
                             image = findThumbnail(renderer).orEmpty()
                         ))
                     }
@@ -297,6 +303,40 @@ object YouTubeRepository {
         }
         collect(data)
         return posts.values.toList()
+    }
+
+    fun communityPostComments(postId: String): List<CommunityComment> {
+        var data = initialData(get("https://www.youtube.com/post/$postId"))
+        val comments = linkedMapOf<String, CommunityComment>()
+        fun collect(value: Any?) {
+            when (value) {
+                is JSONObject -> {
+                    value.optJSONObject("commentRenderer")?.let { renderer ->
+                        val body = text(renderer.opt("contentText")).orEmpty()
+                        if (body.isNotBlank()) {
+                            val id = renderer.optString("commentId").ifBlank { body.hashCode().toString() }
+                            comments.putIfAbsent(id, CommunityComment(id,
+                                text(renderer.opt("authorText")).orEmpty().ifBlank { "YouTube user" }, body,
+                                text(renderer.opt("publishedTimeText")).orEmpty(),
+                                text(renderer.opt("voteCount")).orEmpty()))
+                        }
+                    }
+                    value.keys().forEach { collect(value.opt(it)) }
+                }
+                is JSONArray -> for (index in 0 until value.length()) collect(value.opt(index))
+            }
+        }
+        collect(data)
+        val seen = mutableSetOf<String>()
+        repeat(3) {
+            val token = findContinuationToken(data) ?: return@repeat
+            if (!seen.add(token)) return@repeat
+            val bootstrap = bootstrap("https://www.youtube.com", "WEB")
+            data = post("https://www.youtube.com/youtubei/v1/next?key=${bootstrap.key}",
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), bootstrap.origin)
+            collect(data)
+        }
+        return comments.values.toList()
     }
     fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home"))
     fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query))

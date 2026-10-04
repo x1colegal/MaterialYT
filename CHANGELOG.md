@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.31] - 2026-10-04
+
+### Fixed
+- Automatically refreshed extraction and retried YT Music playback when every stream from the first attempt failed.
+- Prevented overlapping requests for the same song from replacing a newer playback preparation.
+
 ## [1.4.30] - 2026-10-04
 
 ### Fixed

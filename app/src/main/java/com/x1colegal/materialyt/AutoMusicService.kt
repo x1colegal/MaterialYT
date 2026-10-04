@@ -40,6 +40,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private var audioCandidates = emptyList<PlayableStream>()
     private var audioCandidateIndex = -1
     private var webFallbackAttempted = false
+    private var extractionRetryCount = 0
+    private var playGeneration = 0
     private var preferredAudioCodec = AudioCodecChoice.MP4A
 
     companion object {
@@ -111,7 +113,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
                 val failedTrack = currentTrack ?: return
                 AppLog.failure("music stream candidate=${audioCandidateIndex + 1}/${audioCandidates.size} video=${failedTrack.id}", error)
-                scope.launch { playNextAudioCandidate(failedTrack) }
+                scope.launch { playNextAudioCandidate(failedTrack, playGeneration) }
             }
         })
         publishState()
@@ -167,12 +169,14 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     private fun play(track: FeedItem, preferredCodec: AudioCodecChoice = AudioCodecChoice.MP4A) {
+        val generation = ++playGeneration
         scope.launch {
             currentTrack = track
             preferredAudioCodec = preferredCodec
             audioCandidates = emptyList()
             audioCandidateIndex = -1
             webFallbackAttempted = false
+            extractionRetryCount = 0
             nowPlaying.value = track
             scope.launch(Dispatchers.IO) {
                 runCatching { YouTubeRepository.preparePlaybackTracking(track.id) }
@@ -190,7 +194,15 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             }.getOrNull()
             publishMetadata()
             startForeground(NOTIFICATION_ID, notification())
-            var audioStreams = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
+            val audioStreams = extractAudioStreams(track)
+            if (currentTrack?.id != track.id || generation != playGeneration) return@launch
+            setAudioCandidates(audioStreams, preferredCodec)
+            playNextAudioCandidate(track, generation)
+        }
+    }
+
+    private suspend fun extractAudioStreams(track: FeedItem): List<PlayableStream> {
+        var audioStreams = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
                 .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
                     val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
                     val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
@@ -200,18 +212,17 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
                     .getOrNull()?.filter { it.audio }.orEmpty()
             }
-            if (currentTrack?.id != track.id) return@launch
-            val original = audioStreams.filter { it.audioTrackName.contains("original", true) }.ifEmpty { audioStreams.filter { it.originalAudio } }.ifEmpty { audioStreams }
-            audioCandidates = original.sortedWith(
-                compareByDescending<PlayableStream> { stream -> preferredCodec.tokens.any { stream.codec.contains(it, true) } }
-                    .thenByDescending { it.bitrate }
-            )
-            playNextAudioCandidate(track)
-        }
+        return audioStreams
     }
 
-    private suspend fun playNextAudioCandidate(track: FeedItem) {
-        if (currentTrack?.id != track.id) return
+    private fun setAudioCandidates(audioStreams: List<PlayableStream>, codec: AudioCodecChoice) {
+        val original = audioStreams.filter { it.audioTrackName.contains("original", true) }.ifEmpty { audioStreams.filter { it.originalAudio } }.ifEmpty { audioStreams }
+        audioCandidates = original.sortedWith(compareByDescending<PlayableStream> { stream -> codec.tokens.any { stream.codec.contains(it, true) } }.thenByDescending { it.bitrate })
+        audioCandidateIndex = -1
+    }
+
+    private suspend fun playNextAudioCandidate(track: FeedItem, generation: Int) {
+        if (currentTrack?.id != track.id || generation != playGeneration) return
         val next = audioCandidateIndex + 1
         if (next >= audioCandidates.size) {
             if (!webFallbackAttempted && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
@@ -225,7 +236,18 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                         .thenByDescending { it.bitrate }
                 )
                 audioCandidates = audioCandidates + additional
-                if (additional.isNotEmpty()) return playNextAudioCandidate(track)
+                if (additional.isNotEmpty()) return playNextAudioCandidate(track, generation)
+            }
+            if (extractionRetryCount < 1) {
+                extractionRetryCount++
+                AppLog.event("music refreshing extraction after failed first attempt video=${track.id}")
+                NewPipePoTokenProvider.reset()
+                kotlinx.coroutines.delay(500)
+                val refreshed = extractAudioStreams(track)
+                if (currentTrack?.id != track.id || generation != playGeneration) return
+                setAudioCandidates(refreshed, preferredAudioCodec)
+                webFallbackAttempted = false
+                if (audioCandidates.isNotEmpty()) return playNextAudioCandidate(track, generation)
             }
             AppLog.event("music exhausted all stream candidates video=${track.id}")
             return

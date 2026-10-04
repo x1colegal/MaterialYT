@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.26] - 2026-10-04
+
+### Added
+- Added the video's localized publication date to the three-dot video details panel.
+
 ## [1.4.25] - 2026-10-04
 
 ### Changed

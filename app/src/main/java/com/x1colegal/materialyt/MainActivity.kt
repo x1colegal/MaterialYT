@@ -1880,6 +1880,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         text = {
             val views = info?.viewCount ?: videoMetadata?.viewCount ?: -1L
             val likes = info?.likeCount ?: -1L
+            val publishedDate = info?.uploadDate?.localDateTime?.toLocalDate()?.let { date ->
+                java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.LONG)
+                    .withLocale(java.util.Locale.getDefault()).format(date)
+            } ?: info?.textualUploadDate?.takeIf { it.isNotBlank() }
             val rawDescription = info?.description?.content.orEmpty()
             val description = if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(rawDescription, Html.FROM_HTML_MODE_LEGACY).toString()
                 else @Suppress("DEPRECATION") Html.fromHtml(rawDescription).toString()
@@ -1888,6 +1892,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     Column { Text(if (likes >= 0) formatCount(likes) else "—", style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
+                Spacer(Modifier.height(16.dp))
+                Text("Published", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(publishedDate ?: "Date unavailable", style = MaterialTheme.typography.titleMedium)
                 HorizontalDivider(Modifier.padding(vertical = 16.dp))
                 Text("Description", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))

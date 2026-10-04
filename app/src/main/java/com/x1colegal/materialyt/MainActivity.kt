@@ -1461,6 +1461,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var playerBuffered by remember { mutableLongStateOf(0L) }
     var playerDuration by remember { mutableLongStateOf(0L) }
     var showPlayerSettings by remember { mutableStateOf(false) }
+    var showVideoDetails by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf(false) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
     var speed by remember { mutableFloatStateOf(1f) }
@@ -1771,7 +1772,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
                             if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
                         }
-                        Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
+                        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.Top) {
+                            Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.weight(1f).padding(top = 12.dp), style = MaterialTheme.typography.titleLarge)
+                            IconButton(onClick = { showVideoDetails = true }) { Icon(Icons.Default.MoreVert, "Video details") }
+                        }
                         Text(
                             if (info == null && videoMetadata == null) "" else "${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views",
                             Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
@@ -1812,7 +1816,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
                         if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
                     }
-                    Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
+                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.Top) {
+                        Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.weight(1f).padding(top = 12.dp), style = MaterialTheme.typography.titleLarge)
+                        IconButton(onClick = { showVideoDetails = true }) { Icon(Icons.Default.MoreVert, "Video details") }
+                    }
                     Text(
                         if (info == null && videoMetadata == null) "" else "${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views",
                         Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
@@ -1838,6 +1845,28 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
         }
     }
+    if (showVideoDetails) AlertDialog(
+        onDismissRequest = { showVideoDetails = false },
+        confirmButton = { TextButton(onClick = { showVideoDetails = false }) { Text("Close") } },
+        title = { Text("Video details") },
+        text = {
+            val views = info?.viewCount ?: videoMetadata?.viewCount ?: -1L
+            val likes = info?.likeCount ?: -1L
+            val rawDescription = info?.description?.content.orEmpty()
+            val description = if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(rawDescription, Html.FROM_HTML_MODE_LEGACY).toString()
+                else @Suppress("DEPRECATION") Html.fromHtml(rawDescription).toString()
+            Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
+                Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                    Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    Column { Text(if (likes >= 0) formatCount(likes) else "—", style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 16.dp))
+                Text("Description", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                Text(description.ifBlank { "No description was provided." }, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    )
     if (showPlayerSettings) AlertDialog(onDismissRequest = { showPlayerSettings = false }, confirmButton = { TextButton(onClick = { showPlayerSettings = false }) { Text("Done") } }, title = { Text("Playback settings") }, text = {
         Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
             Text("Speed", style = MaterialTheme.typography.titleMedium)

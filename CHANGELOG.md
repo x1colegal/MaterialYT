@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.21] - 2026-10-04
+
+### Added
+- Added a three-dot video details button showing the description, view count, and like count.
+
 ## [1.4.20] - 2026-10-04
 
 ### Fixed

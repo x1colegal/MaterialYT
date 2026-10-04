@@ -66,6 +66,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -549,6 +550,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var selectedResult by remember { mutableStateOf<InfoItem?>(null) }
+    var loadingMore by remember { mutableStateOf(false) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     // Render selected video on top of feed so miniplayer has feed content underneath
     val videoOverlay: @Composable () -> Unit = {
@@ -574,6 +576,20 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             loading = true
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }.onSuccess { homeFeed = it; if (query.isBlank()) feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
             loading = false
+        }
+    }
+    fun loadMore() {
+        if (loadingMore || feed.isEmpty()) return
+        loadingMore = true
+        scope.launch {
+            val more = runCatching { withContext(Dispatchers.IO) {
+                if (query.isBlank()) YouTubeRepository.homeContinuation() else YouTubeRepository.searchContinuation(query)
+            } }.getOrDefault(emptyList())
+            if (more.isNotEmpty()) {
+                feed = (feed + more).distinctBy { it.id }
+                if (query.isBlank()) homeFeed = feed
+            }
+            loadingMore = false
         }
     }
     Box(Modifier.fillMaxSize()) {
@@ -622,42 +638,33 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             }
         } else {
             val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-            val loadingMoreBlock: @Composable () -> Unit = {
-                if (query.isBlank() && feed.isNotEmpty()) {
-                    var loadingMore by remember { mutableStateOf(false) }
-                    LaunchedEffect(Unit) {
-                        loadingMore = true
-                        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.homeContinuation() } }
-                            .onSuccess { newItems ->
-                                if (newItems.isNotEmpty()) {
-                                    homeFeed = homeFeed + newItems
-                                    feed = homeFeed
-                                }
-                            }
-                        loadingMore = false
-                    }
-                    if (loadingMore) {
-                        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
-                        }
+            if (tablet) {
+                val gridState = rememberLazyGridState()
+                LaunchedEffect(gridState, feed.size, query) {
+                    snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+                        if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
                     }
                 }
-            }
-            if (tablet) {
-                LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(16.dp)) {
+                LazyVerticalGrid(GridCells.Adaptive(320.dp), state = gridState, contentPadding = PaddingValues(16.dp)) {
                     if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
-                    item(span = { GridItemSpan(maxLineSpan) }) { loadingMoreBlock() }
+                    if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             } else {
-                LazyColumn {
+                val listState = rememberLazyListState()
+                LaunchedEffect(listState, feed.size, query) {
+                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+                        if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
+                    }
+                }
+                LazyColumn(state = listState) {
                     if (results.isNotEmpty()) item { Text("Channels and playlists", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
                     items(results) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item { Text("Videos", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
                     items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
-                    item { loadingMoreBlock() }
+                    if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             }
         }
@@ -1181,26 +1188,59 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
     BackHandler(onBack = onBack)
     var channel by remember { mutableStateOf<org.schabi.newpipe.extractor.channel.ChannelInfo?>(null) }
     var channelItems by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
+    var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
+    var selectedTab by remember { mutableStateOf("videos") }
     var selected by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     if (selected != null) { VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer) { selected = null }; return }
-    LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) {
-        val loaded = org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url)
-        val items = loaded.tabs.firstOrNull()?.let { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getInfo(NewPipe.getService(0), it).relatedItems }.orEmpty()
-        loaded to items
-    } }.onSuccess { (loaded, items) -> channel = loaded; channelItems = items }.onFailure { error = it.message } }
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } }
-        if (channel == null && error == null) LinearProgressIndicator(Modifier.fillMaxWidth())
-        error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
+    LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url) } }
+        .onSuccess { channel = it }.onFailure { error = it.message } }
+    LaunchedEffect(channel, selectedTab) {
+        val loaded = channel ?: return@LaunchedEffect
+        error = null
+        if (selectedTab == "posts") {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPosts(url) } }
+                .onSuccess { posts = it }.onFailure { error = it.message }
+        } else {
+            val handler = loaded.tabs.firstOrNull { it.contentFilters.firstOrNull()?.equals(selectedTab, true) == true }
+                ?: if (selectedTab == "videos") loaded.tabs.firstOrNull() else null
+            runCatching { withContext(Dispatchers.IO) { handler?.let { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getInfo(NewPipe.getService(0), it).relatedItems }.orEmpty() } }
+                .onSuccess { channelItems = it }.onFailure { error = it.message }
+        }
+    }
+    val hasShorts = channel?.tabs?.any { it.contentFilters.firstOrNull()?.equals("shorts", true) == true } == true
+    LazyColumn(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentPadding = PaddingValues(bottom = 24.dp)) {
+        item { Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } } }
+        if (channel == null && error == null) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+        error?.let { message -> item { Text(message, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) } }
         channel?.let { data ->
-            Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(104.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
-                Text(data.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-                if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(data.description.orEmpty(), maxLines = 5, style = MaterialTheme.typography.bodyMedium)
+            item {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(104.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
+                    Text(data.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                    if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(data.description.orEmpty(), style = MaterialTheme.typography.bodyMedium)
+                }
             }
-            LazyColumn { items(channelItems) { item -> ResultRow(item, showSubtitle = false) { if (item.infoType == InfoItem.InfoType.STREAM) selected = item.url } } }
+            item {
+                LazyRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item { FilterChip(selectedTab == "videos", { selectedTab = "videos" }, { Text("Videos") }) }
+                    if (hasShorts) item { FilterChip(selectedTab == "shorts", { selectedTab = "shorts" }, { Text("Shorts") }) }
+                    item { FilterChip(selectedTab == "posts", { selectedTab = "posts" }, { Text("Posts") }) }
+                }
+            }
+            if (selectedTab == "posts") {
+                if (posts.isEmpty() && error == null) item { Text("No community posts were found.", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                items(posts, key = { it.id }) { post ->
+                    ElevatedCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(post.text, style = MaterialTheme.typography.bodyLarge)
+                            if (post.image.isNotBlank()) AsyncImage(post.image, null, Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Fit)
+                            Text(listOf(post.published, post.views, post.comments).joinToString(" • "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            } else items(channelItems) { item -> ResultRow(item, showSubtitle = false) { if (item.infoType == InfoItem.InfoType.STREAM) selected = item.url } }
         }
     }
 }
@@ -1248,6 +1288,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     
     var showComments by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
     var comments by remember(item.id) { mutableStateOf<List<CommentsInfoItem>>(emptyList()) }
     var commentsLoading by remember { mutableStateOf(false) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
@@ -1412,6 +1453,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    IconButton(onClick = { showDetails = true }) { Icon(Icons.Default.MoreVert, "Short details", tint = ComposeColor.White) }
                     IconButton(onClick = {
                         showComments = true; commentsLoading = true
                     }) { Icon(Icons.Default.Comment, "Comments", tint = ComposeColor.White) }
@@ -1424,6 +1466,28 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             }
         }
     }
+    if (showDetails) AlertDialog(
+        onDismissRequest = { showDetails = false },
+        confirmButton = { TextButton(onClick = { showDetails = false }) { Text("Close") } },
+        title = { Text("Short details") },
+        text = {
+            val views = shortInfo?.viewCount ?: -1L
+            val likes = shortInfo?.likeCount ?: -1L
+            val published = shortInfo?.uploadDate?.localDateTime?.toLocalDate()?.let { date ->
+                java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.LONG).withLocale(java.util.Locale.getDefault()).format(date)
+            } ?: shortInfo?.textualUploadDate?.takeIf { it.isNotBlank() }
+            val raw = shortInfo?.description?.content.orEmpty()
+            val description = if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString() else @Suppress("DEPRECATION") Html.fromHtml(raw).toString()
+            Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
+                Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                    Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium) }
+                    Column { Text(if (likes >= 0) formatCount(likes) else "—", style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
+                }
+                Spacer(Modifier.height(16.dp)); Text("Published", style = MaterialTheme.typography.labelMedium); Text(published ?: "Date unavailable", style = MaterialTheme.typography.titleMedium)
+                HorizontalDivider(Modifier.padding(vertical = 16.dp)); Text("Description", style = MaterialTheme.typography.titleMedium); Spacer(Modifier.height(8.dp)); Text(description.ifBlank { "No description was provided." })
+            }
+        }
+    )
     if (showComments) {
         LaunchedEffect(item.id) {
             runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(item.url)?.relatedItems ?: emptyList() } }

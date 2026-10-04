@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.27] - 2026-10-04
+
+### Added
+- Added a three-dot details panel to Shorts with views, likes, publication date, and description.
+- Added Videos, Shorts, and Community Posts sections to channel pages, including post age, views, and comment counts when YouTube provides them.
+
+### Fixed
+- Made the complete channel page scroll as one surface instead of limiting scrolling to the video list.
+- Restored continuous pagination for the Home feed and YouTube search results.
+
 ## [1.4.26] - 2026-10-04
 
 ### Added

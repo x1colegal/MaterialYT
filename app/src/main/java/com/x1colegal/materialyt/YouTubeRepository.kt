@@ -20,6 +20,7 @@ data class PlayableStream(val url: String, val codec: String, val height: Int, v
 data class ChannelInfo(val name: String, val thumbnail: String)
 data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
+data class CommunityPost(val id: String, val text: String, val published: String, val views: String, val comments: String, val image: String = "")
 
 object YouTubeRepository {
     const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
@@ -46,6 +47,8 @@ object YouTubeRepository {
 
     @Volatile
     private var homeToken: String? = null
+    @Volatile private var searchToken: String? = null
+    @Volatile private var activeSearchQuery: String? = null
 
     fun home(): List<FeedItem> {
         AppLog.event("feed=home started")
@@ -241,8 +244,59 @@ object YouTubeRepository {
     fun search(query: String): List<FeedItem> {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
-        return parseItems(post("$origin/youtubei/v1/search?key=${bootstrap.key}", JSONObject()
-            .put("context", context("WEB", bootstrap.version)).put("query", query), origin))
+        val data = post("$origin/youtubei/v1/search?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB", bootstrap.version)).put("query", query), origin)
+        activeSearchQuery = query
+        searchToken = findContinuationToken(data)
+        return parseItems(data)
+    }
+
+    fun searchContinuation(query: String): List<FeedItem> {
+        if (activeSearchQuery != query) return emptyList()
+        val token = searchToken ?: return emptyList()
+        return try {
+            val origin = "https://www.youtube.com"
+            val bootstrap = bootstrap(origin, "WEB")
+            val data = post("$origin/youtubei/v1/search?key=${bootstrap.key}", JSONObject()
+                .put("context", context("WEB", bootstrap.version)).put("continuation", token), origin)
+            val next = findContinuationToken(data)
+            searchToken = if (next != token) next else null
+            parseItems(data).distinctBy { it.id }
+        } catch (error: Throwable) {
+            AppLog.failure("searchContinuation", error)
+            emptyList()
+        }
+    }
+
+    fun channelPosts(channelUrl: String): List<CommunityPost> {
+        val pageUrl = channelUrl.trimEnd('/') + "/posts"
+        val data = initialData(get(pageUrl))
+        val posts = linkedMapOf<String, CommunityPost>()
+        fun collect(value: Any?) {
+            when (value) {
+                is JSONObject -> {
+                    val renderer = value.optJSONObject("backstagePostRenderer") ?: value.optJSONObject("postRenderer")
+                    if (renderer != null) {
+                        val content = text(renderer.opt("contentText")) ?: text(renderer.opt("text")).orEmpty()
+                        val id = renderer.optString("postId").ifBlank { content.hashCode().toString() }
+                        if (content.isNotBlank()) posts.putIfAbsent(id, CommunityPost(
+                            id = id,
+                            text = content,
+                            published = text(renderer.opt("publishedTimeText")).orEmpty().ifBlank { "Date unavailable" },
+                            views = text(renderer.opt("viewCountText")).orEmpty().ifBlank { "Views unavailable" },
+                            comments = text(renderer.opt("replyCountText")).orEmpty().ifBlank {
+                                text(renderer.opt("commentCountText")).orEmpty().ifBlank { "Comments unavailable" }
+                            },
+                            image = findThumbnail(renderer).orEmpty()
+                        ))
+                    }
+                    value.keys().forEach { collect(value.opt(it)) }
+                }
+                is JSONArray -> for (index in 0 until value.length()) collect(value.opt(index))
+            }
+        }
+        collect(data)
+        return posts.values.toList()
     }
     fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home"))
     fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query))

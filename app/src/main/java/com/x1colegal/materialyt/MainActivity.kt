@@ -148,7 +148,7 @@ private val videoHttpClient by lazy {
         .build()
 }
 
-private fun videoDataSourceFactory(streamUrl: String): DataSource.Factory = ChunkedDataSource.Factory(
+internal fun videoDataSourceFactory(streamUrl: String): DataSource.Factory = ChunkedDataSource.Factory(
     OkHttpDataSource.Factory(videoHttpClient)
         .setDefaultRequestProperties(YouTubeRepository.mediaHeaders(streamUrl))
 )

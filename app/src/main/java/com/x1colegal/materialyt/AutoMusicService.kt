@@ -233,7 +233,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         audioCandidateIndex = next
         val stream = audioCandidates[next]
         AppLog.event("music trying stream candidate=${next + 1}/${audioCandidates.size} codec=${stream.codec} bitrate=${stream.bitrate} video=${track.id}")
-        val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders(stream.url)))
+        val source = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
             .createMediaSource(MediaItem.fromUri(stream.url))
         player.setMediaSource(source)
         player.prepare()

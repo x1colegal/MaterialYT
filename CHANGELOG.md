@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.24] - 2026-10-04
+
+### Fixed
+- Routed YT Music playback through the same chunked OkHttp datasource and client-specific headers used by regular videos, fixing HTTP 403 responses across all extracted audio candidates.
+
 ## [1.4.23] - 2026-10-04
 
 ### Fixed

@@ -848,18 +848,25 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                 fetchWebPoTokenClient(localization, contentCountry, videoId, poTokenResult);
             }
         } catch (final SignInConfirmNotBotException blocked) {
-            if (!webPoTokenFallbackEnabled) {
-                throw blocked;
+            // A bot-check response is client-specific. Keep Force NewPipe strictly native by
+            // trying the iOS client before considering the optional WEB + PoToken fallback.
+            try {
+                fetchIosClient(localization, contentCountry, videoId);
+            } catch (final ExtractionException | IOException iosFailure) {
+                blocked.addSuppressed(iosFailure);
+                if (!webPoTokenFallbackEnabled) {
+                    throw blocked;
+                }
+                final PoTokenProvider provider = poTokenProvider;
+                if (provider == null) {
+                    throw blocked;
+                }
+                final PoTokenResult poTokenResult = provider.getWebClientPoToken(videoId);
+                if (poTokenResult == null) {
+                    throw blocked;
+                }
+                fetchWebPoTokenClient(localization, contentCountry, videoId, poTokenResult);
             }
-            final PoTokenProvider provider = poTokenProvider;
-            if (provider == null) {
-                throw blocked;
-            }
-            final PoTokenResult poTokenResult = provider.getWebClientPoToken(videoId);
-            if (poTokenResult == null) {
-                throw blocked;
-            }
-            fetchWebPoTokenClient(localization, contentCountry, videoId, poTokenResult);
         }
         setStreamType();
 

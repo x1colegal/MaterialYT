@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.33] - 2026-10-04
+
+### Fixed
+- Retried playback with NewPipe's native iOS client when visionOS receives YouTube's bot-confirmation response, restoring video metadata and streams without silently using the WEB backend in Force NewPipe mode.
+
 ## [1.4.32] - 2026-10-04
 
 ### Fixed

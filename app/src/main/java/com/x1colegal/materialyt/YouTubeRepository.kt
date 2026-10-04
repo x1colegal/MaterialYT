@@ -584,6 +584,21 @@ object YouTubeRepository {
         statsUrl(tracking.watchtimeUrl, false)?.let(::send)
     }
 
+    fun preparePlaybackTracking(videoId: String) {
+        if (!signedIn()) return
+        if (synchronized(playbackTracking) { playbackTracking.containsKey(videoId) }) return
+        val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
+        val tracking = authenticatedPlayerTracking(videoId, cpn, false) ?: return
+        val playback = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl").orEmpty()
+        val watchtime = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl").orEmpty()
+        if (playback.isNotBlank() && watchtime.isNotBlank()) {
+            synchronized(playbackTracking) {
+                playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, false)
+            }
+            AppLog.event("tracking prepared for standard YouTube history video=$videoId")
+        }
+    }
+
     private fun visionOsPlayer(videoId: String): JSONObject {
         return mobilePlayer(videoId, "VISIONOS", "1.02", "101", "RealityDevice14,1", "visionOS", "25.6.0.23O471")
     }

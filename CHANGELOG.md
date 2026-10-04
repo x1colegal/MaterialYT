@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.22] - 2026-10-04
+
+### Fixed
+- Preserved YT Music search results after leaving the music player and added an explicit close-search button.
+- Initialized authenticated standard YouTube watch tracking for NewPipe music playback, including Android Auto, so played songs are recorded in the normal YouTube history.
+
 ## [1.4.21] - 2026-10-04
 
 ### Added

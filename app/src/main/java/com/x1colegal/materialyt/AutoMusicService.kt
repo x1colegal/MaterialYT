@@ -161,6 +161,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         scope.launch {
             currentTrack = track
             nowPlaying.value = track
+            scope.launch(Dispatchers.IO) {
+                runCatching { YouTubeRepository.preparePlaybackTracking(track.id) }
+                    .onFailure { AppLog.failure("prepare standard history tracking music=${track.id}", it) }
+            }
             currentArtwork = runCatching {
                 withContext(Dispatchers.IO) {
                     if (track.thumbnail.isNotBlank()) {

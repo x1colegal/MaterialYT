@@ -695,19 +695,38 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var homeTracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selected by remember { mutableStateOf<FeedItem?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
     fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { block() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
-    LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
+    LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             val keyboardController = LocalSoftwareKeyboardController.current
-            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search music") }, shape = CircleShape, leadingIcon = { Icon(Icons.Default.Search, null) }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide(); if (query.isNotBlank()) load { YouTubeRepository.musicSearch(query) } }))
+            val focusManager = LocalFocusManager.current
+            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search music") }, shape = CircleShape, leadingIcon = {
+                IconButton(onClick = {
+                    query = ""
+                    error = null
+                    tracks = homeTracks
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
+                }) { Icon(Icons.Default.Close, "Exit search") }
+            }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) load { YouTubeRepository.musicSearch(query) } }))
             IconButton(onClick = { if (query.isNotBlank()) load { YouTubeRepository.musicSearch(query) } }) { Icon(Icons.Default.Search, "Search music") }
-            IconButton(onClick = { query = ""; load { YouTubeRepository.music() } }) { Icon(Icons.Default.Refresh, "Refresh") }
+            IconButton(onClick = {
+                query = ""
+                scope.launch {
+                    loading = true; error = null
+                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }
+                        .onSuccess { homeTracks = it; tracks = it }
+                        .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+                    loading = false
+                }
+            }) { Icon(Icons.Default.Refresh, "Refresh") }
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }

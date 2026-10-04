@@ -547,27 +547,15 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode, onBack = {
                 selected = null
                 onPlayerMode(false)
-                query = ""
-                results = emptyList()
-                if (homeFeed.isNotEmpty()) {
-                    feed = homeFeed
-                } else if (YouTubeRepository.signedIn()) {
-                    scope.launch {
-                        loading = true
-                        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
-                            .onSuccess { homeFeed = it; feed = it }
-                        loading = false
-                    }
-                }
             })
         }
     }
-    if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
+    if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
     selectedResult?.let { item ->
         when (item.infoType) {
             InfoItem.InfoType.CHANNEL -> ChannelScreen(activity, item.url, codec, audioCodec, quality, onPlayer) { selectedResult = null }
-            InfoItem.InfoType.PLAYLIST -> PlaylistScreen(activity, item.url, codec, audioCodec, quality, onPlayer) { selectedResult = null }
+            InfoItem.InfoType.PLAYLIST -> PlaylistScreen(activity, item.url, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedResult = null }
             else -> Unit
         }
         return
@@ -584,7 +572,16 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             val keyboardController = LocalSoftwareKeyboardController.current
             val focusManager = LocalFocusManager.current
-            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = { Icon(Icons.Default.Search, null) }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }; loading = false } }))
+            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = {
+                IconButton(onClick = {
+                    query = ""
+                    results = emptyList()
+                    error = null
+                    feed = homeFeed
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
+                }) { Icon(Icons.Default.Close, "Exit search") }
+            }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }; loading = false } }))
             IconButton(onClick = {
                 focusManager.clearFocus()
                 keyboardController?.hide()
@@ -671,7 +668,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var refreshKey by remember { mutableIntStateOf(0) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     val videoOverlay: @Composable () -> Unit = { if (selected != null) VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode, onBack = { selected = null; onPlayerMode(false) }) }
-    if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer) { selectedPlaylist = null }; return }
+    if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
     Box(Modifier.fillMaxSize()) {
@@ -1110,17 +1107,12 @@ private fun ResultRow(item: InfoItem, showSubtitle: Boolean = true, click: () ->
 }
 
 @Composable
-private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onBack: () -> Unit) {
+private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit = {}, onBack: () -> Unit) {
     var playlist by remember { mutableStateOf<org.schabi.newpipe.extractor.playlist.PlaylistInfo?>(null) }
     var playlistItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    if (selectedIndex != null) {
-        val index = selectedIndex!!.coerceIn(0, playlistItems.lastIndex)
-        VideoScreen(activity, playlistItems[index].url, codec, audioCodec, quality, onPlayer, playlistItems, index, { selectedIndex = it }) { selectedIndex = null }
-        return
-    }
     LaunchedEffect(url) {
         val id = (Regex("[?&]list=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')).removePrefix("VL")
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistVideos(id) } }
@@ -1129,7 +1121,8 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
         runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.playlist.PlaylistInfo.getInfo("https://www.youtube.com/playlist?list=$id") } }
             .onSuccess { playlist = it }
     }
-    Column(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize()) {
+      Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Playlist", style = MaterialTheme.typography.headlineMedium) }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
@@ -1142,6 +1135,16 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
             } }
             items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, style = MaterialTheme.typography.bodySmall) } } }
         }
+      }
+      selectedIndex?.let { selected ->
+        if (playlistItems.isNotEmpty()) {
+            val index = selected.coerceIn(0, playlistItems.lastIndex)
+            VideoScreen(activity, playlistItems[index].url, codec, audioCodec, quality, onPlayer, playlistItems, index, { selectedIndex = it }, onPlayerMode = onPlayerMode) {
+                selectedIndex = null
+                onPlayerMode(false)
+            }
+        }
+      }
     }
 }
 

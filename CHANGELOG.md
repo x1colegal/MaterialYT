@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.20] - 2026-10-04
+
+### Fixed
+- Kept playlist content visible behind the video miniplayer instead of showing a black screen.
+- Preserved YouTube search results when leaving a video and added an explicit close-search button.
+- Hid the app navigation bar when playlist videos enter picture-in-picture mode.
+
 ## [1.4.19] - 2026-10-03
 
 ### Fixed

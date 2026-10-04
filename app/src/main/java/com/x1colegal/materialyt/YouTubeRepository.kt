@@ -54,6 +54,8 @@ object YouTubeRepository {
     @Volatile private var musicHomeToken: String? = null
     @Volatile private var musicSearchToken: String? = null
     @Volatile private var activeMusicQuery: String? = null
+    private val homeSeenIds = linkedSetOf<String>()
+    private val shortsSeenIds = linkedSetOf<String>()
 
     fun home(): List<FeedItem> {
         AppLog.event("feed=home started")
@@ -63,6 +65,7 @@ object YouTubeRepository {
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "FEwhat_to_watch"), bootstrap.origin)
             homeToken = findContinuationToken(data)
             val uniqueItems = parseItems(data).distinctBy { it.id }
+            synchronized(homeSeenIds) { homeSeenIds.clear(); homeSeenIds.addAll(uniqueItems.map { it.id }) }
             AppLog.event("feed=home success items=${uniqueItems.size} hasToken=${homeToken != null}")
             uniqueItems
         } catch (error: Throwable) {
@@ -72,20 +75,27 @@ object YouTubeRepository {
     }
 
     fun homeContinuation(): List<FeedItem> {
-        val token = homeToken ?: return emptyList()
+        val token = homeToken
         return try {
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
-            val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
-                JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), bootstrap.origin)
+            val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+                .put("context", context("WEB", bootstrap.version)).apply {
+                    if (token == null) put("browseId", "FEwhat_to_watch") else put("continuation", token)
+                }, bootstrap.origin)
             val nextToken = findContinuationToken(data)
             homeToken = if (nextToken != token) nextToken else null
-            parseItems(data).distinctBy { it.id }
+            parseItems(data).distinctBy { it.id }.filter { item -> synchronized(homeSeenIds) { homeSeenIds.add(item.id) } }
         } catch (error: Throwable) {
             AppLog.failure("feed=homeContinuation", error)
             emptyList()
         }
     }
     fun shorts(): List<FeedItem> {
+        synchronized(shortsSeenIds) { shortsSeenIds.clear() }
+        return shortsBatch().also { items -> synchronized(shortsSeenIds) { shortsSeenIds.addAll(items.map { it.id }) } }
+    }
+
+    private fun shortsBatch(): List<FeedItem> {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
         val itemEndpoint = "$origin/youtubei/v1/reel/reel_item_watch?key=${bootstrap.key}"
@@ -107,9 +117,12 @@ object YouTubeRepository {
     }
 
     fun shortsContinuation(): List<FeedItem> {
-        val token = shortsToken ?: return emptyList()
-        return runCatching { shortsSequence(token, bootstrap("https://www.youtube.com", "WEB")) }
-            .onFailure { AppLog.failure("shorts continuation", it) }.getOrDefault(emptyList())
+        return runCatching {
+            val bootstrap = bootstrap("https://www.youtube.com", "WEB")
+            val token = shortsToken
+            val batches = if (token != null) listOf(shortsSequence(token, bootstrap)) else List(4) { shortsBatch() }
+            batches.asSequence().flatten().filter { item -> synchronized(shortsSeenIds) { shortsSeenIds.add(item.id) } }.toList()
+        }.onFailure { AppLog.failure("shorts continuation", it) }.getOrDefault(emptyList())
     }
 
     private fun shortsSequence(token: String, bootstrap: Bootstrap): List<FeedItem> {

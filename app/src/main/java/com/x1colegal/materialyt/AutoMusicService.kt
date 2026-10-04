@@ -202,16 +202,22 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     private suspend fun extractAudioStreams(track: FeedItem): List<PlayableStream> {
-        var audioStreams = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
-                .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
+        var audioStreams = emptyList<PlayableStream>()
+        if (PlaybackBackendPreferences.useNewPipe()) for (attempt in 0..2) {
+            val result = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
+                .onFailure { AppLog.failure("music NewPipe extraction attempt=${attempt + 1}/3 video=${track.id}", it) }
+            audioStreams = result.getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
                     val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
                     val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
                     PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
-                }.orEmpty() else emptyList()
-            if (audioStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
-                audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
-                    .getOrNull()?.filter { it.audio }.orEmpty()
-            }
+                }.orEmpty()
+            if (audioStreams.isNotEmpty()) break
+            if (attempt < 2) kotlinx.coroutines.delay((attempt + 1) * 1_000L)
+        }
+        if (audioStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
+                .getOrNull()?.filter { it.audio }.orEmpty()
+        }
         return audioStreams
     }
 
@@ -241,7 +247,6 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             if (extractionRetryCount < 1) {
                 extractionRetryCount++
                 AppLog.event("music refreshing extraction after failed first attempt video=${track.id}")
-                NewPipePoTokenProvider.reset()
                 kotlinx.coroutines.delay(500)
                 val refreshed = extractAudioStreams(track)
                 if (currentTrack?.id != track.id || generation != playGeneration) return

@@ -808,7 +808,9 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     BackHandler { onBack() }
     DisposableEffect(Unit) { activity.immersive(true); onDispose { activity.immersive(false) } }
     LaunchedEffect(track.id, preferredCodec) {
-        if (AutoMusicService.nowPlaying.value?.id != track.id || preferredCodec != preferredCodec) AutoMusicService.play(activity, track, preferredCodec)
+        if (AutoMusicService.nowPlaying.value?.id != track.id || (!AutoMusicService.playing.value && AutoMusicService.position.longValue == 0L)) {
+            AutoMusicService.play(activity, track, preferredCodec)
+        }
     }
     if ((showLyrics || LocalConfiguration.current.smallestScreenWidthDp >= 600) && lyrics == null && lyricsError == null) LaunchedEffect(track.id) {
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.lyrics(track.id) } }

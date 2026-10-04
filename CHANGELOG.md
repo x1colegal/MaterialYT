@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.32] - 2026-10-04
+
+### Fixed
+- Reseeded Shorts recommendations after YouTube ends a reel sequence, filtering already delivered Shorts.
+- Renewed the Home recommendation request after its continuation chain ends, filtering videos already shown in the current feed.
+- Retried transient NewPipe music extraction without resetting its freshly generated PoToken, and allowed reopening a failed zero-position track to prepare it again.
+
 ## [1.4.31] - 2026-10-04
 
 ### Fixed

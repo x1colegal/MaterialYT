@@ -720,7 +720,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { block() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
     LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
     fun loadMore() {
-        if (loadingMore || tracks.isEmpty()) return
+        if (query.isBlank() || loadingMore || tracks.isEmpty()) return
         loadingMore = true
         scope.launch {
             val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicContinuation(query) } }.getOrDefault(emptyList())
@@ -764,7 +764,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
             val gridState = rememberLazyGridState()
             LaunchedEffect(gridState, tracks.size, query) {
                 snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
-                    if (tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
+                    if (query.isNotBlank() && tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
                 }
             }
             LazyVerticalGrid(
@@ -782,7 +782,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
             val listState = rememberLazyListState()
             LaunchedEffect(listState, tracks.size, query) {
                 snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
-                    if (tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
+                    if (query.isNotBlank() && tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
                 }
             }
             LazyColumn(state = listState) {

@@ -116,8 +116,7 @@ object YouTubeRepository {
         val origin = "https://www.youtube.com"
         val sequence = post("$origin/youtubei/v1/reel/reel_watch_sequence?key=${bootstrap.key}", JSONObject()
             .put("context", context("WEB", bootstrap.version)).put("sequenceParams", token), origin)
-        val next = sequence.optString("sequenceContinuation").ifBlank { findString(sequence, "sequenceContinuation").orEmpty() }
-        shortsToken = next.takeIf { it.isNotBlank() && it != token }
+        var next = sequence.optString("sequenceContinuation").ifBlank { findString(sequence, "sequenceContinuation").orEmpty() }
         val result = mutableListOf<FeedItem>()
         val entries = sequence.optJSONArray("entries")
         if (entries != null) for (index in 0 until entries.length()) {
@@ -132,8 +131,19 @@ object YouTubeRepository {
                 post("$origin/youtubei/v1/reel/reel_item_watch?key=${bootstrap.key}", JSONObject()
                     .put("context", context("WEB", bootstrap.version)).put("disablePlayerResponse", true)
                     .put("params", params).put("playerRequest", JSONObject().put("videoId", videoId)), origin)
-            }.getOrNull()?.let { details -> if (!containsAdMarker(details)) reelFeedItem(details, watch)?.let(result::add) }
+            }.getOrNull()?.let { details ->
+                if (!containsAdMarker(details)) {
+                    reelFeedItem(details, watch)?.let(result::add)
+                    val candidate = details.optString("sequenceContinuation").ifBlank {
+                        findString(details, "sequenceContinuation").orEmpty().ifBlank {
+                            findString(details.optJSONObject("continuationEndpoint"), "token").orEmpty()
+                        }
+                    }
+                    if (candidate.isNotBlank() && candidate != token) next = candidate
+                }
+            }
         }
+        shortsToken = next.takeIf { it.isNotBlank() && it != token }
         return result.distinctBy { it.id }.also { AppLog.event("shorts continuation items=${it.size} hasNext=${shortsToken != null}") }
     }
 
@@ -349,7 +359,8 @@ object YouTubeRepository {
         return comments.values.toList()
     }
     fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home")).also { activeMusicQuery = null }
-    fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query)).also { activeMusicQuery = query }
+    fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query)
+        .put("params", "EgWKAQIIAWoMEA4QChADEAQQCRAF")).also { activeMusicQuery = query }
 
     fun musicContinuation(query: String): List<FeedItem> {
         val searching = query.isNotBlank()

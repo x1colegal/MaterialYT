@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.30] - 2026-10-04
+
+### Fixed
+- Continued Shorts from the reel item responses when the sequence envelope omits its next token.
+- Changed YT Music search to the paginated Songs shelf and disabled pagination on the intentionally finite Continue listening Home surface.
+
 ## [1.4.29] - 2026-10-04
 
 ### Fixed

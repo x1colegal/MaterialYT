@@ -714,10 +714,23 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     var homeTracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selected by remember { mutableStateOf<FeedItem?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { block() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
     LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
+    fun loadMore() {
+        if (loadingMore || tracks.isEmpty()) return
+        loadingMore = true
+        scope.launch {
+            val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicContinuation(query) } }.getOrDefault(emptyList())
+            if (more.isNotEmpty()) {
+                tracks = (tracks + more).distinctBy { it.id }
+                if (query.isBlank()) homeTracks = tracks
+            }
+            loadingMore = false
+        }
+    }
     if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -748,18 +761,33 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet) {
+            val gridState = rememberLazyGridState()
+            LaunchedEffect(gridState, tracks.size, query) {
+                snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+                    if (tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
+                }
+            }
             LazyVerticalGrid(
                 GridCells.Adaptive(minSize = 300.dp),
+                state = gridState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 gridItems(tracks) { track -> FeedRow(track) { selected = track } }
+                if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         } else {
-            LazyColumn {
+            val listState = rememberLazyListState()
+            LaunchedEffect(listState, tracks.size, query) {
+                snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+                    if (tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
+                }
+            }
+            LazyColumn(state = listState) {
                 items(tracks) { track -> FeedRow(track) { selected = track } }
+                if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         }
     }
@@ -1327,6 +1355,7 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
     var shorts by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
+    var loadingMore by remember { mutableStateOf(false) }
     if (channelUrl != null) {
         ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }
         return
@@ -1344,6 +1373,15 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
         return
     }
     val pager = rememberPagerState(pageCount = { shorts.size })
+    LaunchedEffect(pager.currentPage, shorts.size) {
+        if (pager.currentPage >= shorts.lastIndex - 4 && !loadingMore) {
+            loadingMore = true
+            val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.shortsContinuation() } }
+                .getOrDefault(emptyList())
+            if (more.isNotEmpty()) shorts = (shorts + more).distinctBy { it.id }
+            loadingMore = false
+        }
+    }
     VerticalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
         ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, audioCodec, quality, onPlayer) { channelUrl = it }
     }

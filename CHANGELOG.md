@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.29] - 2026-10-04
+
+### Fixed
+- Added continuous YouTube reel sequence pagination to the main Shorts feed so more Shorts load automatically near the end.
+- Added continuous pagination to the YT Music Home feed and music search results on phones and tablets.
+
 ## [1.4.28] - 2026-10-04
 
 ### Fixed

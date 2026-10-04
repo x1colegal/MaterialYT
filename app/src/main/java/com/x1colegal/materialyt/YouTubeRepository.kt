@@ -50,6 +50,10 @@ object YouTubeRepository {
     private var homeToken: String? = null
     @Volatile private var searchToken: String? = null
     @Volatile private var activeSearchQuery: String? = null
+    @Volatile private var shortsToken: String? = null
+    @Volatile private var musicHomeToken: String? = null
+    @Volatile private var musicSearchToken: String? = null
+    @Volatile private var activeMusicQuery: String? = null
 
     fun home(): List<FeedItem> {
         AppLog.event("feed=home started")
@@ -98,33 +102,39 @@ object YouTubeRepository {
         val continuation = seed.optString("sequenceContinuation").ifBlank {
             findString(seed.optJSONObject("continuationEndpoint"), "token").orEmpty()
         }
-        if (continuation.isNotBlank()) {
-            val sequence = post(sequenceEndpoint, JSONObject()
-                .put("context", context("WEB", bootstrap.version))
-                .put("sequenceParams", continuation), origin)
-            val entries = sequence.optJSONArray("entries")
-            if (entries != null) for (index in 0 until minOf(entries.length(), 24)) {
-                val entry = entries.optJSONObject(index) ?: continue
-                if (containsAdMarker(entry)) continue
-                val watch = entry.optJSONObject("command")?.optJSONObject("reelWatchEndpoint") ?: continue
-                if (containsAdMarker(watch)) continue
-                val videoId = watch.optString("videoId")
-                val params = watch.optString("params")
-                if (videoId.length != 11 || params.isBlank()) continue
-                runCatching {
-                    post(itemEndpoint, JSONObject()
-                        .put("context", context("WEB", bootstrap.version))
-                        .put("disablePlayerResponse", true)
-                        .put("params", params)
-                        .put("playerRequest", JSONObject().put("videoId", videoId)), origin)
-                }.getOrNull()?.let { details ->
-                    if (!containsAdMarker(details)) {
-                        reelFeedItem(details, watch)?.let(result::add)
-                    }
-                }
-            }
-        }
+        if (continuation.isNotBlank()) result += shortsSequence(continuation, bootstrap)
         return result.distinctBy { it.id }.also { AppLog.event("shorts reel items=${it.size}") }
+    }
+
+    fun shortsContinuation(): List<FeedItem> {
+        val token = shortsToken ?: return emptyList()
+        return runCatching { shortsSequence(token, bootstrap("https://www.youtube.com", "WEB")) }
+            .onFailure { AppLog.failure("shorts continuation", it) }.getOrDefault(emptyList())
+    }
+
+    private fun shortsSequence(token: String, bootstrap: Bootstrap): List<FeedItem> {
+        val origin = "https://www.youtube.com"
+        val sequence = post("$origin/youtubei/v1/reel/reel_watch_sequence?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB", bootstrap.version)).put("sequenceParams", token), origin)
+        val next = sequence.optString("sequenceContinuation").ifBlank { findString(sequence, "sequenceContinuation").orEmpty() }
+        shortsToken = next.takeIf { it.isNotBlank() && it != token }
+        val result = mutableListOf<FeedItem>()
+        val entries = sequence.optJSONArray("entries")
+        if (entries != null) for (index in 0 until entries.length()) {
+            val entry = entries.optJSONObject(index) ?: continue
+            if (containsAdMarker(entry)) continue
+            val watch = entry.optJSONObject("command")?.optJSONObject("reelWatchEndpoint") ?: continue
+            if (containsAdMarker(watch)) continue
+            val videoId = watch.optString("videoId")
+            val params = watch.optString("params")
+            if (videoId.length != 11 || params.isBlank()) continue
+            runCatching {
+                post("$origin/youtubei/v1/reel/reel_item_watch?key=${bootstrap.key}", JSONObject()
+                    .put("context", context("WEB", bootstrap.version)).put("disablePlayerResponse", true)
+                    .put("params", params).put("playerRequest", JSONObject().put("videoId", videoId)), origin)
+            }.getOrNull()?.let { details -> if (!containsAdMarker(details)) reelFeedItem(details, watch)?.let(result::add) }
+        }
+        return result.distinctBy { it.id }.also { AppLog.event("shorts continuation items=${it.size} hasNext=${shortsToken != null}") }
     }
 
     private data class ShortsMetadata(val title: String, val channel: String, val avatar: String, val channelUrl: String)
@@ -338,8 +348,25 @@ object YouTubeRepository {
         }
         return comments.values.toList()
     }
-    fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home"))
-    fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query))
+    fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home")).also { activeMusicQuery = null }
+    fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query)).also { activeMusicQuery = query }
+
+    fun musicContinuation(query: String): List<FeedItem> {
+        val searching = query.isNotBlank()
+        if (searching && activeMusicQuery != query) return emptyList()
+        val token = if (searching) musicSearchToken else musicHomeToken ?: return emptyList()
+        if (token.isNullOrBlank()) return emptyList()
+        val endpoint = if (searching) "search" else "browse"
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        return runCatching {
+            val response = post("$origin/youtubei/v1/$endpoint?key=${bootstrap.key}", JSONObject()
+                .put("context", context("WEB_REMIX", bootstrap.version)).put("continuation", token), origin)
+            val next = findContinuationToken(response).takeIf { it != token }
+            if (searching) musicSearchToken = next else musicHomeToken = next
+            parseItems(response).distinctBy { it.id }
+        }.onFailure { AppLog.failure("music continuation", it) }.getOrDefault(emptyList())
+    }
 
     private fun musicRequest(endpoint: String, fields: JSONObject): List<FeedItem> {
         AppLog.event("music endpoint=$endpoint started")
@@ -347,6 +374,8 @@ object YouTubeRepository {
         val bootstrap = bootstrap(origin, "WEB_REMIX")
         val body = fields.put("context", context("WEB_REMIX", bootstrap.version))
         val response = post("$origin/youtubei/v1/$endpoint?key=${bootstrap.key}", body, origin)
+        val token = findContinuationToken(response)
+        if (endpoint == "search") musicSearchToken = token else musicHomeToken = token
         return parseItems(response).also { AppLog.event("music endpoint=$endpoint items=${it.size}") }
     }
 

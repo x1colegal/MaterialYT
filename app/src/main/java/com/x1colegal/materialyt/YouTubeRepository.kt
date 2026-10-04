@@ -810,8 +810,12 @@ object YouTubeRepository {
         put("User-Agent", UA)
     }
 
-    fun mediaHeaders(): Map<String, String> = buildMap {
-        put("User-Agent", "com.google.ios.youtube/1.02 (iPhone; U; CPU iOS 25_6_0 like Mac OS X)")
+    fun mediaHeaders(streamUrl: String? = null): Map<String, String> = buildMap {
+        val client = streamUrl?.toHttpUrlOrNull()?.queryParameter("c")?.uppercase()
+        put("User-Agent", when (client) {
+            "IOS" -> "com.google.ios.youtube/21.03.2 (iPhone16,2; U; CPU iOS 18_7_2 like Mac OS X)"
+            else -> "com.google.visionos.youtube/1.04(RealityDevice17,1; U; CPU visionOS 26_6_0 like Mac OS X; US)"
+        })
     }
 
     fun postComment(videoId: String, text: String) {

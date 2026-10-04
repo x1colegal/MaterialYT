@@ -148,9 +148,9 @@ private val videoHttpClient by lazy {
         .build()
 }
 
-private fun videoDataSourceFactory(): DataSource.Factory = ChunkedDataSource.Factory(
+private fun videoDataSourceFactory(streamUrl: String): DataSource.Factory = ChunkedDataSource.Factory(
     OkHttpDataSource.Factory(videoHttpClient)
-        .setDefaultRequestProperties(YouTubeRepository.mediaHeaders())
+        .setDefaultRequestProperties(YouTubeRepository.mediaHeaders(streamUrl))
 )
 
 private fun selectVideoStream(streams: List<PlayerChoice>, codec: CodecChoice, quality: QualityChoice): PlayerChoice? {
@@ -870,7 +870,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
         }
         val audio = audioStreams.maxByOrNull { it.bitrate }
         if (audio != null) {
-            val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders()))
+            val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders(audio.url)))
                 .createMediaSource(MediaItem.fromUri(audio.url))
             player.setMediaSource(source); player.prepare(); player.playWhenReady = true; mediaLoaded = true
         } else if (error == null) error = "No playable audio stream was found"
@@ -1225,9 +1225,9 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var indicatorKey by remember { mutableIntStateOf(0) }
 
     fun play(stream: PlayerChoice) {
-        val video = ProgressiveMediaSource.Factory(videoDataSourceFactory()).createMediaSource(MediaItem.fromUri(stream.url))
+        val video = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
         val source = if (stream.videoOnly && audio != null) MergingMediaSource(true, video,
-            ProgressiveMediaSource.Factory(videoDataSourceFactory()).createMediaSource(MediaItem.fromUri(audio!!.url))) else video
+            ProgressiveMediaSource.Factory(videoDataSourceFactory(audio!!.url)).createMediaSource(MediaItem.fromUri(audio!!.url))) else video
         player.setMediaSource(source); player.prepare(); player.setPlaybackSpeed(speed); player.playWhenReady = active
         selected = stream
     }
@@ -1479,10 +1479,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         next?.setOnClickListener { if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1) }
     }
     fun play(stream: PlayerChoice) {
-        val videoSource = ProgressiveMediaSource.Factory(videoDataSourceFactory()).createMediaSource(MediaItem.fromUri(stream.url))
+        val videoSource = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
         val audio = if (stream.videoOnly) selectedAudio ?: audioStreams.maxByOrNull { it.bitrate } else null
         val source = if (audio != null) {
-            val audioSource = ProgressiveMediaSource.Factory(videoDataSourceFactory()).createMediaSource(MediaItem.fromUri(audio.url))
+            val audioSource = ProgressiveMediaSource.Factory(videoDataSourceFactory(audio.url)).createMediaSource(MediaItem.fromUri(audio.url))
             // YouTube's separate adaptive tracks may start on very different media
             // timestamps. Align their periods so ExoPlayer can render immediately.
             MergingMediaSource(true, videoSource, audioSource)

@@ -132,6 +132,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
     private JsonObject nextResponse;
 
     @Nullable
+    private JsonObject visionOsStreamingData;
+    @Nullable
     private JsonObject iosStreamingData;
     @Nullable
     private JsonObject webPoTokenStreamingData;
@@ -147,6 +149,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
     // We need to store the contentPlaybackNonces because we need to append them to videoplayback
     // URLs (with the cpn parameter).
     // Also because a nonce should be unique, each player client uses a different value.
+    private String visionOsCpn;
     private String iosCpn;
     private String webPoTokenCpn;
     @Nullable
@@ -327,14 +330,17 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                     .getString("lengthSeconds");
             return Long.parseLong(duration);
         } catch (final Exception e) {
-            return getDurationFromFirstAdaptiveFormat(Collections.singletonList(
-                    iosStreamingData));
+            return getDurationFromFirstAdaptiveFormat(
+                    java.util.Arrays.asList(visionOsStreamingData, iosStreamingData));
         }
     }
 
     private int getDurationFromFirstAdaptiveFormat(@Nonnull final List<JsonObject> streamingDatas)
             throws ParsingException {
         for (final JsonObject streamingData : streamingDatas) {
+            if (streamingData == null) {
+                continue;
+            }
             final JsonArray adaptiveFormats = streamingData.getArray(ADAPTIVE_FORMATS);
             if (adaptiveFormats.isEmpty()) {
                 continue;
@@ -629,7 +635,9 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // response
         return getManifestUrl(
                 "hls",
-                org.schabi.newpipe.extractor.Compat.listOf(new Pair<>(iosStreamingData, null)),
+                org.schabi.newpipe.extractor.Compat.listOf(
+                        new Pair<>(visionOsStreamingData, null),
+                        new Pair<>(iosStreamingData, null)),
                 "");
     }
 
@@ -822,8 +830,24 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         final ContentCountry contentCountry = getExtractorContentCountry();
 
         try {
-            fetchIosClient(localization, contentCountry, videoId);
-        } catch (final SignInConfirmNotBotException | ContentNotAvailableException blocked) {
+            fetchVisionOsClient(localization, contentCountry, videoId);
+        } catch (final ContentNotAvailableException visionUnavailable) {
+            try {
+                fetchIosClient(localization, contentCountry, videoId);
+            } catch (final ExtractionException | IOException iosFailure) {
+                visionUnavailable.addSuppressed(iosFailure);
+                if (!webPoTokenFallbackEnabled) {
+                    throw visionUnavailable;
+                }
+                final PoTokenProvider provider = poTokenProvider;
+                final PoTokenResult poTokenResult = provider == null
+                        ? null : provider.getWebClientPoToken(videoId);
+                if (poTokenResult == null) {
+                    throw visionUnavailable;
+                }
+                fetchWebPoTokenClient(localization, contentCountry, videoId, poTokenResult);
+            }
+        } catch (final SignInConfirmNotBotException blocked) {
             if (!webPoTokenFallbackEnabled) {
                 throw blocked;
             }
@@ -909,6 +933,22 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         }
 
         throw new ContentNotAvailableException("Got error " + status + ": \"" + reason + "\"");
+    }
+
+    private void fetchVisionOsClient(@Nonnull final Localization localization,
+                                     @Nonnull final ContentCountry contentCountry,
+                                     @Nonnull final String videoId)
+            throws IOException, ExtractionException {
+        visionOsCpn = generateContentPlaybackNonce();
+        playerResponse = YoutubeStreamHelper.getVisionOsPlayerResponse(contentCountry,
+                localization, videoId, visionOsCpn);
+        checkPlayabilityStatus(playerResponse.getObject(PLAYABILITY_STATUS));
+        if (isPlayerResponseNotValid(playerResponse, videoId)) {
+            throw new ExtractionException("VISIONOS player response is not valid");
+        }
+        visionOsStreamingData = playerResponse.getObject(STREAMING_DATA);
+        playerCaptionsTracklistRenderer = playerResponse.getObject(CAPTIONS)
+                .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
     }
 
     private void fetchIosClient(@Nonnull final Localization localization,
@@ -1072,6 +1112,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             final List<T> streamList = new ArrayList<>();
 
             java.util.stream.Stream.of(
+                    new Pair<>(visionOsStreamingData,
+                            new Pair<>(visionOsCpn, (String) null)),
                     new Pair<>(iosStreamingData, new Pair<>(iosCpn, (String) null)),
                     new Pair<>(webPoTokenStreamingData,
                             new Pair<>(webPoTokenCpn, webStreamingUrlsPoToken)))

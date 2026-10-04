@@ -186,7 +186,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             val original = audioStreams.filter { it.audioTrackName.contains("original", true) }.ifEmpty { audioStreams.filter { it.originalAudio } }.ifEmpty { audioStreams }
             val stream = original.filter { stream -> preferredCodec.tokens.any { stream.codec.contains(it, true) } }.maxByOrNull { it.bitrate }
                 ?: original.maxByOrNull { it.bitrate } ?: return@launch
-            val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders()))
+            val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders(stream.url)))
                 .createMediaSource(MediaItem.fromUri(stream.url))
             player.setMediaSource(source); player.prepare(); player.playWhenReady = true; session.isActive = true
         }

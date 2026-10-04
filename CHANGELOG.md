@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.19] - 2026-10-03
+
+### Fixed
+- Restored VisionOS as the standard NewPipe player client to avoid iOS GVS HTTP 403 responses, with iOS used only when VisionOS rejects unavailable content such as made-for-kids videos.
+- Matched media requests to the actual VisionOS or iOS User-Agent used to extract each stream, preventing client-mismatch HTTP 403 responses.
+
 ## [1.4.18] - 2026-10-03
 
 ### Fixed

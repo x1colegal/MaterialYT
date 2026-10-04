@@ -1056,7 +1056,7 @@ object YouTubeRepository {
                 key.contains("inFeedAd", true) || key.contains("adPlacement", true) ||
                 key.contains("adLayout", true) || key.contains("aboutThisAd", true) ||
                 key.contains("adContext", true) || key.contains("adTag", true) ||
-                key.contains("paidContent", true) || key.contains("displayAd", true) ||
+                key.contains("displayAd", true) ||
                 key.contains("carouselAd", true) || key.contains("playerAd", true) ||
                 containsAdMarker(value.opt(key))
         }

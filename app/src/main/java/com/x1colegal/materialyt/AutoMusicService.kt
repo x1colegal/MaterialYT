@@ -37,6 +37,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private var currentTrack: FeedItem? = null
     private var currentArtwork: android.graphics.Bitmap? = null
     private var closingPlayback = false
+    private var audioCandidates = emptyList<PlayableStream>()
+    private var audioCandidateIndex = -1
+    private var webFallbackAttempted = false
+    private var preferredAudioCodec = AudioCodecChoice.MP4A
 
     companion object {
         const val CHANNEL_ID = "materialyt_playback"
@@ -104,6 +108,11 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 }
             }
             override fun onPlaybackStateChanged(playbackState: Int) { publishState(); publishMetadata() }
+            override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
+                val failedTrack = currentTrack ?: return
+                AppLog.failure("music stream candidate=${audioCandidateIndex + 1}/${audioCandidates.size} video=${failedTrack.id}", error)
+                scope.launch { playNextAudioCandidate(failedTrack) }
+            }
         })
         publishState()
         scope.launch {
@@ -160,6 +169,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private fun play(track: FeedItem, preferredCodec: AudioCodecChoice = AudioCodecChoice.MP4A) {
         scope.launch {
             currentTrack = track
+            preferredAudioCodec = preferredCodec
+            audioCandidates = emptyList()
+            audioCandidateIndex = -1
+            webFallbackAttempted = false
             nowPlaying.value = track
             scope.launch(Dispatchers.IO) {
                 runCatching { YouTubeRepository.preparePlaybackTracking(track.id) }
@@ -187,13 +200,45 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
                     .getOrNull()?.filter { it.audio }.orEmpty()
             }
+            if (currentTrack?.id != track.id) return@launch
             val original = audioStreams.filter { it.audioTrackName.contains("original", true) }.ifEmpty { audioStreams.filter { it.originalAudio } }.ifEmpty { audioStreams }
-            val stream = original.filter { stream -> preferredCodec.tokens.any { stream.codec.contains(it, true) } }.maxByOrNull { it.bitrate }
-                ?: original.maxByOrNull { it.bitrate } ?: return@launch
-            val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders(stream.url)))
-                .createMediaSource(MediaItem.fromUri(stream.url))
-            player.setMediaSource(source); player.prepare(); player.playWhenReady = true; session.isActive = true
+            audioCandidates = original.sortedWith(
+                compareByDescending<PlayableStream> { stream -> preferredCodec.tokens.any { stream.codec.contains(it, true) } }
+                    .thenByDescending { it.bitrate }
+            )
+            playNextAudioCandidate(track)
         }
+    }
+
+    private suspend fun playNextAudioCandidate(track: FeedItem) {
+        if (currentTrack?.id != track.id) return
+        val next = audioCandidateIndex + 1
+        if (next >= audioCandidates.size) {
+            if (!webFallbackAttempted && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+                webFallbackAttempted = true
+                val webStreams = withContext(Dispatchers.IO) {
+                    runCatching { YouTubeRepository.playerStreams(track.id, music = true) }.getOrDefault(emptyList())
+                }.filter { it.audio }
+                val currentUrls = audioCandidates.mapTo(mutableSetOf()) { it.url }
+                val additional = webStreams.filterNot { it.url in currentUrls }.sortedWith(
+                    compareByDescending<PlayableStream> { stream -> preferredAudioCodec.tokens.any { stream.codec.contains(it, true) } }
+                        .thenByDescending { it.bitrate }
+                )
+                audioCandidates = audioCandidates + additional
+                if (additional.isNotEmpty()) return playNextAudioCandidate(track)
+            }
+            AppLog.event("music exhausted all stream candidates video=${track.id}")
+            return
+        }
+        audioCandidateIndex = next
+        val stream = audioCandidates[next]
+        AppLog.event("music trying stream candidate=${next + 1}/${audioCandidates.size} codec=${stream.codec} bitrate=${stream.bitrate} video=${track.id}")
+        val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders(stream.url)))
+            .createMediaSource(MediaItem.fromUri(stream.url))
+        player.setMediaSource(source)
+        player.prepare()
+        player.playWhenReady = true
+        session.isActive = true
     }
 
     private fun publishMetadata() {

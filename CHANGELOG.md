@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.23] - 2026-10-04
+
+### Fixed
+- Kept the YT Music home load alive behind the player so closing a song no longer replaces active search results.
+- Retried alternate extracted audio streams when a specific YT Music stream fails, while respecting the configured backend mode.
+- Stopped treating legitimate videos that disclose paid content as search advertisements, preserving the actual first search result.
+
 ## [1.4.22] - 2026-10-04
 
 ### Fixed

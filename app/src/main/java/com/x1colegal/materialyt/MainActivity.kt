@@ -700,9 +700,9 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
     fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { block() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
     LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
+    if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             val keyboardController = LocalSoftwareKeyboardController.current

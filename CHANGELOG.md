@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.35] - 2026-10-04
+
+### Fixed
+- Reopened the full YT Music player when tapping its miniplayer and restored the regular video player immediately from the video miniplayer.
+- Matched the Android picture-in-picture window to the video's actual display aspect ratio instead of forcing 16:9, removing rounded letterbox bands from non-16:9 videos.
+
 ## [1.4.34] - 2026-10-04
 
 ### Fixed

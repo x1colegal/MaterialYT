@@ -319,13 +319,19 @@ class MainActivity : ComponentActivity() {
 
     private fun pipParams(): PictureInPictureParams {
         val playing = player?.isPlaying == true
+        val videoFormat = player?.videoFormat
+        val videoWidth = videoFormat?.width?.takeIf { it > 0 } ?: 16
+        val videoHeight = videoFormat?.height?.takeIf { it > 0 } ?: 9
+        val pixelRatio = videoFormat?.pixelWidthHeightRatio?.takeIf { it > 0f } ?: 1f
+        val displayRatio = (videoWidth.toFloat() * pixelRatio / videoHeight).coerceIn(0.45f, 2.35f)
+        val aspectRatio = Rational((displayRatio * 1_000).roundToInt(), 1_000)
         val intent = PendingIntent.getBroadcast(this, 73, Intent(ACTION_PIP_TOGGLE).setPackage(packageName),
             PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
         val action = RemoteAction(
             android.graphics.drawable.Icon.createWithResource(this, if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play),
             if (playing) "Pause" else "Play", if (playing) "Pause video" else "Play video", intent
         )
-        return PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).setActions(listOf(action)).build()
+        return PictureInPictureParams.Builder().setAspectRatio(aspectRatio).setActions(listOf(action)).build()
     }
 
     fun updatePipAction() {
@@ -442,6 +448,7 @@ private fun AppScaffold(
     onPlayer: (ExoPlayer) -> Unit
 ) {
     var tab by remember { mutableIntStateOf(0) }
+    var reopenMusicPlayer by remember { mutableIntStateOf(0) }
     var authenticated by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     var playerMode by remember { mutableStateOf(false) }
     val hideNavigation = playerMode || activity.isFullscreen
@@ -458,7 +465,7 @@ private fun AppScaffold(
             when (tabs.getOrNull(tab)?.first) {
                 "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }) { tab = tabs.indexOfFirst { it.first == "Account" } }
                 "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer) { playerMode = it }
-                "YT Music" -> MusicScreen(activity, audioCodec, onPlayer) { playerMode = it }
+                "YT Music" -> MusicScreen(activity, audioCodec, onPlayer, reopenMusicPlayer) { playerMode = it }
                 "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, loader = { YouTubeRepository.history() })
                 else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
             }
@@ -472,11 +479,11 @@ private fun AppScaffold(
                 tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
                 Spacer(Modifier.weight(1f))
             }
-            Scaffold(Modifier.weight(1f), bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } } }, content = content)
+            Scaffold(Modifier.weight(1f), bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ } }, content = content)
         }
     } else {
         Scaffold(bottomBar = {
-            if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" } }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
+            if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
         }, content = content)
     }
 }
@@ -707,7 +714,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
 }
 
 @Composable
-private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit) {
+private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, onPlayer: (ExoPlayer) -> Unit, reopenPlayerRequest: Int, onPlayerMode: (Boolean) -> Unit) {
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
@@ -716,6 +723,9 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     var loading by remember { mutableStateOf(true) }
     var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(reopenPlayerRequest) {
+        if (reopenPlayerRequest > 0) selected = AutoMusicService.nowPlaying.value
+    }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { block() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
     LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
@@ -1887,7 +1897,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             onDragCancel = { downwardDrag = 0f }
                         )
                     }
-                    .clickable { isMinimized = false },
+                    .clickable {
+                        isMinimized = false
+                        onPlayerMode?.invoke(true)
+                    },
                 tonalElevation = 6.dp
             ) {
                 Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {

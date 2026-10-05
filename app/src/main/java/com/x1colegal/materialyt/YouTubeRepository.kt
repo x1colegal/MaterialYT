@@ -379,30 +379,44 @@ object YouTubeRepository {
         collect(data)
         val seen = mutableSetOf<String>()
         repeat(4) { page ->
-            val token = if (page == 0) findCommunityCommentsContinuation(data)
+            val continuation = if (page == 0) findCommunityCommentsContinuation(data)
                 else findTopLevelCommentsContinuation(data)
-            if (token.isNullOrBlank()) return@repeat
-            if (!seen.add(token)) return@repeat
+            if (continuation == null) return@repeat
+            if (!seen.add(continuation.token)) return@repeat
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
-            data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
-                JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), bootstrap.origin)
+            AppLog.event("community comments post=$postId page=$page endpoint=${continuation.apiPath}")
+            data = post("https://www.youtube.com${continuation.apiPath}?key=${bootstrap.key}",
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", continuation.token), bootstrap.origin)
             collect(data)
         }
+        AppLog.event("community comments post=$postId items=${comments.size}")
         return comments.values.toList()
     }
 
-    private fun findCommunityCommentsContinuation(value: Any?): String? = when (value) {
+    private data class InternalContinuation(val token: String, val apiPath: String)
+
+    private fun continuationRequest(value: JSONObject): InternalContinuation? {
+        val endpoint = value.optJSONObject("continuationEndpoint") ?: value
+        val token = endpoint.optJSONObject("continuationCommand")?.optString("token").orEmpty()
+        if (token.isBlank()) return null
+        val apiPath = endpoint.optJSONObject("commandMetadata")?.optJSONObject("webCommandMetadata")
+            ?.optString("apiUrl").orEmpty().takeIf { it.startsWith("/youtubei/") }
+            ?: "/youtubei/v1/browse"
+        return InternalContinuation(token, apiPath)
+    }
+
+    private fun findCommunityCommentsContinuation(value: Any?): InternalContinuation? = when (value) {
         is JSONObject -> {
             if (value.optString("targetId") == "comments-section" ||
                 value.optString("sectionIdentifier") == "comment-item-section") {
-                findContinuationToken(value)
+                findObject(value, "continuationEndpoint")?.let(::continuationRequest)
             } else value.keys().asSequence().mapNotNull { findCommunityCommentsContinuation(value.opt(it)) }.firstOrNull()
         }
         is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findCommunityCommentsContinuation(value.opt(it)) }.firstOrNull()
         else -> null
     }
 
-    private fun findTopLevelCommentsContinuation(value: Any?): String? {
+    private fun findTopLevelCommentsContinuation(value: Any?): InternalContinuation? {
         if (value is JSONObject) {
             val command = value.optJSONObject("reloadContinuationItemsCommand")
                 ?: value.optJSONObject("appendContinuationItemsAction")
@@ -410,7 +424,7 @@ object YouTubeRepository {
             if (items != null) {
                 for (index in items.length() - 1 downTo 0) {
                     items.optJSONObject(index)?.optJSONObject("continuationItemRenderer")
-                        ?.let { findContinuationToken(it) }?.let { return it }
+                        ?.optJSONObject("continuationEndpoint")?.let(::continuationRequest)?.let { return it }
                 }
             }
             value.keys().forEach { findTopLevelCommentsContinuation(value.opt(it))?.let { return it } }
@@ -1142,7 +1156,8 @@ object YouTubeRepository {
                 val vids = text(renderer.opt("videoCountText"))
                 listOfNotNull(subs, vids).joinToString(" • ").ifBlank { null }
             } else null
-            val rawSubtitle = channelSubtitle ?: text(renderer.opt("shortBylineText")) ?: text(renderer.opt("ownerText")) ?: text(renderer.opt("longBylineText")) ?: text(renderer.opt("subtitle"))
+            val musicArtist = if (rendererType.startsWith("music") || renderer.has("flexColumns")) findMusicArtist(renderer, title) else null
+            val rawSubtitle = channelSubtitle ?: musicArtist ?: text(renderer.opt("shortBylineText")) ?: text(renderer.opt("ownerText")) ?: text(renderer.opt("longBylineText")) ?: text(renderer.opt("subtitle"))
                 ?: columns.drop(1).firstOrNull()
                 ?: deepText(renderer, "shortBylineText") ?: deepText(renderer, "ownerText") ?: deepText(renderer, "longBylineText") ?: deepText(renderer, "subtitle")
                 ?: inferChannelName(renderer, title)?.takeIf { '<' !in it && '>' !in it } ?: "Unknown channel"
@@ -1271,6 +1286,19 @@ object YouTubeRepository {
         return (0 until columns.length()).mapNotNull { index ->
             deepText(columns.opt(index), "text")?.takeIf { it.isNotBlank() }
         }
+    }
+
+    private fun findMusicArtist(value: Any?, title: String): String? {
+        when (value) {
+            is JSONObject -> {
+                val browseId = value.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")?.optString("browseId").orEmpty()
+                val candidate = value.optString("text")
+                if (browseId.startsWith("UC") && candidate.isNotBlank() && candidate != title) return candidate
+                value.keys().forEach { findMusicArtist(value.opt(it), title)?.let { return it } }
+            }
+            is JSONArray -> for (index in 0 until value.length()) findMusicArtist(value.opt(index), title)?.let { return it }
+        }
+        return null
     }
 
     private fun inferChannelName(renderer: JSONObject, title: String): String? {

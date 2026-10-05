@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.36] - 2026-10-04
+
+### Fixed
+- Kept YT Music subtitles limited to the linked artist name instead of combining the artist, song title, and duration.
+- Followed each Community Post comment continuation's own internal API endpoint and added diagnostics for the scraped comment pages.
+
 ## [1.4.35] - 2026-10-04
 
 ### Fixed

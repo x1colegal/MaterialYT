@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.42] - 2026-10-05
+
+### Changed
+- Temporarily removed Shorts from the main navigation and channel pages while its extraction flow remains unstable.
+- Documented that Shorts will return after its feed and playback behavior are reliable again.
+
 ## [1.4.41] - 2026-10-04
 
 ### Fixed

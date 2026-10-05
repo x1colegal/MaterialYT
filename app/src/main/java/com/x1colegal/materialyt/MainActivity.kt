@@ -454,7 +454,6 @@ private fun AppScaffold(
     val hideNavigation = playerMode || activity.isFullscreen
     val tabs = buildList {
         add("Home" to Icons.Default.OndemandVideo)
-        add("Shorts" to Icons.Default.SmartDisplay)
         add("YT Music" to Icons.Default.Album)
         if (authenticated) add("History" to Icons.Default.History)
         add("Account" to Icons.Default.AccountCircle)
@@ -464,7 +463,6 @@ private fun AppScaffold(
         Box(Modifier.padding(effectivePadding).fillMaxSize()) {
             when (tabs.getOrNull(tab)?.first) {
                 "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }) { tab = tabs.indexOfFirst { it.first == "Account" } }
-                "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer) { playerMode = it }
                 "YT Music" -> MusicScreen(activity, audioCodec, onPlayer, reopenMusicPlayer) { playerMode = it }
                 "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, loader = { YouTubeRepository.history() })
                 else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
@@ -1240,13 +1238,12 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
     var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
     var selectedTab by remember { mutableStateOf("videos") }
     var selectedVideo by remember { mutableStateOf<String?>(null) }
-    var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
     var tabHandler by remember { mutableStateOf<org.schabi.newpipe.extractor.linkhandler.ListLinkHandler?>(null) }
     var nextPage by remember { mutableStateOf<org.schabi.newpipe.extractor.Page?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    BackHandler { when { selectedShort != null -> selectedShort = null; selectedVideo != null -> selectedVideo = null; else -> onBack() } }
+    BackHandler { if (selectedVideo != null) selectedVideo = null else onBack() }
     LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url) } }
         .onSuccess { channel = it }.onFailure { error = it.message } }
     LaunchedEffect(channel, selectedTab) {
@@ -1266,7 +1263,6 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                 .onFailure { error = it.message }
         }
     }
-    val hasShorts = channel?.tabs?.any { it.contentFilters.firstOrNull()?.equals("shorts", true) == true } == true
     fun loadMore() {
         val handler = tabHandler ?: return
         val page = nextPage?.takeIf { org.schabi.newpipe.extractor.Page.isValid(it) } ?: return
@@ -1302,7 +1298,6 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
             item {
                 LazyRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item { FilterChip(selectedTab == "videos", { selectedTab = "videos" }, { Text("Videos") }) }
-                    if (hasShorts) item { FilterChip(selectedTab == "shorts", { selectedTab = "shorts" }, { Text("Shorts") }) }
                     item { FilterChip(selectedTab == "posts", { selectedTab = "posts" }, { Text("Posts") }) }
                 }
             }
@@ -1321,12 +1316,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
             } else {
                 items(channelItems) { item -> ResultRow(item, showSubtitle = false) {
                     if (item.infoType == InfoItem.InfoType.STREAM) {
-                        if (selectedTab == "shorts") {
-                            val stream = item as? org.schabi.newpipe.extractor.stream.StreamInfoItem
-                            val id = Regex("(?:shorts/|[?&]v=)([A-Za-z0-9_-]{11})").find(item.url)?.groupValues?.get(1) ?: item.url.substringAfterLast('/').substringBefore('?')
-                            selectedShort = FeedItem(id, item.name, stream?.uploaderName.orEmpty(), item.thumbnails.lastOrNull()?.url.orEmpty(), 9, 16,
-                                stream?.uploaderAvatars?.lastOrNull()?.url.orEmpty(), item.url, channelUrl = stream?.uploaderUrl.orEmpty())
-                        } else selectedVideo = item.url
+                        selectedVideo = item.url
                     }
                 } }
                 if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
@@ -1334,7 +1324,6 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         }
     }
     selectedVideo?.let { selected -> VideoScreen(activity, selected, codec, audioCodec, quality, onPlayer) { selectedVideo = null } }
-    selectedShort?.let { short -> ShortPlayer(activity, short, true, codec, audioCodec, quality, onPlayer) { } }
     }
 }
 

@@ -8,7 +8,7 @@
 
 MaterialYT is a native YouTube and YouTube Music client for Android 5.0 and newer. It combines a responsive Material 3 interface, an embedded NewPipe Extractor fork, authenticated YouTube web sessions, OkHttp, and ExoPlayer without requiring a YouTube Data API key.
 
-Only Google sign-in is presented as a web page. Home, History, search, channels, playlists, Community Posts, comments, Shorts, YouTube Music, lyrics, settings, and playback are rendered by the app's native Compose interface.
+Only Google sign-in is presented as a web page. Home, History, search, channels, playlists, Community Posts, comments, YouTube Music, lyrics, settings, and playback are rendered by the app's native Compose interface.
 
 > [!IMPORTANT]
 > MaterialYT is an independent project and is not affiliated with, endorsed by, or sponsored by Google, YouTube, or NewPipe. YouTube and YouTube Music are trademarks of Google LLC. YouTube frequently changes its private interfaces, so extraction features can require maintenance without notice.
@@ -18,9 +18,9 @@ Only Google sign-in is presented as a web page. Home, History, search, channels,
 ### YouTube
 
 - Personalized Home and History feeds for signed-in accounts
-- Infinite Home, search, channel video, channel Shorts, and Shorts pagination where YouTube supplies continuations
+- Infinite Home, search, and channel video pagination where YouTube supplies continuations
 - Native search results for videos, channels, and playlists
-- Channel pages with Videos, Shorts, and Community Posts
+- Channel pages with Videos and Community Posts
 - Playlist pages with queue-aware previous and next controls
 - Signed-in account channel and playlist access
 - Native video comments, replies, and Community Post comments
@@ -41,10 +41,8 @@ Only Google sign-in is presented as a web page. Home, History, search, channels,
 
 ### Shorts
 
-- Native vertical player built on ExoPlayer
-- Continuous Shorts sequence loading
-- Channel, title, comments, details, playback settings, audio selection, and codec information
-- Expandable long titles without replacing the Shorts interface with the regular video player
+> [!NOTE]
+> Shorts support is currently hidden because its upstream extraction flow is unstable. It will be reintroduced after its feed and playback behavior are reliable again.
 
 ### Playback
 

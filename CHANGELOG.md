@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.44] - 2026-10-05
+
+### Fixed
+- Read Community Post comment counts from YouTube's reply button renderer instead of incorrectly displaying zero for posts that have comments.
+
 ## [1.4.43] - 2026-10-05
 
 ### Fixed

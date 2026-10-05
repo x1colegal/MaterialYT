@@ -318,14 +318,29 @@ object YouTubeRepository {
                             is JSONArray -> (0 until node.length()).asSequence().mapNotNull { nestedText(node.opt(it), keys) }.firstOrNull()
                             else -> null
                         }
+                        fun firstText(node: Any?): String? = when (node) {
+                            is JSONObject -> text(node)?.takeIf { it.isNotBlank() }
+                                ?: node.keys().asSequence().mapNotNull { firstText(node.opt(it)) }.firstOrNull()
+                            is JSONArray -> (0 until node.length()).asSequence().mapNotNull { firstText(node.opt(it)) }.firstOrNull()
+                            else -> null
+                        }
+                        fun buttonText(node: Any?, keys: Set<String>): String? = when (node) {
+                            is JSONObject -> node.keys().asSequence().mapNotNull { key ->
+                                if (key in keys) firstText(node.opt(key)) else buttonText(node.opt(key), keys)
+                            }.firstOrNull()
+                            is JSONArray -> (0 until node.length()).asSequence().mapNotNull { buttonText(node.opt(it), keys) }.firstOrNull()
+                            else -> null
+                        }
                         val content = text(renderer.opt("contentText")) ?: text(renderer.opt("text")).orEmpty()
                         val id = renderer.optString("postId").ifBlank { content.hashCode().toString() }
+                        val commentCount = nestedText(renderer, setOf("replyCount", "replyCountText", "commentCount", "commentCountText"))
+                            ?: buttonText(renderer, setOf("replyButton", "commentButton"))
                         if (content.isNotBlank()) posts.putIfAbsent(id, CommunityPost(
                             id = id,
                             text = content,
                             published = englishRelativeTime(text(renderer.opt("publishedTimeText")).orEmpty()).ifBlank { "Date unavailable" },
                             likes = englishCountLabel(nestedText(renderer, setOf("voteCount", "likeCount", "likeCountText")).orEmpty(), "likes", "0"),
-                            comments = englishCountLabel(nestedText(renderer, setOf("replyCount", "replyCountText", "commentCount", "commentCountText")).orEmpty(), "comments", "0"),
+                            comments = englishCountLabel(commentCount.orEmpty(), "comments", "0"),
                             image = findThumbnail(renderer).orEmpty()
                         ))
                     }

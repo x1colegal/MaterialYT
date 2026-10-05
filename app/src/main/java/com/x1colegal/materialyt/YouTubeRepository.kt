@@ -1162,12 +1162,12 @@ object YouTubeRepository {
                 ?: columns.drop(1).firstOrNull()
                 ?: deepText(renderer, "shortBylineText") ?: deepText(renderer, "ownerText") ?: deepText(renderer, "longBylineText") ?: deepText(renderer, "subtitle")
                 ?: inferChannelName(renderer, title)?.takeIf { '<' !in it && '>' !in it } ?: "Unknown channel"
-            val subtitle = (if (musicRenderer) rawSubtitle
-                .substringBefore(" • ")
-                .substringBefore(": ")
-                .trim()
-                .ifBlank { rawSubtitle }
-            else rawSubtitle).replace(Regex("(\\d+),(\\d+)"), "$1.$2")
+            val subtitle = (if (musicRenderer) {
+                val parts = rawSubtitle.split(" • ").map(String::trim).filter(String::isNotBlank)
+                val leadingType = parts.firstOrNull()?.lowercase() in setOf("song", "video", "episode", "album", "playlist")
+                (if (leadingType) parts.getOrNull(1) else parts.firstOrNull())
+                    ?.substringBefore(": ")?.trim().orEmpty().ifBlank { rawSubtitle }
+            } else rawSubtitle).replace(Regex("(\\d+),(\\d+)"), "$1.$2")
             if (containsAdMarker(renderer) || isAdString(title) || isAdString(subtitle)) return@walkFeedRenderers
             val thumbnails = renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 ?: renderer.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
@@ -1298,17 +1298,18 @@ object YouTubeRepository {
         when (value) {
             is JSONObject -> {
                 value.optJSONArray("runs")?.let { runs ->
-                    val artistRuns = (0 until runs.length()).mapNotNull { runs.optJSONObject(it) }
-                        .takeWhile { (it.opt("text") as? String)?.contains('•') != true }
-                    val hasArtistLink = artistRuns.any { run ->
+                    val allRuns = (0 until runs.length()).mapNotNull { runs.optJSONObject(it) }
+                    fun isArtistRun(run: JSONObject): Boolean {
                         val browse = run.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
                         val browseId = browse?.optString("browseId").orEmpty()
                         val pageType = browse?.optJSONObject("browseEndpointContextSupportedConfigs")
                             ?.optJSONObject("browseEndpointContextMusicConfig")?.optString("pageType").orEmpty()
-                        browseId.startsWith("UC") || pageType == "MUSIC_PAGE_TYPE_ARTIST"
+                        return browseId.startsWith("UC") || pageType == "MUSIC_PAGE_TYPE_ARTIST"
                     }
-                    if (hasArtistLink) {
-                        artistRuns.joinToString("") { (it.opt("text") as? String).orEmpty() }
+                    val artistIndexes = allRuns.indices.filter { isArtistRun(allRuns[it]) }
+                    if (artistIndexes.isNotEmpty()) {
+                        allRuns.subList(artistIndexes.first(), artistIndexes.last() + 1)
+                            .joinToString("") { (it.opt("text") as? String).orEmpty() }
                             .trim().takeIf { it.isNotBlank() && it != title && !it.startsWith("Go to ", true) }
                             ?.let { return it }
                     }

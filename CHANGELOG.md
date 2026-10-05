@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.40] - 2026-10-04
+
+### Fixed
+- Extracted artist-linked runs from any position in YT Music metadata, correctly handling Home rows formatted as `Song • Artist` and search rows beginning with the artist.
+
 ## [1.4.39] - 2026-10-04
 
 ### Fixed

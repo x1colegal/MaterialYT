@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.34] - 2026-10-04
+
+### Fixed
+- Restored Community Post comments by using YouTube's browse continuation endpoint and parsing the current comment entity format.
+- Kept top-level Community Post pagination separate from reply continuations.
+
 ## [1.4.33] - 2026-10-04
 
 ### Fixed

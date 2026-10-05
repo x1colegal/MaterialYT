@@ -344,6 +344,23 @@ object YouTubeRepository {
         fun collect(value: Any?) {
             when (value) {
                 is JSONObject -> {
+                    value.optJSONObject("commentEntityPayload")?.let { entity ->
+                        val properties = entity.optJSONObject("properties") ?: JSONObject()
+                        val author = entity.optJSONObject("author") ?: JSONObject()
+                        val toolbar = entity.optJSONObject("toolbar") ?: JSONObject()
+                        val body = properties.optJSONObject("content")?.optString("content").orEmpty()
+                        val id = properties.optString("commentId")
+                        if (id.isNotBlank() && body.isNotBlank()) {
+                            comments.putIfAbsent(id, CommunityComment(
+                                id,
+                                author.optString("displayName").ifBlank { "YouTube user" },
+                                body,
+                                properties.optString("publishedTime"),
+                                toolbar.optString("likeCountA11y")
+                                    .ifBlank { toolbar.optString("likeCountNotliked") }
+                            ))
+                        }
+                    }
                     value.optJSONObject("commentRenderer")?.let { renderer ->
                         val body = text(renderer.opt("contentText")).orEmpty()
                         if (body.isNotBlank()) {
@@ -361,15 +378,46 @@ object YouTubeRepository {
         }
         collect(data)
         val seen = mutableSetOf<String>()
-        repeat(3) {
-            val token = findContinuationToken(data) ?: return@repeat
+        repeat(4) { page ->
+            val token = if (page == 0) findCommunityCommentsContinuation(data)
+                else findTopLevelCommentsContinuation(data)
+            if (token.isNullOrBlank()) return@repeat
             if (!seen.add(token)) return@repeat
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
-            data = post("https://www.youtube.com/youtubei/v1/next?key=${bootstrap.key}",
+            data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), bootstrap.origin)
             collect(data)
         }
         return comments.values.toList()
+    }
+
+    private fun findCommunityCommentsContinuation(value: Any?): String? = when (value) {
+        is JSONObject -> {
+            if (value.optString("targetId") == "comments-section" ||
+                value.optString("sectionIdentifier") == "comment-item-section") {
+                findContinuationToken(value)
+            } else value.keys().asSequence().mapNotNull { findCommunityCommentsContinuation(value.opt(it)) }.firstOrNull()
+        }
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findCommunityCommentsContinuation(value.opt(it)) }.firstOrNull()
+        else -> null
+    }
+
+    private fun findTopLevelCommentsContinuation(value: Any?): String? {
+        if (value is JSONObject) {
+            val command = value.optJSONObject("reloadContinuationItemsCommand")
+                ?: value.optJSONObject("appendContinuationItemsAction")
+            val items = command?.optJSONArray("continuationItems")
+            if (items != null) {
+                for (index in items.length() - 1 downTo 0) {
+                    items.optJSONObject(index)?.optJSONObject("continuationItemRenderer")
+                        ?.let { findContinuationToken(it) }?.let { return it }
+                }
+            }
+            value.keys().forEach { findTopLevelCommentsContinuation(value.opt(it))?.let { return it } }
+        } else if (value is JSONArray) {
+            for (index in 0 until value.length()) findTopLevelCommentsContinuation(value.opt(index))?.let { return it }
+        }
+        return null
     }
     fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home")).also { activeMusicQuery = null }
     fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query)

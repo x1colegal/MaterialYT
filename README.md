@@ -1,120 +1,206 @@
-# 🎬 MaterialYT
+# MaterialYT
 
 [![Android 5.0+](https://img.shields.io/badge/Android-5.0%2B-3DDC84?logo=android&logoColor=white)](https://developer.android.com/)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.2-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/)
 [![Material 3](https://img.shields.io/badge/UI-Material_3-6750A4)](https://m3.material.io/)
-[![Release](https://img.shields.io/badge/release-1.2.0-FF0033)](https://github.com/x1colegal/MaterialYT/releases)
+[![Latest release](https://img.shields.io/github/v/release/x1colegal/MaterialYT?display_name=tag&sort=semver)](https://github.com/x1colegal/MaterialYT/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-MaterialYT is an independent native YouTube and YouTube Music client for Android. It combines a responsive Material 3 interface, NewPipe Extractor, authenticated internal YouTube responses, OkHttp, and ExoPlayer without requiring a YouTube Data API key.
+MaterialYT is a native YouTube and YouTube Music client for Android 5.0 and newer. It combines a responsive Material 3 interface, an embedded NewPipe Extractor fork, authenticated YouTube web sessions, OkHttp, and ExoPlayer without requiring a YouTube Data API key.
+
+Only Google sign-in is presented as a web page. Home, History, search, channels, playlists, Community Posts, comments, Shorts, YouTube Music, lyrics, settings, and playback are rendered by the app's native Compose interface.
 
 > [!IMPORTANT]
-> MaterialYT is not affiliated with, endorsed by, or sponsored by Google, YouTube, or NewPipe. YouTube and YouTube Music are trademarks of Google LLC. Use the application in accordance with the services' terms and your local law.
+> MaterialYT is an independent project and is not affiliated with, endorsed by, or sponsored by Google, YouTube, or NewPipe. YouTube and YouTube Music are trademarks of Google LLC. YouTube frequently changes its private interfaces, so extraction features can require maintenance without notice.
 
-## ✨ Highlights
+## Features
 
-- 📱 Android 5.0+ (`minSdk 21`) with legacy launcher icons and Android 8.0+ adaptive icons
-- 🏠 Native personalized Home and History feeds with channels, thumbnails, and comments
-- ⚡ Vertical Shorts player with live decoder options, audio codec controls, and tablet centering
-- 🎵 Native YouTube Music feed, search, playback, real artwork proportions, and timed lyrics
-- 🚘 Android Auto music browsing and playback through the media browser service
-- 🔎 Native YouTube search powered by NewPipe Extractor
-- ▶️ ExoPlayer video and music players with seeking, playback speed, fullscreen, and Android 8.0+ PiP
-- 🪟 Automatic PiP when leaving the app while a video is playing
-- 🎞️ H.264, HEVC, AV1, and VP9 preferences with quality, FPS, and bitrate details
-- ⚡ Fast-start playback with a large forward buffer, automatic 403 fallback, and signature cipher solving
-- 💬 Native comment reading and signed-in comment posting
-- 👤 Google sign-in used by the internal backend for personalized feeds, playback history, and comments
-- 🔄 Manual refresh actions for Home, History, and YT Music
-- 🎨 System, Light, Dark, and OLED Pure Black themes
-- 🌈 Strong Purple, YouTube Red, Bright Blue, Blue Cyan, Green, Orange, Pink, and Teal palettes
-- 📐 Responsive tablet layouts: 2-column video & music players, 2-column music grid, and left-side navigation rail
-- 🌐 Selectable HTTP/1.0 compatibility, HTTP/1.1, and HTTP/2 backend modes
+### YouTube
 
-## 🧱 Technology
+- Personalized Home and History feeds for signed-in accounts
+- Infinite Home, search, channel video, channel Shorts, and Shorts pagination where YouTube supplies continuations
+- Native search results for videos, channels, and playlists
+- Channel pages with Videos, Shorts, and Community Posts
+- Playlist pages with queue-aware previous and next controls
+- Signed-in account channel and playlist access
+- Native video comments, replies, and Community Post comments
+- Video details including description, views, likes, and publication date when exposed by YouTube
+- Watch-time reporting to the signed-in YouTube history
+
+### YouTube Music
+
+- Music-oriented Home and search interfaces
+- Persistent foreground playback service
+- Miniplayer with playback controls, animated scrolling metadata, close button, and swipe-to-dismiss
+- Android media notification and system Now Playing integration
+- Android Auto browsing, playback, queue controls, and metadata
+- Real artwork aspect ratios in lists
+- Seekable playback timeline with played and buffered progress
+- Timed lyrics when YouTube Music exposes synchronized lyric data
+- Music listening reported through the YouTube account history
+
+### Shorts
+
+- Native vertical player built on ExoPlayer
+- Continuous Shorts sequence loading
+- Channel, title, comments, details, playback settings, audio selection, and codec information
+- Expandable long titles without replacing the Shorts interface with the regular video player
+
+### Playback
+
+- Fullscreen playback with immersive system bars
+- Android 8.0+ picture-in-picture with play and pause actions
+- Automatic PiP when leaving the app during video playback
+- PiP aspect ratio matched to the active video
+- Video miniplayer that keeps playback alive while browsing
+- Large forward buffer with visible buffered progress
+- Playback speed and manual quality selection
+- Resolution, frame rate, codec, and bitrate information
+- Preferred AVC, HEVC, VP9, or AV1 video codec
+- Preferred MP4A or Opus audio codec
+- Original audio track selection by default, with manual alternate-track selection
+- Automatic, hardware, or software decoding preferences for video and audio
+
+### Appearance and devices
+
+- Material 3 interface written with Jetpack Compose
+- System, Light, Dark, and OLED Pure Black themes
+- Multiple strong Material color palettes
+- Black status bar in Light mode
+- Responsive phone and tablet layouts
+- Tablet grids, two-pane players, and navigation rail
+- Legacy launcher resources for Android 5–7 and adaptive icons for modern Android versions
+
+## Playback backends
+
+MaterialYT provides three explicit playback modes:
+
+| Mode | Behavior |
+| --- | --- |
+| **Force NewPipe** | Uses only the embedded NewPipe Extractor path and its native YouTube clients. |
+| **NewPipe + WEB fallback** | Tries NewPipe first, then permits the authenticated WEB + PoToken path if native clients fail. |
+| **Force WEB** | Bypasses NewPipe and uses the WEB + PoToken path directly. Some videos may expose only limited quality. |
+
+The embedded extractor contains MaterialYT-specific client handling, stream URL processing, signature and `n` challenge support, and optional PoToken integration. Format availability still depends on the selected backend, the video, YouTube's current server behavior, account restrictions, region, and device decoder support.
+
+## Networking
+
+MaterialYT uses OkHttp for its native backend and media transport. The Settings screen provides:
+
+- **HTTP/2** with HTTP/1.1 fallback
+- **HTTP/1.1** only
+- **HTTP/1.0 compatibility**, implemented with HTTP/1.1 connection-close semantics because OkHttp does not emit HTTP/1.0 request lines
+
+Backend selection and HTTP protocol selection are separate settings. Changing the network protocol does not silently change the playback backend.
+
+## Google account integration
+
+The Account screen opens Google's HTTPS sign-in flow inside Android System WebView. After login, MaterialYT reuses the locally stored YouTube session cookies for authenticated internal requests.
+
+The signed-in session powers features such as:
+
+- Home recommendations
+- History reading and watch-time updates
+- YouTube Music personalization
+- Account channel and playlists
+- Community content and comments
+- Comment posting where YouTube grants permission
+
+MaterialYT does not collect the Google password in its native UI. Clearing the application's storage removes the local cookies, preferences, and account session. Google may reject embedded sign-in on particular accounts, WebView versions, or devices.
+
+## Android Auto
+
+`AutoMusicService` exposes YouTube Music through Android's media browser APIs. Supported surfaces can display the current track, artwork, playback state, queue navigation, and transport controls.
+
+Android Auto availability depends on the Android Auto version, the phone, the vehicle or head unit, and whether externally distributed media applications are allowed by the platform configuration.
+
+## Architecture
 
 | Area | Implementation |
 | --- | --- |
-| UI | Kotlin, Jetpack Compose, Material 3 |
-| Extraction | NewPipe Extractor |
-| HTTP | OkHttp with the authenticated WebView cookie store |
-| Playback | ExoPlayer with OkHttp HTTP/2 media transport |
+| Language | Kotlin and Java |
+| UI | Jetpack Compose and Material 3 |
+| Extraction | Embedded NewPipe Extractor fork |
+| Authenticated data | Internal YouTube web responses using the local WebView cookie session |
+| Networking | OkHttp |
+| Playback | ExoPlayer with OkHttp media data sources |
 | Images | Coil |
+| JavaScript challenges | yt-dlp EJS challenge solver assets with pinned SHA-256 hashes |
 | Car integration | AndroidX Media browser service |
-| Authentication | Google login WebView; the rest of the app remains native |
+| Minimum Android version | Android 5.0 / API 21 |
+| Target SDK | Android API 36 |
 
-Only Google sign-in is displayed as a web page. Home, History, YT Music, search, players, lyrics, comments, account controls, and settings are rendered by native Compose UI.
+### Main source files
 
-## 🎛️ Playback behavior
+```text
+app/src/main/java/com/x1colegal/materialyt/
+├── AutoMusicService.kt       # Music service, Android Auto, notification, and queue state
+├── EjsChallengeSolver.kt     # Signature and n-challenge JavaScript execution
+├── HttpBackend.kt            # NewPipe downloader and selectable OkHttp protocol mode
+├── MainActivity.kt           # Compose navigation, feeds, players, comments, and settings
+├── MaterialYtApp.kt          # Application and extractor initialization
+├── NewPipePoTokenProvider.kt # Local BotGuard WebView and PoToken generation
+├── PlaybackBackend.kt        # Explicit NewPipe and WEB backend preferences
+└── YouTubeRepository.kt      # Authenticated feeds, music, metadata, history, and comments
 
-The player lists available formats with resolution, frame rate, codec, and bitrate. Default video quality, video codec, and audio codec can be selected in Settings. MaterialYT chooses the closest available format while prioritizing the requested codec. It never changes quality automatically during playback.
+newpipe-extractor/             # Embedded and modified NewPipe Extractor module
+```
 
-Separate adaptive video and audio tracks share an OkHttp HTTP/2 client and are timestamp-aligned before playback. Playback starts quickly while ExoPlayer continues building a large forward buffer.
+## Building
 
-YouTube Music uses its own music-oriented interface. Artwork keeps the source aspect ratio instead of being forced into a square, and synchronized lyrics follow the current playback position when timed lyric data is available.
-
-## 🔐 Account and privacy
-
-The Account destination opens Google's HTTPS sign-in page when requested. After a successful login, MaterialYT reuses the local YouTube session cookies for internal authenticated requests. Playback watch-time events are sent to the signed-in account so watched videos and music can participate in account history. Passwords are never collected by the native interface, and the app does not ship an OAuth client secret. Clearing app storage removes the local session and preferences.
-
-Google can reject embedded sign-in for some accounts, devices, or WebView versions. YouTube also changes its private interfaces regularly, so extractor and request logic may require maintenance over time.
-
-## 🚘 Android Auto
-
-MaterialYT exposes the signed-in YouTube Music catalog and playback controls through Android Auto. Because MaterialYT is distributed outside Google Play, Android Auto must allow apps from unknown sources in its developer settings before it can appear in the launcher. Availability still depends on the phone, vehicle/head unit, and Android Auto version.
-
-## 🌐 HTTP modes
-
-- **HTTP/2** enables HTTP/2 with normal HTTP/1.1 fallback.
-- **HTTP/1.1** restricts backend requests to HTTP/1.1.
-- **HTTP/1.0 compatibility** uses HTTP/1.1 with connection-close semantics because OkHttp does not emit HTTP/1.0 request lines.
-
-These settings apply to MaterialYT's native backend. Android System WebView is used only for Google sign-in.
-
-## 🛠️ Building
-
-Requirements:
+### Requirements
 
 - JDK 17
 - Android SDK Platform 36
-- Internet access for initial dependency resolution
+- A configured Android SDK path
+- Internet access for the initial Gradle dependency and EJS asset download
 
 ```bash
 git clone https://github.com/x1colegal/MaterialYT.git
 cd MaterialYT
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
-./gradlew :app:assembleDebug --no-daemon
+./gradlew --daemon :app:assembleRelease
 ```
 
-The generated debug APK is located at `app/build/outputs/apk/debug/app-debug.apk`.
-
-## 🗺️ Project layout
+The release APK is generated under:
 
 ```text
-app/src/main/java/com/x1colegal/materialyt/
-├── AutoMusicService.kt   # Android Auto music catalog and transport controls
-├── EjsChallengeSolver.kt # Embedded JavaScript challenge & signature cipher solver
-├── HttpBackend.kt        # Authenticated OkHttp backend for NewPipe Extractor
-├── MainActivity.kt       # Compose feeds, players, lyrics, account, and settings
-├── MaterialYtApp.kt      # Application and extractor initialization
-└── YouTubeRepository.kt  # Home, History, Music, streams, and comments
+app/build/outputs/apk/release/
 ```
 
-## ⚠️ Platform notes
+Release builds currently use the configured debug signing key. Anyone distributing a fork should configure and protect their own release keystore.
 
+## Known limitations
+
+- YouTube's internal APIs, player clients, continuation formats, BotGuard challenges, and stream requirements are undocumented and can change at any time.
+- Some videos may be unavailable on one playback client but available on another.
+- WEB playback can expose fewer formats than NewPipe playback.
+- Comments, playlists, account pages, lyrics, audio tracks, likes, and other metadata appear only when YouTube returns them to the current session.
 - PiP requires Android 8.0 or newer.
-- Format and codec availability depends on each video and the device's decoders.
-- Android Auto sideload visibility depends on its developer options and current platform policy.
-- Downloads, casting, SponsorBlock, likes, and subscriptions are not currently included.
+- Codec and hardware-decoder support depend on the Android device.
+- Android Auto visibility for a sideloaded build depends on platform policy and developer settings.
+- Casting, downloads, subscriptions, and SponsorBlock are not currently implemented.
 
-## 🤝 Contributing
+## Contributing
 
-Issues and pull requests are welcome. Keep source code, app text, documentation, commits, and release notes in English. For extraction or playback reports, include the Android version, WebView version, selected HTTP mode, and a reproducible URL.
+Issues and pull requests are welcome. Keep source code, user-facing app text, documentation, commit messages, changelogs, and release notes in English.
 
-## 📄 License
+Useful bug reports include:
 
-MaterialYT's original source is released under the [MIT License](LICENSE). The embedded NewPipe Extractor module is licensed under [GPL-3.0-or-later](newpipe-extractor/LICENSE), and combined APK distributions are subject to the GPL terms. Other dependencies retain their respective licenses.
+- MaterialYT version
+- Android and System WebView versions
+- Selected playback backend and HTTP mode
+- Selected codec, quality, and decoder mode
+- Whether the account is signed in
+- A reproducible YouTube URL or video ID
+- Relevant log output with private account data removed
+
+## License
+
+MaterialYT's original source code is available under the [MIT License](LICENSE).
+
+The embedded [NewPipe Extractor](newpipe-extractor/) module is licensed under GPL-3.0-or-later. Combined binaries and redistributed builds must also comply with the licenses of NewPipe Extractor and all other included dependencies.
 
 ---
 
-Built with Kotlin, Material 3, and far too much determination. 🚀🎧
+Developed with Antigravity + Codex — most of the project was developed with Codex.

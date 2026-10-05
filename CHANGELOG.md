@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.37] - 2026-10-04
+
+### Fixed
+- Prevented YT Music accessibility objects such as `Go to Artist` from being serialized as artist names.
+
 ## [1.4.36] - 2026-10-04
 
 ### Fixed

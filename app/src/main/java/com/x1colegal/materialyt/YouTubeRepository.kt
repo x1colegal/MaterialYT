@@ -1292,8 +1292,9 @@ object YouTubeRepository {
         when (value) {
             is JSONObject -> {
                 val browseId = value.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")?.optString("browseId").orEmpty()
-                val candidate = value.optString("text")
-                if (browseId.startsWith("UC") && candidate.isNotBlank() && candidate != title) return candidate
+                val candidate = value.opt("text") as? String
+                if (browseId.startsWith("UC") && !candidate.isNullOrBlank() && candidate != title &&
+                    !candidate.startsWith("Go to ", ignoreCase = true)) return candidate
                 value.keys().forEach { findMusicArtist(value.opt(it), title)?.let { return it } }
             }
             is JSONArray -> for (index in 0 until value.length()) findMusicArtist(value.opt(index), title)?.let { return it }

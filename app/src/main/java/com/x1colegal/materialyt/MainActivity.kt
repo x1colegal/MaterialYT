@@ -1723,6 +1723,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
     }
     DisposableEffect(Unit) {
+        activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         activity.videoPlayerActive(true)
         mediaSession.setCallback(object : MediaSessionCompat.Callback() {
             override fun onPlay() = player.play()
@@ -1760,6 +1761,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
         player.addListener(listener)
         onDispose {
+            activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             activity.stopPlaybackNotification()
             mediaSession.isActive = false
             mediaSession.release()

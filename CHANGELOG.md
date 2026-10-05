@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.43] - 2026-10-05
+
+### Fixed
+- Kept the display awake while the native video player is open and restored the normal screen timeout after leaving it.
+
 ## [1.4.42] - 2026-10-05
 
 ### Changed

@@ -6,6 +6,7 @@ All notable changes to MaterialYT are documented in this file.
 
 ### Fixed
 - Kept the display awake while the native video player is open and restored the normal screen timeout after leaving it.
+- Requested Community Posts in English and normalized localized publication times, like counts, and comment counts into English labels.
 
 ## [1.4.42] - 2026-10-05
 

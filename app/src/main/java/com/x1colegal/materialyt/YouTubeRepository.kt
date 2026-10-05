@@ -303,7 +303,7 @@ object YouTubeRepository {
     }
 
     fun channelPosts(channelUrl: String): List<CommunityPost> {
-        val pageUrl = channelUrl.trimEnd('/') + "/posts"
+        val pageUrl = channelUrl.trimEnd('/') + "/posts?hl=en"
         val data = initialData(get(pageUrl))
         val posts = linkedMapOf<String, CommunityPost>()
         fun collect(value: Any?) {
@@ -323,9 +323,9 @@ object YouTubeRepository {
                         if (content.isNotBlank()) posts.putIfAbsent(id, CommunityPost(
                             id = id,
                             text = content,
-                            published = text(renderer.opt("publishedTimeText")).orEmpty().ifBlank { "Date unavailable" },
-                            likes = nestedText(renderer, setOf("voteCount", "likeCount", "likeCountText")).orEmpty().ifBlank { "0 likes" },
-                            comments = nestedText(renderer, setOf("replyCount", "replyCountText", "commentCount", "commentCountText")).orEmpty().ifBlank { "Comments" },
+                            published = englishRelativeTime(text(renderer.opt("publishedTimeText")).orEmpty()).ifBlank { "Date unavailable" },
+                            likes = englishCountLabel(nestedText(renderer, setOf("voteCount", "likeCount", "likeCountText")).orEmpty(), "likes", "0"),
+                            comments = englishCountLabel(nestedText(renderer, setOf("replyCount", "replyCountText", "commentCount", "commentCountText")).orEmpty(), "comments", "0"),
                             image = findThumbnail(renderer).orEmpty()
                         ))
                     }
@@ -1086,10 +1086,38 @@ object YouTubeRepository {
 
     private fun get(url: String): String {
         val origin = if (url.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
-        val request = Request.Builder().url(url).header("User-Agent", UA).apply {
+        val request = Request.Builder().url(url).header("User-Agent", UA).header("Accept-Language", "en-US,en;q=0.9").apply {
             cookies(origin).takeIf { it.isNotBlank() }?.let { header("Cookie", it) }
         }.build()
         return client.newCall(request).execute().use { if (!it.isSuccessful) error("YouTube returned HTTP ${it.code}"); it.body?.string().orEmpty() }
+    }
+
+    private fun englishCountLabel(value: String, label: String, fallback: String): String {
+        val count = value.trim().ifBlank { fallback }
+            .replace(Regex("(?i)\\s*(mil)\\b"), "K")
+            .replace(Regex("(?i)\\s*(mi|milh(?:ão|ões))\\b"), "M")
+            .replace(',', '.')
+            .replace(Regex("(?i)\\s*(likes?|curtidas?|comments?|comentários?)\\s*$"), "")
+            .trim().ifBlank { fallback }
+        return "$count ${if (count == "1") label.removeSuffix("s") else label}"
+    }
+
+    private fun englishRelativeTime(value: String): String {
+        val normalized = value.trim().lowercase()
+            .removePrefix("há ").removeSuffix(" atrás")
+        val match = Regex("(\\d+)\\s+(segundo|segundos|minuto|minutos|hora|horas|dia|dias|semana|semanas|mês|meses|ano|anos)").matchEntire(normalized)
+            ?: return value
+        val amount = match.groupValues[1]
+        val unit = when (match.groupValues[2]) {
+            "segundo", "segundos" -> "second"
+            "minuto", "minutos" -> "minute"
+            "hora", "horas" -> "hour"
+            "dia", "dias" -> "day"
+            "semana", "semanas" -> "week"
+            "mês", "meses" -> "month"
+            else -> "year"
+        }
+        return "$amount $unit${if (amount == "1") "" else "s"} ago"
     }
 
     private fun post(url: String, body: JSONObject, origin: String): JSONObject {

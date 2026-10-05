@@ -1156,12 +1156,18 @@ object YouTubeRepository {
                 val vids = text(renderer.opt("videoCountText"))
                 listOfNotNull(subs, vids).joinToString(" • ").ifBlank { null }
             } else null
-            val musicArtist = if (rendererType.startsWith("music") || renderer.has("flexColumns")) findMusicArtist(renderer, title) else null
+            val musicRenderer = rendererType.startsWith("music") || renderer.has("flexColumns")
+            val musicArtist = if (musicRenderer) findMusicArtist(renderer, title) else null
             val rawSubtitle = channelSubtitle ?: musicArtist ?: text(renderer.opt("shortBylineText")) ?: text(renderer.opt("ownerText")) ?: text(renderer.opt("longBylineText")) ?: text(renderer.opt("subtitle"))
                 ?: columns.drop(1).firstOrNull()
                 ?: deepText(renderer, "shortBylineText") ?: deepText(renderer, "ownerText") ?: deepText(renderer, "longBylineText") ?: deepText(renderer, "subtitle")
                 ?: inferChannelName(renderer, title)?.takeIf { '<' !in it && '>' !in it } ?: "Unknown channel"
-            val subtitle = rawSubtitle.replace(Regex("(\\d+),(\\d+)"), "$1.$2")
+            val subtitle = (if (musicRenderer) rawSubtitle
+                .substringBefore(" • ")
+                .substringBefore(": ")
+                .trim()
+                .ifBlank { rawSubtitle }
+            else rawSubtitle).replace(Regex("(\\d+),(\\d+)"), "$1.$2")
             if (containsAdMarker(renderer) || isAdString(title) || isAdString(subtitle)) return@walkFeedRenderers
             val thumbnails = renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 ?: renderer.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")

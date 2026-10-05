@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.39] - 2026-10-04
+
+### Fixed
+- Normalized unstructured YT Music accessibility subtitles by removing the song title and duration from `Artist: Song • duration` fallbacks.
+
 ## [1.4.38] - 2026-10-04
 
 ### Fixed

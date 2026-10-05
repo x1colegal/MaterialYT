@@ -558,6 +558,12 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var selectedResult by remember { mutableStateOf<InfoItem?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
+    val homeListState = rememberLazyListState()
+    val homeGridState = rememberLazyGridState()
+    fun scrollHomeToTop() = scope.launch {
+        homeListState.scrollToItem(0)
+        homeGridState.scrollToItem(0)
+    }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     // Render selected video on top of feed so miniplayer has feed content underneath
     val videoOverlay: @Composable () -> Unit = {
@@ -606,6 +612,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             val focusManager = LocalFocusManager.current
             OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = {
                 IconButton(onClick = {
+                    scrollHomeToTop()
                     query = ""
                     results = emptyList()
                     error = null
@@ -613,16 +620,16 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     focusManager.clearFocus()
                     keyboardController?.hide()
                 }) { Icon(Icons.Default.Close, "Exit search") }
-            }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }; loading = false } }))
+            }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) { scrollHomeToTop(); scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }; loading = false } } }))
             IconButton(onClick = {
                 focusManager.clearFocus()
                 keyboardController?.hide()
-                if (query.isNotBlank()) scope.launch {
+                if (query.isNotBlank()) { scrollHomeToTop(); scope.launch {
                     loading = true; error = null
                     runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }
                         .onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }
                     loading = false
-                }
+                } }
             }) { Icon(Icons.Default.Search, "Search") }
             IconButton(onClick = {
                 query = ""
@@ -646,13 +653,12 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         } else {
             val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
             if (tablet) {
-                val gridState = rememberLazyGridState()
-                LaunchedEffect(gridState, feed.size, query) {
-                    snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+                LaunchedEffect(homeGridState, feed.size, query) {
+                    snapshotFlow { homeGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
                         if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
                     }
                 }
-                LazyVerticalGrid(GridCells.Adaptive(320.dp), state = gridState, contentPadding = PaddingValues(16.dp)) {
+                LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(16.dp)) {
                     if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
@@ -660,13 +666,12 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             } else {
-                val listState = rememberLazyListState()
-                LaunchedEffect(listState, feed.size, query) {
-                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+                LaunchedEffect(homeListState, feed.size, query) {
+                    snapshotFlow { homeListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
                         if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
                     }
                 }
-                LazyColumn(state = listState) {
+                LazyColumn(state = homeListState) {
                     if (results.isNotEmpty()) item { Text("Channels and playlists", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
                     items(results) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item { Text("Videos", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
@@ -723,6 +728,12 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     var loading by remember { mutableStateOf(true) }
     var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val musicListState = rememberLazyListState()
+    val musicGridState = rememberLazyGridState()
+    fun scrollMusicToTop() = scope.launch {
+        musicListState.scrollToItem(0)
+        musicGridState.scrollToItem(0)
+    }
     LaunchedEffect(reopenPlayerRequest) {
         if (reopenPlayerRequest > 0) selected = AutoMusicService.nowPlaying.value
     }
@@ -748,14 +759,15 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
             val focusManager = LocalFocusManager.current
             OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search music") }, shape = CircleShape, leadingIcon = {
                 IconButton(onClick = {
+                    scrollMusicToTop()
                     query = ""
                     error = null
                     tracks = homeTracks
                     focusManager.clearFocus()
                     keyboardController?.hide()
                 }) { Icon(Icons.Default.Close, "Exit search") }
-            }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) load { YouTubeRepository.musicSearch(query) } }))
-            IconButton(onClick = { if (query.isNotBlank()) load { YouTubeRepository.musicSearch(query) } }) { Icon(Icons.Default.Search, "Search music") }
+            }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) { scrollMusicToTop(); load { YouTubeRepository.musicSearch(query) } } }))
+            IconButton(onClick = { if (query.isNotBlank()) { scrollMusicToTop(); load { YouTubeRepository.musicSearch(query) } } }) { Icon(Icons.Default.Search, "Search music") }
             IconButton(onClick = {
                 query = ""
                 scope.launch {
@@ -771,15 +783,14 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet) {
-            val gridState = rememberLazyGridState()
-            LaunchedEffect(gridState, tracks.size, query) {
-                snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+            LaunchedEffect(musicGridState, tracks.size, query) {
+                snapshotFlow { musicGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
                     if (query.isNotBlank() && tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
                 }
             }
             LazyVerticalGrid(
                 GridCells.Adaptive(minSize = 300.dp),
-                state = gridState,
+                state = musicGridState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -789,13 +800,12 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                 if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         } else {
-            val listState = rememberLazyListState()
-            LaunchedEffect(listState, tracks.size, query) {
-                snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+            LaunchedEffect(musicListState, tracks.size, query) {
+                snapshotFlow { musicListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
                     if (query.isNotBlank() && tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
                 }
             }
-            LazyColumn(state = listState) {
+            LazyColumn(state = musicListState) {
                 items(tracks) { track -> FeedRow(track) { selected = track } }
                 if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }

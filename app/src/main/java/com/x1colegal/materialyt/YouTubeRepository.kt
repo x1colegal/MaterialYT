@@ -109,9 +109,7 @@ object YouTubeRepository {
         if (!containsAdMarker(seed)) {
             reelFeedItem(seed)?.let(result::add)
         }
-        val continuation = seed.optString("sequenceContinuation").ifBlank {
-            findString(seed.optJSONObject("continuationEndpoint"), "token").orEmpty()
-        }
+        val continuation = reelContinuation(seed).orEmpty()
         if (continuation.isNotBlank()) result += shortsSequence(continuation, bootstrap)
         return result.distinctBy { it.id }.also { AppLog.event("shorts reel items=${it.size}") }
     }
@@ -129,7 +127,7 @@ object YouTubeRepository {
         val origin = "https://www.youtube.com"
         val sequence = post("$origin/youtubei/v1/reel/reel_watch_sequence?key=${bootstrap.key}", JSONObject()
             .put("context", context("WEB", bootstrap.version)).put("sequenceParams", token), origin)
-        var next = sequence.optString("sequenceContinuation").ifBlank { findString(sequence, "sequenceContinuation").orEmpty() }
+        var next = reelContinuation(sequence).orEmpty()
         val result = mutableListOf<FeedItem>()
         val entries = sequence.optJSONArray("entries")
         if (entries != null) for (index in 0 until entries.length()) {
@@ -147,11 +145,7 @@ object YouTubeRepository {
             }.getOrNull()?.let { details ->
                 if (!containsAdMarker(details)) {
                     reelFeedItem(details, watch)?.let(result::add)
-                    val candidate = details.optString("sequenceContinuation").ifBlank {
-                        findString(details, "sequenceContinuation").orEmpty().ifBlank {
-                            findString(details.optJSONObject("continuationEndpoint"), "token").orEmpty()
-                        }
-                    }
+                    val candidate = reelContinuation(details).orEmpty()
                     if (candidate.isNotBlank() && candidate != token) next = candidate
                 }
             }
@@ -159,6 +153,12 @@ object YouTubeRepository {
         shortsToken = next.takeIf { it.isNotBlank() && it != token }
         return result.distinctBy { it.id }.also { AppLog.event("shorts continuation items=${it.size} hasNext=${shortsToken != null}") }
     }
+
+    private fun reelContinuation(value: JSONObject): String? =
+        value.optString("sequenceContinuation").takeIf(String::isNotBlank)
+            ?: value.optString("continuation").takeIf(String::isNotBlank)
+            ?: value.optJSONObject("continuationEndpoint")?.optJSONObject("continuationCommand")
+                ?.optString("token")?.takeIf(String::isNotBlank)
 
     private data class ShortsMetadata(val title: String, val channel: String, val avatar: String, val channelUrl: String)
 

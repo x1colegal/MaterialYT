@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.41] - 2026-10-04
+
+### Fixed
+- Returned Home and YT Music lists to the first item when starting or closing a search on phones and tablets.
+- Read the current Shorts sequence continuation fields used after the first reel batch, restoring continuous Shorts pagination.
+
 ## [1.4.40] - 2026-10-04
 
 ### Fixed

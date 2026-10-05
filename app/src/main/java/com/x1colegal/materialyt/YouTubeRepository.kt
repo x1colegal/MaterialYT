@@ -1291,10 +1291,22 @@ object YouTubeRepository {
     private fun findMusicArtist(value: Any?, title: String): String? {
         when (value) {
             is JSONObject -> {
-                val browseId = value.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")?.optString("browseId").orEmpty()
-                val candidate = value.opt("text") as? String
-                if (browseId.startsWith("UC") && !candidate.isNullOrBlank() && candidate != title &&
-                    !candidate.startsWith("Go to ", ignoreCase = true)) return candidate
+                value.optJSONArray("runs")?.let { runs ->
+                    val artistRuns = (0 until runs.length()).mapNotNull { runs.optJSONObject(it) }
+                        .takeWhile { (it.opt("text") as? String)?.contains('•') != true }
+                    val hasArtistLink = artistRuns.any { run ->
+                        val browse = run.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
+                        val browseId = browse?.optString("browseId").orEmpty()
+                        val pageType = browse?.optJSONObject("browseEndpointContextSupportedConfigs")
+                            ?.optJSONObject("browseEndpointContextMusicConfig")?.optString("pageType").orEmpty()
+                        browseId.startsWith("UC") || pageType == "MUSIC_PAGE_TYPE_ARTIST"
+                    }
+                    if (hasArtistLink) {
+                        artistRuns.joinToString("") { (it.opt("text") as? String).orEmpty() }
+                            .trim().takeIf { it.isNotBlank() && it != title && !it.startsWith("Go to ", true) }
+                            ?.let { return it }
+                    }
+                }
                 value.keys().forEach { findMusicArtist(value.opt(it), title)?.let { return it } }
             }
             is JSONArray -> for (index in 0 until value.length()) findMusicArtist(value.opt(index), title)?.let { return it }

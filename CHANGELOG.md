@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.38] - 2026-10-04
+
+### Fixed
+- Parsed all YT Music artist runs up to the first metadata separator, preserving collaborations without including the song title or duration.
+
 ## [1.4.37] - 2026-10-04
 
 ### Fixed

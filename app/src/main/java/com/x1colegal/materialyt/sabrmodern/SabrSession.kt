@@ -195,7 +195,11 @@ internal class SabrSession(
                 SabrUmp.MEDIA_HEADER -> { val h = SabrMessages.parseMediaHeader(p.payload); headers[h.headerId] = h }
                 SabrUmp.FORMAT_INITIALIZATION_METADATA -> SabrMessages.parseEndSegment(p.payload).let { if (it > 0) endSeg = it }
                 SabrUmp.NEXT_REQUEST_POLICY -> SabrMessages.parsePlaybackCookie(p.payload)?.let { cookie = it }
-                SabrUmp.SABR_CONTEXT_UPDATE -> { val (type, ctx) = SabrMessages.parseContextUpdate(p.payload); ctxByType[type] = ctx; gotContext = true }
+                SabrUmp.SABR_CONTEXT_UPDATE -> {
+                    val (type, ctx) = SabrMessages.parseContextUpdate(p.payload)
+                    gotContext = !ctx.contentEquals(ctxByType[type])
+                    ctxByType[type] = ctx
+                }
                 SabrUmp.SABR_REDIRECT -> redirect = SabrMessages.parseRedirectUrl(p.payload)
                 SabrUmp.SABR_ERROR -> sabrErrors += SabrUmp.errorDescription(p.payload)
                 SabrUmp.RELOAD_PLAYER_RESPONSE -> reloadToken = SabrUmp.reloadToken(p.payload)

@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.47] - 2026-10-06
+
+### Fixed
+- Sent YouTube's real audio-track ID in SABR client state, fixing multi-audio videos that returned only context and policy frames before failing with an incomplete drain.
+- Stopped repeated identical SABR context updates from keeping an empty response loop alive.
+
 ## [1.4.46] - 2026-10-06
 
 ### Fixed

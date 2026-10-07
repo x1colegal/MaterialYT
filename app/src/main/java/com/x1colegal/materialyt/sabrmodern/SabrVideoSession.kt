@@ -186,13 +186,19 @@ internal class SabrVideoSession(
             var gotContext = false
             var protStatus = 0L
             var reloadToken: String? = null
+            var snackbarPayload: String? = null
             for (p in parts) when (p.type) {
                 SabrUmp.MEDIA_HEADER -> { val h = SabrMessages.parseMediaHeader(p.payload); headers[h.headerId] = h }
                 SabrUmp.NEXT_REQUEST_POLICY -> SabrMessages.parsePlaybackCookie(p.payload)?.let { cookie = it }
-                SabrUmp.SABR_CONTEXT_UPDATE -> { val (type, ctx) = SabrMessages.parseContextUpdate(p.payload); ctxByType[type] = ctx; gotContext = true }
+                SabrUmp.SABR_CONTEXT_UPDATE -> {
+                    val (type, ctx) = SabrMessages.parseContextUpdate(p.payload)
+                    gotContext = !ctx.contentEquals(ctxByType[type])
+                    ctxByType[type] = ctx
+                }
                 SabrUmp.SABR_REDIRECT -> redirect = SabrMessages.parseRedirectUrl(p.payload)
                 SabrUmp.SABR_ERROR -> sabrErrors += SabrUmp.errorDescription(p.payload)
                 SabrUmp.RELOAD_PLAYER_RESPONSE -> reloadToken = SabrUmp.reloadToken(p.payload)
+                SabrUmp.SNACKBAR_MESSAGE -> snackbarPayload = p.payload.joinToString("") { "%02x".format(it) }
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
                     protStatus = SabrProto.read(p.payload).longAt(1)
                     AppLog.event("SABR video protection=$protStatus iter=$iter")
@@ -212,7 +218,7 @@ internal class SabrVideoSession(
                 dry = 0
                 continue
             }
-            if (iter == 1) AppLog.event("SABR video first response bytes=${bytes.size} parts=${parts.size} headers=${headers.size} redirect=${redirect != null} protection=$protStatus types=${parts.joinToString { "${it.type}:${it.payload.size}" }}")
+            if (iter == 1) AppLog.event("SABR video first response bytes=${bytes.size} parts=${parts.size} headers=${headers.size} redirect=${redirect != null} protection=$protStatus snackbar=${snackbarPayload ?: "none"} types=${parts.joinToString { "${it.type}:${it.payload.size}" }}")
 
             // Which headers are NEW per track (init once, each sequence once). Resends are skipped.
             val newIds = headers.values.filter { h ->

@@ -13,7 +13,13 @@ import com.x1colegal.materialyt.sabrmodern.SabrProto.vField
 internal object SabrMessages {
 
     /** The format a SABR track streams (audio or video) — from the /player response's adaptiveFormats. */
-    class Format(val itag: Int, val lastModified: Long, val contentLength: Long, val xtags: String = "")
+    class Format(
+        val itag: Int,
+        val lastModified: Long,
+        val contentLength: Long,
+        val xtags: String = "",
+        val audioTrackId: String = "",
+    )
 
     /** Identity for the SABR streamerContext.clientInfo (must match the /player request client). */
     class ClientInfo(
@@ -70,7 +76,11 @@ internal object SabrMessages {
         )
 
     // ClientAbrState { playerTimeMs=28, enabledTrackTypesBitfield=40 }  (40=1 -> audio only)
-    private fun clientAbrState(playerTimeMs: Long): ByteArray = concat(vField(28, playerTimeMs), vField(40, 1))
+    private fun clientAbrState(playerTimeMs: Long, audioTrackId: String): ByteArray = concat(
+        vField(28, playerTimeMs),
+        vField(40, 1),
+        if (audioTrackId.isNotBlank()) sField(69, audioTrackId) else ByteArray(0),
+    )
 
     /**
      * VideoPlaybackAbrRequest { clientAbrState=1, selectedFormatId=2, bufferedRange=3(repeated),
@@ -87,7 +97,7 @@ internal object SabrMessages {
         sabrContexts: List<ByteArray>,
         selected: Boolean,
     ): ByteArray = concat(
-        bField(1, clientAbrState(playerTimeMs)),
+        bField(1, clientAbrState(playerTimeMs, format.audioTrackId)),
         if (selected) bField(2, formatId(format)) else ByteArray(0),
         if (range != null && range.bufferedEndSeg > 0) bField(3, bufferedRange(range)) else ByteArray(0),
         if (playerTimeMs > 0) vField(4, playerTimeMs) else ByteArray(0),
@@ -127,9 +137,11 @@ internal object SabrMessages {
     ): ByteArray {
         val states = listOfNotNull(video, audio)
         return concat(
-            bField(1, concat(vField(28, playerTimeMs), vField(40, 0))), // enabledTrackTypesBitfield=0 => video+audio
-            // Field 2 is initialization_format_ids, not selected_format_ids. Audio/video selection
-            // is always carried by fields 16/17 below; initialization ids only exist after metadata.
+            bField(1, concat(
+                vField(28, playerTimeMs),
+                vField(40, 0), // enabledTrackTypesBitfield=0 => video+audio
+                if (audioFormat.audioTrackId.isNotBlank()) sField(69, audioFormat.audioTrackId) else ByteArray(0),
+            )),
             if (selected) concat(states.map { bField(2, formatId(it.format)) }) else ByteArray(0),
             concat(states.filter { it.bufferedEndSeg > 0 }.map { bField(3, bufferedRange(it)) }),
             if (playerTimeMs > 0) vField(4, playerTimeMs) else ByteArray(0),

@@ -19,6 +19,10 @@ object SabrMediaFactory {
     fun create(info: SabrPlaybackInfo, video: SabrFormat, audio: SabrFormat, upstreamFactory: DataSource.Factory): MediaSource {
         require(!video.audio && audio.audio)
         require(video.contentLength > 0 && audio.contentLength > 0) { "SABR formats have no content length" }
+        AppLog.event(
+            "SABR create video=${info.videoId} videoItag=${video.itag} videoXtags=${video.xtags} " +
+                "audioItag=${audio.itag} audioTrackId=${audio.audioTrackId} audioXtags=${audio.xtags}"
+        )
         val id = "${info.videoId}-${video.itag}-${audio.itag}"
         val config = SabrVideoConfig(
             info.serverAbrStreamingUrl, decode(info.videoPlaybackUstreamerConfig),
@@ -53,7 +57,7 @@ object SabrMediaFactory {
             .createMediaSource(MediaItem.fromUri(Uri.parse("sabrmodern://$id/audio")))
     }
 
-    private fun SabrFormat.wireFormat() = SabrMessages.Format(itag, lastModified, contentLength, xtags)
+    private fun SabrFormat.wireFormat() = SabrMessages.Format(itag, lastModified, contentLength, xtags, audioTrackId)
     private fun clientInfo(info: SabrPlaybackInfo) = SabrMessages.ClientInfo(
         info.clientId, info.clientVersion, info.osName, info.osVersion, info.deviceMake, info.deviceModel,
     )

@@ -19,6 +19,7 @@ internal object SabrUmp {
     const val RELOAD_PLAYER_RESPONSE = 46
     const val SABR_CONTEXT_UPDATE = 57
     const val STREAM_PROTECTION_STATUS = 58
+    const val SNACKBAR_MESSAGE = 67
 
     fun reloadToken(payload: ByteArray): String? = runCatching {
         val params = SabrProto.read(payload).bytesAt(1) ?: return@runCatching null

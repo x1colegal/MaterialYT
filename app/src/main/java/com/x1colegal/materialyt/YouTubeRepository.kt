@@ -49,7 +49,7 @@ data class SabrPlaybackInfo(
     val formats: List<SabrFormat>
 )
 data class ChannelInfo(val name: String, val thumbnail: String)
-data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L)
+data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "")
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "")
 data class CommunityComment(val id: String, val author: String, val text: String, val published: String, val likes: String)
@@ -748,6 +748,10 @@ object YouTubeRepository {
         }
         val cpn = response.optString("_materialytCpn")
             .takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no playback nonce")
+        val accountTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, false) }
+            .onFailure { AppLog.failure("SABR authenticated tracking video=$videoId", it) }
+            .getOrNull()
+        cachePlaybackTracking(videoId, accountTracking ?: response.optJSONObject("playbackTracking"), cpn)
         val webClient = response.optString("_materialytClientName")
         val solvedUrl = if (direct) unresolvedUrl else solveNChallenge(
             videoId, unresolvedUrl,
@@ -802,6 +806,7 @@ object YouTubeRepository {
             ?.toLongOrNull()?.times(1_000L) ?: 0L
         response.optJSONObject("videoDetails")?.let { details ->
             val channelId = details.optString("channelId")
+            val microformat = response.optJSONObject("microformat")?.optJSONObject("playerMicroformatRenderer")
             synchronized(videoDetailsCache) {
                 videoDetailsCache[videoId] = VideoDetails(
                     title = details.optString("title").ifBlank { "Video" },
@@ -810,6 +815,9 @@ object YouTubeRepository {
                         ?.let { "https://www.youtube.com/channel/$it" }.orEmpty(),
                     viewCount = details.optString("viewCount").toLongOrNull() ?: 0L,
                     durationSeconds = durationMs / 1_000L,
+                    publishedDate = microformat?.optString("publishDate").orEmpty()
+                        .ifBlank { microformat?.optString("uploadDate").orEmpty() },
+                    description = details.optString("shortDescription"),
                 )
             }
         }
@@ -942,23 +950,40 @@ object YouTubeRepository {
 
     fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false) {
         if (!signedIn() || toMs <= fromMs) return
-        val tracking = synchronized(playbackTracking) { playbackTracking[videoId] } ?: return
+        val tracking = synchronized(playbackTracking) { playbackTracking[videoId] }
+        if (tracking == null) {
+            AppLog.event("playback tracking skipped video=$videoId reason=no_session")
+            return
+        }
         val first = synchronized(tracking) { if (!tracking.started) { tracking.started = true; true } else false }
-        val clientName = "WEB"
-        fun statsUrl(base: String, playback: Boolean): okhttp3.HttpUrl? = base.toHttpUrlOrNull()?.newBuilder()
-            ?.setQueryParameter("ver", "2")
-            ?.setQueryParameter("c", clientName)
-            ?.setQueryParameter("cpn", tracking.cpn)
-            ?.setQueryParameter("cmt", "%.3f".format(java.util.Locale.US, toMs / 1000.0))
-            ?.setQueryParameter("rt", "%.3f".format(java.util.Locale.US, (System.currentTimeMillis() - tracking.startedAtMs) / 1000.0))
-            ?.setQueryParameter("final", "0")
-            ?.apply {
-                if (!playback) {
-                    setQueryParameter("st", "%.3f".format(java.util.Locale.US, fromMs / 1000.0))
-                    setQueryParameter("et", "%.3f".format(java.util.Locale.US, toMs / 1000.0))
-                    setQueryParameter("state", if (paused) "paused" else "playing")
-                }
-            }?.build()
+        val source = tracking.watchtimeUrl.toHttpUrlOrNull() ?: return
+        val required = listOf("ei", "vm", "of")
+        if (required.any { source.queryParameter(it).isNullOrBlank() }) {
+            AppLog.event("playback tracking skipped video=$videoId reason=missing_${required.filter { source.queryParameter(it).isNullOrBlank() }.joinToString("_")}")
+            return
+        }
+        val fromSec = "%.3f".format(java.util.Locale.US, fromMs / 1000.0)
+        val toSec = "%.3f".format(java.util.Locale.US, toMs / 1000.0)
+        fun statsUrl(playback: Boolean): okhttp3.HttpUrl {
+            val path = if (playback) "playback" else "watchtime"
+            return "https://www.youtube.com/api/stats/$path".toHttpUrlOrNull()!!.newBuilder()
+                .addQueryParameter("ns", "yt")
+                .addQueryParameter("ver", "2")
+                .addQueryParameter("docid", source.queryParameter("docid") ?: videoId)
+                .apply { source.queryParameter("len")?.let { addQueryParameter("len", it) } }
+                .addQueryParameter("cpn", tracking.cpn)
+                .addQueryParameter("ei", source.queryParameter("ei")!!)
+                .addQueryParameter("vm", source.queryParameter("vm")!!)
+                .addQueryParameter("of", source.queryParameter("of")!!)
+                .apply {
+                    if (playback) addQueryParameter("cmt", fromSec)
+                    else {
+                        addQueryParameter("st", fromSec)
+                        addQueryParameter("et", toSec)
+                        addQueryParameter("cmt", toSec)
+                    }
+                }.build()
+        }
         fun send(url: okhttp3.HttpUrl) {
             val origin = "https://www.youtube.com"
             val request = Request.Builder().url(url).apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }.build()
@@ -966,8 +991,8 @@ object YouTubeRepository {
                 AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (paused) "paused" else "playing"} HTTP ${response.code}")
             }
         }
-        if (first) statsUrl(tracking.playbackUrl, true)?.let(::send)
-        statsUrl(tracking.watchtimeUrl, false)?.let(::send)
+        if (first) send(statsUrl(true))
+        send(statsUrl(false))
     }
 
     fun preparePlaybackTracking(videoId: String) {
@@ -975,14 +1000,23 @@ object YouTubeRepository {
         if (synchronized(playbackTracking) { playbackTracking.containsKey(videoId) }) return
         val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
         val tracking = authenticatedPlayerTracking(videoId, cpn, false) ?: return
-        val playback = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl").orEmpty()
-        val watchtime = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl").orEmpty()
-        if (playback.isNotBlank() && watchtime.isNotBlank()) {
-            synchronized(playbackTracking) {
-                playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, false)
-            }
+        if (cachePlaybackTracking(videoId, tracking, cpn)) {
             AppLog.event("tracking prepared for standard YouTube history video=$videoId")
         }
+    }
+
+    private fun cachePlaybackTracking(videoId: String, tracking: JSONObject?, cpn: String): Boolean {
+        val playback = tracking?.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl").orEmpty()
+        val watchtime = tracking?.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl").orEmpty()
+        if (playback.isBlank() || watchtime.isBlank()) {
+            AppLog.event("playback tracking unavailable video=$videoId")
+            return false
+        }
+        synchronized(playbackTracking) {
+            playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, false)
+        }
+        AppLog.event("playback tracking cached video=$videoId source=player_response")
+        return true
     }
 
     private fun visionOsPlayer(videoId: String, reloadToken: String? = null, cpn: String? = null): JSONObject {
@@ -1212,12 +1246,33 @@ object YouTubeRepository {
 
     private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
         val origin = "https://www.youtube.com"
-        val html = runCatching { get("$origin/watch?v=$videoId") }.getOrNull() ?: return null
-        val match = Regex("ytInitialPlayerResponse\\s*=\\s*(\\{.+?\\});").find(html)?.groupValues?.get(1) ?: return null
-        val response = runCatching { JSONObject(match) }.getOrNull() ?: return null
+        val bootstrap = bootstrap(origin, "WEB")
+        val response = post("$origin/youtubei/v1/player?key=${bootstrap.key}&prettyPrint=false",
+            JSONObject().put("context", context("WEB", bootstrap.version))
+                .put("videoId", videoId).put("cpn", cpn)
+                .put("contentCheckOk", true).put("racyCheckOk", true), origin)
         val tracking = response.optJSONObject("playbackTracking")
-        AppLog.event("tracking_fetch WEB_HTML video=$videoId tracking_found=${tracking != null}")
+        AppLog.event("tracking_fetch WEB_PLAYER video=$videoId status=${response.optJSONObject("playabilityStatus")?.optString("status")} tracking_found=${tracking != null}")
         return tracking
+    }
+
+    fun refreshVideoDetails(videoId: String): VideoDetails {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val response = post("$origin/youtubei/v1/next?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId), origin)
+        val current = videoDetails(videoId) ?: VideoDetails("Video", "")
+        val primary = findObject(response, "videoPrimaryInfoRenderer")?.optJSONObject("videoPrimaryInfoRenderer")
+        val secondary = findObject(response, "videoSecondaryInfoRenderer")?.optJSONObject("videoSecondaryInfoRenderer")
+        val likeText = findString(primary, "likeCount").orEmpty()
+            .ifBlank { findString(primary, "likeCountText").orEmpty() }
+        val published = text(primary?.opt("dateText")).orEmpty().ifBlank { current.publishedDate }
+        val description = secondary?.optJSONObject("attributedDescription")?.optString("content").orEmpty()
+            .ifBlank { text(secondary?.opt("description")).orEmpty() }
+            .ifBlank { current.description }
+        return current.copy(likeText = likeText, publishedDate = published, description = description).also {
+            synchronized(videoDetailsCache) { videoDetailsCache[videoId] = it }
+        }
     }
 
 

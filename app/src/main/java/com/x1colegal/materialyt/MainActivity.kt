@@ -1144,7 +1144,6 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
                 Spacer(Modifier.height(3.dp))
                 Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            Icon(Icons.Default.MoreVert, "More options", tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -1898,6 +1897,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelInfo(videoId) } }.onSuccess { channelInfo = it }
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(videoId) } }.onSuccess { videoMetadata = it }
     }
     LaunchedEffect(url) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
@@ -2140,17 +2140,18 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         text = {
             val views = info?.viewCount ?: videoMetadata?.viewCount ?: -1L
             val likes = info?.likeCount ?: -1L
+            val likesText = if (likes >= 0) formatCount(likes) else videoMetadata?.likeText?.takeIf { it.isNotBlank() } ?: "—"
             val publishedDate = info?.uploadDate?.localDateTime?.toLocalDate()?.let { date ->
                 java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.LONG)
                     .withLocale(java.util.Locale.getDefault()).format(date)
-            } ?: info?.textualUploadDate?.takeIf { it.isNotBlank() }
-            val rawDescription = info?.description?.content.orEmpty()
+            } ?: info?.textualUploadDate?.takeIf { it.isNotBlank() } ?: videoMetadata?.publishedDate?.takeIf { it.isNotBlank() }
+            val rawDescription = info?.description?.content.orEmpty().ifBlank { videoMetadata?.description.orEmpty() }
             val description = if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(rawDescription, Html.FROM_HTML_MODE_LEGACY).toString()
                 else @Suppress("DEPRECATION") Html.fromHtml(rawDescription).toString()
             Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                     Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    Column { Text(if (likes >= 0) formatCount(likes) else "—", style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    Column { Text(likesText, style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
                 Spacer(Modifier.height(16.dp))
                 Text("Published", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

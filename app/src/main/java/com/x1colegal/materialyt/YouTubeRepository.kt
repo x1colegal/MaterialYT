@@ -1264,8 +1264,7 @@ object YouTubeRepository {
         val current = videoDetails(videoId) ?: VideoDetails("Video", "")
         val primary = findObject(response, "videoPrimaryInfoRenderer")?.optJSONObject("videoPrimaryInfoRenderer")
         val secondary = findObject(response, "videoSecondaryInfoRenderer")?.optJSONObject("videoSecondaryInfoRenderer")
-        val likeText = findString(primary, "likeCount").orEmpty()
-            .ifBlank { findString(primary, "likeCountText").orEmpty() }
+        val likeText = findLikeText(primary).orEmpty()
         val published = text(primary?.opt("dateText")).orEmpty().ifBlank { current.publishedDate }
         val description = secondary?.optJSONObject("attributedDescription")?.optString("content").orEmpty()
             .ifBlank { text(secondary?.opt("description")).orEmpty() }
@@ -1273,6 +1272,30 @@ object YouTubeRepository {
         return current.copy(likeText = likeText, publishedDate = published, description = description).also {
             synchronized(videoDetailsCache) { videoDetailsCache[videoId] = it }
         }
+    }
+
+    private fun findLikeText(value: Any?): String? = when (value) {
+        is JSONObject -> {
+            value.optJSONObject("factoidRenderer")?.let { factoid ->
+                val label = text(factoid.opt("label")).orEmpty()
+                if (label.contains("like", true)) {
+                    text(factoid.opt("value"))?.takeIf(String::isNotBlank)?.let { return it }
+                }
+            }
+            listOf("likeCount", "likeCountText", "likeCountNotliked", "likeCountNotLiked")
+                .asSequence().mapNotNull { key ->
+                    value.optString(key).takeIf(String::isNotBlank)
+                        ?: text(value.opt(key))?.takeIf(String::isNotBlank)
+                }.firstOrNull()
+                ?: value.optString("accessibilityText").takeIf { label ->
+                    label.contains("like", true) && label.any(Char::isDigit)
+                }?.let { label ->
+                    Regex("[0-9][0-9,.]*(?:[KMB])?", RegexOption.IGNORE_CASE).find(label)?.value
+                }
+                ?: value.keys().asSequence().mapNotNull { findLikeText(value.opt(it)) }.firstOrNull()
+        }
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findLikeText(value.opt(it)) }.firstOrNull()
+        else -> null
     }
 
 

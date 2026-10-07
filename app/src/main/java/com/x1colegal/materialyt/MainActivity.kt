@@ -140,7 +140,7 @@ enum class QualityChoice(val label: String, val height: Int) {
     AUTO("Auto", 0), UHD2160("2160p", 2160), QHD1440("1440p", 1440), FHD1080("1080p", 1080), HD720("720p", 720), SD480("480p", 480), SD360("360p", 360)
 }
 
-private data class PlayerChoice(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val videoOnly: Boolean, val audioTrackName: String = "", val audioTrackId: String = "", val originalAudio: Boolean = false)
+private data class PlayerChoice(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val videoOnly: Boolean, val audioTrackName: String = "", val audioTrackId: String = "", val originalAudio: Boolean = false, val sabrFormat: SabrFormat? = null)
 
 private val videoHttpClient by lazy {
     OkHttpClient.Builder()
@@ -155,6 +155,11 @@ internal fun videoDataSourceFactory(streamUrl: String): DataSource.Factory = Chu
     OkHttpDataSource.Factory(videoHttpClient)
         .setDefaultRequestProperties(YouTubeRepository.mediaHeaders(streamUrl))
 )
+
+/** SABR uses protobuf POST requests; applying progressive-download Range chunking breaks them. */
+internal fun sabrDataSourceFactory(streamUrl: String): DataSource.Factory =
+    OkHttpDataSource.Factory(videoHttpClient)
+        .setDefaultRequestProperties(YouTubeRepository.mediaHeaders(streamUrl))
 
 private fun selectVideoStream(streams: List<PlayerChoice>, codec: CodecChoice, quality: QualityChoice): PlayerChoice? {
     val valid = streams.filter { it.url.startsWith("http") }
@@ -1407,6 +1412,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var selected by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
     var audio by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
     var audioTracks by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
+    var sabrPlayback by remember(item.id) { mutableStateOf<SabrPlaybackInfo?>(null) }
     var preferredAudioCodec by remember(item.id, audioCodec) { mutableStateOf(audioCodec) }
     var shortInfo by remember(item.id) { mutableStateOf<StreamInfo?>(null) }
     var speed by remember { mutableFloatStateOf(1f) }
@@ -1423,14 +1429,20 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var indicatorKey by remember { mutableIntStateOf(0) }
 
     fun play(stream: PlayerChoice) {
-        val video = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
-        val source = if (stream.videoOnly && audio != null) MergingMediaSource(true, video,
-            ProgressiveMediaSource.Factory(videoDataSourceFactory(audio!!.url)).createMediaSource(MediaItem.fromUri(audio!!.url))) else video
+        val sabr = sabrPlayback
+        val source = if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
+            SabrMediaFactory.create(sabr, stream.sabrFormat, audio!!.sabrFormat!!,
+                sabrDataSourceFactory(sabr.serverAbrStreamingUrl))
+        } else {
+            val video = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
+            if (stream.videoOnly && audio != null) MergingMediaSource(true, video,
+                ProgressiveMediaSource.Factory(videoDataSourceFactory(audio!!.url)).createMediaSource(MediaItem.fromUri(audio!!.url))) else video
+        }
         player.setMediaSource(source); player.prepare(); player.setPlaybackSpeed(speed); player.playWhenReady = active
         selected = stream
     }
     LaunchedEffect(item.id, codec, preferredAudioCodec, quality) {
-        streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; error = null
+        streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; sabrPlayback = null; error = null
         val infoResult = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(item.id) } }
             else Result.failure(IllegalStateException("NewPipe disabled by playback backend setting"))
         infoResult.onSuccess { 
@@ -1447,6 +1459,22 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             selectVideoStream(streams, codec, quality)?.let { stream -> play(stream); error = null }
             AppLog.event("shorts NewPipe primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
         }.onFailure { AppLog.failure("shorts NewPipe primary video=${item.id}", it) }
+        if (streams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(item.id) } }.onSuccess { playback ->
+                sabrPlayback = playback
+                audioTracks = playback.formats.filter { it.audio }.map {
+                    PlayerChoice(playback.serverAbrStreamingUrl, it.codec, 0, 0, it.bitrate,
+                        false, it.audioTrackName, it.audioTrackId, it.originalAudio, it)
+                }
+                audio = selectAudioStream(audioTracks, preferredAudioCodec)
+                streams = playback.formats.filter { !it.audio && it.height > 0 }.map {
+                    PlayerChoice(playback.serverAbrStreamingUrl, it.codec, it.height, it.fps,
+                        it.bitrate, true, sabrFormat = it)
+                }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
+                AppLog.event("shorts SABR primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
+            }.onFailure { AppLog.failure("shorts SABR primary video=${item.id}", it) }
+        }
         if (streams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
             val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(item.id) } }
             extracted.onSuccess { result ->
@@ -1674,6 +1702,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var audioStreams by remember { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var selectedAudio by remember { mutableStateOf<PlayerChoice?>(null) }
     var selectedStream by remember { mutableStateOf<PlayerChoice?>(null) }
+    var sabrPlayback by remember { mutableStateOf<SabrPlaybackInfo?>(null) }
     var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
     var playerPosition by remember { mutableLongStateOf(0L) }
     var playerBuffered by remember { mutableLongStateOf(0L) }
@@ -1701,14 +1730,20 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         next?.setOnClickListener { if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1) }
     }
     fun play(stream: PlayerChoice) {
-        val videoSource = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
         val audio = if (stream.videoOnly) selectedAudio ?: audioStreams.maxByOrNull { it.bitrate } else null
-        val source = if (audio != null) {
+        val sabr = sabrPlayback
+        val source = if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
+            SabrMediaFactory.create(sabr, stream.sabrFormat, audio.sabrFormat,
+                sabrDataSourceFactory(sabr.serverAbrStreamingUrl))
+        } else {
+            val videoSource = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
+            if (audio != null) {
             val audioSource = ProgressiveMediaSource.Factory(videoDataSourceFactory(audio.url)).createMediaSource(MediaItem.fromUri(audio.url))
             // YouTube's separate adaptive tracks may start on very different media
             // timestamps. Align their periods so ExoPlayer can render immediately.
             MergingMediaSource(true, videoSource, audioSource)
-        } else videoSource
+            } else videoSource
+        }
         val position = player.currentPosition.coerceAtLeast(0L)
         player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position); player.setPlaybackSpeed(speed); player.playWhenReady = true
         selectedStream = stream
@@ -1797,7 +1832,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         // v1.2.8 behavior: NewPipe is the primary source because it exposes the complete
         // adaptive format set (AVC, VP9 and AV1). The authenticated player path remains a
         // fallback only; accepting its combined WEB format first collapses the UI to 360p.
-        player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; error = null
+        player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; sabrPlayback = null; error = null
         val newPipeResult = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(videoId) } }
             else Result.failure(IllegalStateException("NewPipe disabled by playback backend setting"))
         newPipeResult.onSuccess { stream ->
@@ -1816,6 +1851,23 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             AppLog.event("player NewPipe primary video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
         }.onFailure { e ->
             AppLog.failure("player NewPipe primary video=$videoId", e)
+        }
+        if (availableStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(videoId) } }.onSuccess { extracted ->
+                sabrPlayback = extracted
+                audioStreams = extracted.formats.filter { it.audio }.map {
+                    PlayerChoice(extracted.serverAbrStreamingUrl, it.codec, 0, 0, it.bitrate,
+                        false, it.audioTrackName, it.audioTrackId, it.originalAudio, it)
+                }
+                selectedAudio = selectAudioStream(audioStreams, audioCodec)
+                YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = it }
+                availableStreams = extracted.formats.filter { !it.audio && it.height > 0 }.map {
+                    PlayerChoice(extracted.serverAbrStreamingUrl, it.codec, it.height, it.fps,
+                        it.bitrate, true, sabrFormat = it)
+                }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
+                AppLog.event("player SABR primary video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
+            }.onFailure { AppLog.failure("player SABR primary video=$videoId", it) }
         }
         if (availableStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
@@ -2108,10 +2160,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 ListItem(headlineContent = { Text(label) }, leadingContent = { RadioButton(selectedStream == stream, onClick = null) }, modifier = Modifier.clickable { play(stream) })
             }
             Spacer(Modifier.height(16.dp)); Text("Audio track", style = MaterialTheme.typography.titleMedium)
-            audioStreams.distinctBy { it.url }.forEach { audio ->
+            audioStreams.distinctBy { it.sabrFormat?.itag?.toString() ?: "${it.url}|${it.codec}|${it.bitrate}|${it.audioTrackId}" }.forEach { audio ->
                 val bitrate = if (audio.bitrate > 0) "${audio.bitrate / 1000} kbps" else "Unknown bitrate"
                 val trackLabel = audio.audioTrackName.ifBlank { "Audio track" }
-                ListItem(headlineContent = { Text(trackLabel) }, supportingContent = { Text("${audio.codec.uppercase()} • $bitrate") }, leadingContent = { RadioButton(selectedAudio?.url == audio.url, onClick = null) }, modifier = Modifier.clickable { selectedAudio = audio; selectedStream?.let(::play) })
+                ListItem(headlineContent = { Text(trackLabel) }, supportingContent = { Text("${audio.codec.uppercase()} • $bitrate") }, leadingContent = { RadioButton(selectedAudio == audio, onClick = null) }, modifier = Modifier.clickable { selectedAudio = audio; selectedStream?.let(::play) })
             }
         }
     })
@@ -2202,7 +2254,7 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
             playbackBackend = it
             PlaybackBackendPreferences.set(activity, it)
         } }
-        item { Text("Fallback is disabled by default. Force NewPipe never uses WEB+PoToken. NewPipe + WEB fallback permits WEB+PoToken only after the NewPipe clients fail. Force WEB bypasses NewPipe and may be limited to 360p for some videos.", style = MaterialTheme.typography.bodySmall) }
+        item { Text("SABR is the default and recommended backend. It uses native VISIONOS playback with adaptive audio and video. Force NewPipe is kept for compatibility, but YouTube may reject it with LOGIN_REQUIRED, bot verification, missing formats, or extractor breakage. NewPipe + SABR fallback tries NewPipe first and switches to SABR when extraction fails.", style = MaterialTheme.typography.bodySmall) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }
         item { Text("HTTP/1.0 compatibility disables connection reuse but uses an HTTP/1.1 request line because OkHttp intentionally cannot emit HTTP/1.0. The HTTP/2 mode advertises HTTP/2 with HTTP/1.1 fallback.", style = MaterialTheme.typography.bodySmall) }
     }

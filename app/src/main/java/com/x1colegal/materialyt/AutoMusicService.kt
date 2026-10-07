@@ -215,6 +215,17 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             if (attempt < 2) kotlinx.coroutines.delay((attempt + 1) * 1_000L)
         }
         if (audioStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(track.id) } }
+                .onFailure { AppLog.failure("music SABR primary video=${track.id}", it) }
+                .getOrNull()?.let { playback ->
+                    playback.formats.filter { it.audio }.map { format ->
+                        PlayableStream(playback.serverAbrStreamingUrl, format.codec, 0, 0,
+                            format.bitrate, true, false, format.originalAudio,
+                            format.audioTrackName, format.audioTrackId, playback, format)
+                    }
+                }.orEmpty()
+        }
+        if (audioStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
             audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
                 .getOrNull()?.filter { it.audio }.orEmpty()
         }
@@ -260,7 +271,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         audioCandidateIndex = next
         val stream = audioCandidates[next]
         AppLog.event("music trying stream candidate=${next + 1}/${audioCandidates.size} codec=${stream.codec} bitrate=${stream.bitrate} video=${track.id}")
-        val source = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
+        val source = if (stream.sabrPlayback != null && stream.sabrFormat != null) {
+            SabrMediaFactory.createAudio(stream.sabrPlayback, stream.sabrFormat,
+                sabrDataSourceFactory(stream.sabrPlayback.serverAbrStreamingUrl))
+        } else ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
             .createMediaSource(MediaItem.fromUri(stream.url))
         player.setMediaSource(source)
         player.prepare()

@@ -4,21 +4,21 @@ import android.content.Context
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 
 enum class PlaybackBackend(val label: String) {
+    WEB_ONLY("SABR (Recommended)"),
     NEWPIPE_ONLY("Force NewPipe"),
-    NEWPIPE_WITH_WEB_FALLBACK("NewPipe + WEB fallback"),
-    WEB_ONLY("Force WEB")
+    NEWPIPE_WITH_WEB_FALLBACK("NewPipe + SABR fallback")
 }
 
 object PlaybackBackendPreferences {
     @Volatile
-    var backend: PlaybackBackend = PlaybackBackend.NEWPIPE_ONLY
+    var backend: PlaybackBackend = PlaybackBackend.WEB_ONLY
         private set
 
     fun initialize(context: Context) {
         val saved = context.getSharedPreferences("settings", 0)
-            .getString("playback_backend", PlaybackBackend.NEWPIPE_ONLY.name)
+            .getString("playback_backend", PlaybackBackend.WEB_ONLY.name)
         backend = runCatching { PlaybackBackend.valueOf(saved!!) }
-            .getOrDefault(PlaybackBackend.NEWPIPE_ONLY)
+            .getOrDefault(PlaybackBackend.WEB_ONLY)
         YoutubeStreamExtractor.setWebPoTokenFallbackEnabled(
             backend == PlaybackBackend.NEWPIPE_WITH_WEB_FALLBACK
         )

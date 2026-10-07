@@ -16,8 +16,8 @@ android {
         applicationId = "com.x1colegal.materialyt"
         minSdk = 21
         targetSdk = 36
-        versionCode = 68
-        versionName = "1.4.44"
+        versionCode = 69
+        versionName = "1.4.45"
     }
     signingConfigs {
         getByName("debug") {
@@ -86,6 +86,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
     implementation(project(":newpipe-extractor"))
+    implementation(project(":sabr"))
     // NewPipeExtractor transitive dependencies
     implementation("com.github.TeamNewPipe:nanojson:e9d656ddb49a412a5a0a5d5ef20ca7ef09549996")
     implementation("org.jsoup:jsoup:1.18.3")
@@ -94,6 +95,7 @@ dependencies {
     
     implementation("com.google.android.exoplayer:exoplayer:2.19.1")
     implementation("com.google.android.exoplayer:extension-okhttp:2.19.1")
+    implementation("com.jakewharton.timber:timber:5.0.1")
     implementation("io.coil-kt:coil-compose:2.7.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

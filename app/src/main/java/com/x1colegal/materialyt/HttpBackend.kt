@@ -52,6 +52,8 @@ object HttpBackend : Downloader() {
             }.build()
     }
 
+    fun playbackClient(): OkHttpClient = client
+
     override fun execute(request: Request): Response {
         val url = request.url()
         val bytes = request.dataToSend()
@@ -62,9 +64,7 @@ object HttpBackend : Downloader() {
         if (isYouTube) {
             val origin = if (url.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
             val accountCookies = YouTubeRepository.cookies(origin)
-            val isPoTokenPlayerRequest = url.contains("youtubei/v1/player")
-                    && bytes?.toString(Charsets.UTF_8)?.contains("serviceIntegrityDimensions") == true
-            
+
             // Only inject cookies globally for googlevideo.com (ExoPlayer). 
             // YouTubeRepository handles its own cookies, and injecting into youtubei ruins NewPipe's anonymous requests.
             if (url.contains("googlevideo.com") && accountCookies.isNotBlank()) {
@@ -73,15 +73,6 @@ object HttpBackend : Downloader() {
                 builder.header("Cookie", mergedCookie)
             }
 
-            // NewPipe's WEB PoToken player request must use the same signed-in browser context
-            // as MaterialYT's working WEB player request. Keep the other NewPipe clients
-            // anonymous because mobile/VisionOS client identities reject browser credentials.
-            if (isPoTokenPlayerRequest) {
-                YouTubeRepository.authenticatedHeaders(origin).forEach { (name, value) ->
-                    builder.header(name, value)
-                }
-            }
-            
             if (url.contains("googlevideo.com")) {
                 YouTubeRepository.authorization(origin)?.let { builder.header("Authorization", it) }
                 builder.header("Origin", origin)

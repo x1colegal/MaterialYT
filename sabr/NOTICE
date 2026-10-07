@@ -1,0 +1,7 @@
+This module contains code adapted from SmartTube's ExoPlayer SABR module.
+SmartTube is Copyright (c) 2020-present yuliskov and is distributed under the MIT License.
+Portions derived from ExoPlayer are Copyright (C) 2017 The Android Open Source Project and are
+distributed under the Apache License 2.0.
+
+The SABR protocol definitions and implementation are also informed by LuanRT/googlevideo,
+distributed under the MIT License.

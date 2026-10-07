@@ -2,6 +2,24 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.45] - 2026-10-06
+
+### Fixed
+- Corrected SABR initialization and format identifiers to match YouTube's current UMP protocol, including selected audio, selected video, and format tags.
+- Kept VISIONOS SABR reload requests on the same native client and applied refreshed playback configuration returned by YouTube.
+- Prevented unknown-length SABR formats from producing invalid media timelines.
+- Added disk-backed SABR audio and video buffering for stable long-form playback.
+
+### Added
+- Added native VISIONOS SABR playback for regular videos, YouTube Music, and the retained Shorts player.
+- Preserved independent resolution, FPS, video codec, audio codec, language, and bitrate choices in SABR sessions.
+- Made **SABR (Recommended)** the default and first playback backend option.
+- Added decoded SABR error diagnostics for response type, action, and status.
+
+### Changed
+- Renamed user-facing WEB backend labels to SABR to describe the actual media transport.
+- Kept NewPipe as an explicit compatibility backend because it can receive `LOGIN_REQUIRED`, bot-verification responses, missing formats, or extractor breakage.
+
 ## [1.4.44] - 2026-10-05
 
 ### Fixed

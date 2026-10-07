@@ -16,7 +16,38 @@ import java.util.concurrent.TimeUnit
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "")
-data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "")
+data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null)
+data class SabrFormat(
+    val itag: Int,
+    val mimeType: String,
+    val codec: String,
+    val height: Int,
+    val fps: Int,
+    val bitrate: Int,
+    val contentLength: Long,
+    val lastModified: Long,
+    val xtags: String,
+    val audio: Boolean,
+    val originalAudio: Boolean = false,
+    val audioTrackName: String = "",
+    val audioTrackId: String = ""
+)
+data class SabrPlaybackInfo(
+    val videoId: String,
+    val serverAbrStreamingUrl: String,
+    val videoPlaybackUstreamerConfig: String,
+    val playerPoToken: String,
+    val streamingPoToken: String,
+    val clientVersion: String,
+    val userAgent: String,
+    val clientId: Int,
+    val osName: String,
+    val osVersion: String,
+    val deviceMake: String? = null,
+    val deviceModel: String? = null,
+    val durationMs: Long,
+    val formats: List<SabrFormat>
+)
 data class ChannelInfo(val name: String, val thumbnail: String)
 data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
@@ -25,10 +56,13 @@ data class CommunityComment(val id: String, val author: String, val text: String
 
 object YouTubeRepository {
     const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
+    const val WEB_PLAYER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    const val VISIONOS_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val clientVersions = mutableMapOf<String, String>()
     private val visitorData = mutableMapOf<String, String>()
+    private val standaloneWebVisitors = mutableMapOf<String, Pair<Long, String>>()
     private val bootstrapCache = mutableMapOf<String, Pair<Long, Bootstrap>>()
     private val playerJavaScriptCache = mutableMapOf<String, String>()
     private val nChallengeCache = mutableMapOf<String, String>()
@@ -498,6 +532,7 @@ object YouTubeRepository {
     }
 
     fun playerStreams(videoId: String, music: Boolean = false): List<PlayableStream> {
+        val allowNewPipeFallback = PlaybackBackendPreferences.backend != PlaybackBackend.WEB_ONLY
         runCatching { bootstrap("https://www.youtube.com/watch?v=$videoId", "WEB") }
             .onFailure { AppLog.failure("player account bootstrap video=$videoId", it) }
         var response = runCatching { webPoPlayer(videoId) }
@@ -580,7 +615,7 @@ object YouTubeRepository {
         }
 
         if (finalStatus != "OK") {
-            val npStreams = runCatching { newPipeStreams(videoId) }.getOrNull()
+            val npStreams = if (allowNewPipeFallback) runCatching { newPipeStreams(videoId) }.getOrNull() else null
             if (!npStreams.isNullOrEmpty()) {
                 AppLog.event("player fallback to newPipeStreams video=$videoId streams=${npStreams.size}")
                 return npStreams
@@ -606,7 +641,7 @@ object YouTubeRepository {
         }
         val data = response.optJSONObject("streamingData")
         if (data == null) {
-            val npStreams = runCatching { newPipeStreams(videoId) }.getOrNull()
+            val npStreams = if (allowNewPipeFallback) runCatching { newPipeStreams(videoId) }.getOrNull() else null
             if (!npStreams.isNullOrEmpty()) {
                 AppLog.event("player fallback to newPipeStreams (missing streamingData) video=$videoId streams=${npStreams.size}")
                 return npStreams
@@ -662,7 +697,7 @@ object YouTubeRepository {
         }
         AppLog.event("player streams=${streams.size} formats=${formats.size} video=$videoId")
         if (streams.isEmpty()) {
-            val npStreams = runCatching { newPipeStreams(videoId) }.getOrNull()
+            val npStreams = if (allowNewPipeFallback) runCatching { newPipeStreams(videoId) }.getOrNull() else null
             if (!npStreams.isNullOrEmpty()) {
                 AppLog.event("player fallback to newPipeStreams (empty streams) video=$videoId streams=${npStreams.size}")
                 return npStreams
@@ -670,6 +705,125 @@ object YouTubeRepository {
             error("YouTube returned only protected stream URLs")
         }
         return streams
+    }
+
+    /** Fetches a native WEB SABR session. Direct URLs are intentionally not required here. */
+    fun sabrPlaybackInfo(videoId: String): SabrPlaybackInfo {
+        val visionResponse = visionOsPlayer(videoId)
+        val visionOk = visionResponse.optJSONObject("playabilityStatus")?.optString("status") == "OK"
+        val webResponse = if (visionOk) JSONObject() else webPoPlayer(videoId, remix = false)
+        val webOk = webResponse.optJSONObject("playabilityStatus")?.optString("status") == "OK"
+        val remixResponse = if (visionOk || webOk) JSONObject() else webPoPlayer(videoId, remix = true)
+        val remixOk = remixResponse.optJSONObject("playabilityStatus")?.optString("status") == "OK"
+        val direct = visionOk
+        val response = when {
+            visionOk -> visionResponse.also {
+                // VISIONOS is a native client. WEB PoTokens are neither required nor valid in
+                // its SABR StreamerContext and can make the post-reload config malformed.
+                it.put("_materialytPlayerPot", "")
+                    .put("_materialytStreamingPot", "")
+                    .put("_materialytClientVersion", "1.02")
+                AppLog.event("SABR player selected VISIONOS video=$videoId")
+            }
+            webOk -> webResponse
+            remixOk -> remixResponse
+            else -> {
+                val visionStatus = visionResponse.optJSONObject("playabilityStatus")
+                val reason = visionStatus?.optString("reason").orEmpty()
+                val status = visionStatus?.optString("status").orEmpty()
+                error(reason.ifBlank { "YouTube VISIONOS SABR player returned $status" })
+            }
+        }
+        val streaming = response.optJSONObject("streamingData")
+            ?: error("YouTube SABR player returned no streamingData")
+        val unresolvedUrl = streaming.optString("serverAbrStreamingUrl")
+            .takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no streaming URL")
+        val ustreamerConfig = findString(response, "videoPlaybackUstreamerConfig")
+            ?.takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no streaming configuration")
+        val poToken = response.optString("_materialytStreamingPot").also {
+            if (!direct && it.isBlank()) error("BotGuard returned no SABR streaming PoToken")
+        }
+        val playerPoToken = response.optString("_materialytPlayerPot").also {
+            if (!direct && it.isBlank()) error("BotGuard returned no SABR player PoToken")
+        }
+        val cpn = response.optString("_materialytCpn")
+            .takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no playback nonce")
+        val webClient = response.optString("_materialytClientName")
+        val solvedUrl = if (direct) unresolvedUrl else solveNChallenge(
+            videoId, unresolvedUrl,
+            if (webClient == "WEB") playerJavaScript(videoId) else webRemixPlayerJavaScript(videoId),
+            false,
+        )
+        // SABR's media endpoint validates the playback session independently from /player.
+        // Match the browser request by carrying the same CPN and low-latency response flag.
+        val serverUrl = solvedUrl.toHttpUrlOrNull()?.newBuilder()
+            ?.setQueryParameter("alr", "yes")
+            ?.setQueryParameter("cpn", cpn)
+            ?.apply { if (!direct) setQueryParameter("pot", poToken) }
+            ?.build()?.toString() ?: solvedUrl
+        val formats = mutableListOf<SabrFormat>()
+        streaming.optJSONArray("adaptiveFormats")?.let { array ->
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val itag = item.optInt("itag")
+                if (itag <= 0) continue
+                val mime = item.optString("mimeType")
+                val codec = Regex("codecs=\"([^\"]+)").find(mime)?.groupValues?.get(1).orEmpty()
+                val audio = mime.startsWith("audio/")
+                val audioTrack = item.optJSONObject("audioTrack")
+                val trackName = audioTrack?.optString("displayName").orEmpty()
+                    .ifBlank { audioTrack?.optString("id").orEmpty() }
+                val contentLength = item.optString("contentLength").toLongOrNull() ?: 0L
+                // The positional SABR reassembler needs a finite target length. Do not expose
+                // live/unknown-length entries as selectable VOD qualities and crash at playback.
+                if (contentLength <= 0L) continue
+                formats += SabrFormat(
+                    itag = itag,
+                    mimeType = mime.substringBefore(';'),
+                    codec = codec,
+                    height = item.optInt("height"),
+                    fps = item.optInt("fps"),
+                    bitrate = item.optInt("bitrate"),
+                    contentLength = contentLength,
+                    lastModified = item.optString("lastModified").toLongOrNull() ?: 0L,
+                    xtags = item.optString("xtags"),
+                    audio = audio,
+                    originalAudio = audioTrack?.optBoolean("audioIsDefault", false) == true
+                        || trackName.contains("original", true),
+                    audioTrackName = trackName,
+                    audioTrackId = audioTrack?.optString("id").orEmpty()
+                )
+            }
+        }
+        if (formats.none { it.audio } || formats.none { !it.audio }) {
+            error("YouTube SABR response did not expose separate audio and video formats")
+        }
+        val durationMs = response.optJSONObject("videoDetails")?.optString("lengthSeconds")
+            ?.toLongOrNull()?.times(1_000L) ?: 0L
+        response.optJSONObject("videoDetails")?.let { details ->
+            val channelId = details.optString("channelId")
+            synchronized(videoDetailsCache) {
+                videoDetailsCache[videoId] = VideoDetails(
+                    title = details.optString("title").ifBlank { "Video" },
+                    author = details.optString("author"),
+                    authorUrl = channelId.takeIf(String::isNotBlank)
+                        ?.let { "https://www.youtube.com/channel/$it" }.orEmpty(),
+                    viewCount = details.optString("viewCount").toLongOrNull() ?: 0L,
+                    durationSeconds = durationMs / 1_000L,
+                )
+            }
+        }
+        AppLog.event("SABR session ready video=$videoId formats=${formats.size}")
+        return SabrPlaybackInfo(videoId, serverUrl, ustreamerConfig, playerPoToken, poToken,
+            response.optString("_materialytClientVersion")
+                .ifBlank { if (direct) "1.02" else bootstrap("https://music.youtube.com", "WEB_REMIX").version },
+            if (direct) VISIONOS_UA else WEB_PLAYER_UA,
+            if (direct) 101 else if (webClient == "WEB") 1 else 67,
+            if (direct) "visionOS" else "Windows",
+            if (direct) "26.5.23O471" else "10.0",
+            if (direct) "Apple" else null,
+            if (direct) "RealityDevice17,1" else null,
+            durationMs, formats)
     }
 
     fun newPipeStreamInfo(videoId: String): StreamInfo {
@@ -680,8 +834,15 @@ object YouTubeRepository {
             if (!isLoginRequired(first)) throw first
             AppLog.event("NewPipe LOGIN_REQUIRED; refreshing integrated PoToken video=$videoId")
             NewPipePoTokenProvider.reset()
-            StreamInfo.getInfo(url).also {
-                AppLog.event("NewPipe retry after integrated PoToken refresh succeeded video=$videoId")
+            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
+                .setWebPoTokenFallbackEnabled(true)
+            try {
+                StreamInfo.getInfo(url).also {
+                    AppLog.event("NewPipe retry after integrated PoToken refresh succeeded video=$videoId")
+                }
+            } finally {
+                org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
+                    .setWebPoTokenFallbackEnabled(PlaybackBackendPreferences.useWebWhenNewPipeFails())
             }
         }
     }
@@ -692,13 +853,24 @@ object YouTubeRepository {
     }
 
     private fun playerJavaScript(videoId: String): String {
-        val watchHtml = get("https://www.youtube.com/watch?v=$videoId")
+        // The cipher must come from the same desktop WEB identity that issued the SABR URL.
+        val watchHtml = get("https://www.youtube.com/watch?v=$videoId", WEB_PLAYER_UA)
         val encodedPlayerUrl = Regex("\\\"(?:jsUrl|PLAYER_JS_URL)\\\":\\\"([^\\\"]+)").find(watchHtml)?.groupValues?.get(1)
             ?: error("YouTube did not expose its player JavaScript URL")
         val playerPath = JSONObject("{\"value\":\"$encodedPlayerUrl\"}").getString("value")
         val playerUrl = if (playerPath.startsWith("http")) playerPath else "https://www.youtube.com$playerPath"
         return synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] }
-            ?: get(playerUrl).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
+            ?: get(playerUrl, WEB_PLAYER_UA).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
+    }
+
+    private fun webRemixPlayerJavaScript(videoId: String): String {
+        val watchHtml = get("https://music.youtube.com/watch?v=$videoId", WEB_PLAYER_UA)
+        val encodedPlayerUrl = Regex("\\\"(?:jsUrl|PLAYER_JS_URL)\\\":\\\"([^\\\"]+)").find(watchHtml)?.groupValues?.get(1)
+            ?: error("YouTube Music did not expose its player JavaScript URL")
+        val playerPath = JSONObject("{\"value\":\"$encodedPlayerUrl\"}").getString("value")
+        val playerUrl = if (playerPath.startsWith("http")) playerPath else "https://music.youtube.com$playerPath"
+        return synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] }
+            ?: get(playerUrl, WEB_PLAYER_UA).also { synchronized(playerJavaScriptCache) { playerJavaScriptCache[playerUrl] = it } }
     }
 
     private fun tvPlayerJavaScript(): String {
@@ -758,16 +930,6 @@ object YouTubeRepository {
         synchronized(nChallengeCache) { nChallengeCache[cacheKey] }?.let { solved ->
             return parsed.newBuilder().setQueryParameter("n", solved).build().toString()
         }
-        val newPipeUrl = if (clientSpecific) null else runCatching {
-            YoutubeJavaScriptPlayerManager.getUrlWithThrottlingParameterDeobfuscated(videoId, streamingUrl)
-        }.onFailure { AppLog.failure("NewPipe n parameter video=$videoId", it) }.getOrNull()
-        if (!newPipeUrl.isNullOrBlank()) {
-            val solved = newPipeUrl.toHttpUrlOrNull()?.queryParameter("n")
-            if (!solved.isNullOrBlank() && solved != challenge) {
-                synchronized(nChallengeCache) { nChallengeCache[cacheKey] = solved }
-                return newPipeUrl
-            }
-        }
         val js = playerJs ?: playerJavaScript(videoId)
         val solved = EjsChallengeSolver.solveN(js, challenge)
         check(solved.isNotBlank() && solved != challenge) { "EJS returned an unchanged n challenge" }
@@ -823,8 +985,11 @@ object YouTubeRepository {
         }
     }
 
-    private fun visionOsPlayer(videoId: String): JSONObject {
-        return mobilePlayer(videoId, "VISIONOS", "1.02", "101", "RealityDevice14,1", "visionOS", "25.6.0.23O471")
+    private fun visionOsPlayer(videoId: String, reloadToken: String? = null, cpn: String? = null): JSONObject {
+        return mobilePlayer(
+            videoId, "VISIONOS", "1.02", "101", "RealityDevice17,1", "visionOS", "26.5.23O471",
+            reloadToken, cpn,
+        )
     }
 
     private fun mwebPlayer(videoId: String): JSONObject {
@@ -869,29 +1034,168 @@ object YouTubeRepository {
         }
     }
 
-    private fun webPoPlayer(videoId: String): JSONObject {
-        val token = NewPipePoTokenProvider.getWebClientPoToken(videoId)
-            ?: error("BotGuard did not produce a PoToken")
-        val origin = "https://www.youtube.com"
-        val bootstrap = bootstrap(origin, "WEB")
-        val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
-        val body = JSONObject().put("context", context("WEB", bootstrap.version).also {
-            it.getJSONObject("client").put("visitorData", token.visitorData)
-        }).put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true)
-            .put("cpn", cpn)
+    private fun webPoPlayer(videoId: String, remix: Boolean = true, reloadToken: String? = null, cpnOverride: String? = null): JSONObject {
+        val clientName = if (remix) "WEB_REMIX" else "WEB"
+        val clientId = if (remix) "67" else "1"
+        val origin = if (remix) "https://music.youtube.com" else "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, clientName)
+        val token = WebPoTokenProvider.get(videoId, standaloneWebVisitorData(remix), origin, WEB_PLAYER_UA)
+        val cpn = cpnOverride?.takeIf(String::isNotBlank)
+            ?: UUID.randomUUID().toString().replace("-", "").take(16)
+        val playerJs = if (remix) webRemixPlayerJavaScript(videoId) else playerJavaScript(videoId)
+        val signatureTimestamp = Regex("signatureTimestamp['\":\\s]+(\\d{4,6})")
+            .find(playerJs)?.groupValues?.get(1)?.toIntOrNull()
+            ?: error("YouTube Music player did not expose signatureTimestamp")
+        val body = JSONObject()
+            .put("context", JSONObject()
+                .put("client", JSONObject()
+                    .put("clientName", clientName)
+                    .put("clientVersion", bootstrap.version)
+                    .put("clientScreen", "WATCH")
+                    .put("platform", "DESKTOP")
+                    .put("hl", "en")
+                    .put("gl", "US")
+                    .put("utcOffsetMinutes", 0)
+                    .put("visitorData", token.visitorData))
+                .put("request", JSONObject()
+                    .put("internalExperimentFlags", JSONArray())
+                    .put("useSsl", true))
+                .put("user", JSONObject().put("lockedSafetyMode", false)))
+            .put("videoId", videoId)
+            .apply { if (reloadToken == null) put("cpn", cpn) }
+            .put("playbackContext", JSONObject()
+                .apply { if (reloadToken != null) put("adPlaybackContext", JSONObject().put("pyv", true)) }
+                .put("contentPlaybackContext", JSONObject().put("signatureTimestamp", signatureTimestamp))
+                .apply {
+                    reloadToken?.let { token ->
+                        put("reloadPlaybackContext", JSONObject().put("reloadPlaybackParams", JSONObject().put("token", token)))
+                    }
+                })
+            .put("contentCheckOk", true)
+            .put("racyCheckOk", true)
+            // A reload is still a WEB /player request and must carry the player-bound
+            // integrity token. Omitting it makes restricted videos return the generic
+            // "This content isn't available" playability response.
             .put("serviceIntegrityDimensions", JSONObject().put("poToken", token.playerRequestPoToken))
-        val request = Request.Builder().url("$origin/youtubei/v1/player?key=${bootstrap.key}&prettyPrint=false")
-            .header("User-Agent", UA).header("Content-Type", "application/json")
-            .header("X-Youtube-Client-Name", "1").header("X-Youtube-Client-Version", bootstrap.version)
+        val request = Request.Builder()
+            .url("$origin/youtubei/v1/player?prettyPrint=false&key=${bootstrap.key}")
+            .header("User-Agent", WEB_PLAYER_UA)
+            .header("Content-Type", "application/json")
+            .header("X-Youtube-Client-Name", clientId)
+            .header("X-Youtube-Client-Version", bootstrap.version)
             .header("X-Goog-Visitor-Id", token.visitorData)
-            .apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }
+            .apply {
+                val accountCookies = cookies(origin)
+                if (accountCookies.isNotBlank()) header("Cookie", accountCookies)
+                authorization(origin)?.let { header("Authorization", it) }
+                header("Origin", origin)
+                header("X-Origin", origin)
+                header("X-Goog-AuthUser", "0")
+                header("X-Youtube-Bootstrap-Logged-In", accountCookies.isNotBlank().toString())
+            }
             .post(body.toString().toRequestBody(jsonType)).build()
         return client.newCall(request).execute().use {
-            val raw = it.body.string()
-            check(it.isSuccessful) { "WEB PoToken player HTTP ${it.code}" }
-            JSONObject(raw).put("_materialytCpn", cpn)
-                .put("_materialytStreamingPot", token.streamingDataPoToken.orEmpty())
+            val raw = it.body?.string().orEmpty()
+            if (!it.isSuccessful) error("YouTube SABR player returned HTTP ${it.code}")
+            JSONObject(raw)
+        }.put("_materialytCpn", cpn)
+            .put("_materialytPlayerPot", token.playerRequestPoToken)
+            .put("_materialytStreamingPot", token.streamingDataPoToken)
+            .put("_materialytClientVersion", bootstrap.version)
+            .put("_materialytClientName", clientName)
+    }
+
+    /** Applies a SABR RELOAD_PLAYER_RESPONSE token and returns a fully prepared replacement endpoint. */
+    fun reloadSabrPlayback(info: SabrPlaybackInfo, reloadToken: String): Pair<String, String> {
+        val vision = info.clientId == 101
+        val remix = info.clientId == 67
+        val target = if (vision) "VISIONOS" else if (remix) "WEB_REMIX" else "WEB"
+        AppLog.event("SABR reload video=${info.videoId} client=$target")
+        val originalCpn = info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
+        val response = if (vision) visionOsPlayer(info.videoId, reloadToken, originalCpn)
+            else webPoPlayer(info.videoId, remix, reloadToken, originalCpn)
+        val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
+        AppLog.event("SABR reload response video=${info.videoId} client=$target status=$status reason=${reason.take(240)}")
+        if (status != "OK") error(reason.ifBlank { "SABR player reload returned $status" })
+        val streaming = response.optJSONObject("streamingData") ?: error("SABR player reload returned no streamingData")
+        val rawUrl = streaming.optString("serverAbrStreamingUrl").takeIf(String::isNotBlank)
+            ?: error("SABR player reload returned no endpoint")
+        val reloadedWithVision = vision
+        val solved = if (reloadedWithVision) rawUrl else solveNChallenge(
+            info.videoId, rawUrl,
+            if (remix) webRemixPlayerJavaScript(info.videoId) else playerJavaScript(info.videoId), false,
+        )
+        val cpn = response.optString("_materialytCpn")
+        val pot = info.streamingPoToken
+        val url = solved.toHttpUrlOrNull()?.newBuilder()
+            ?.setQueryParameter("alr", "yes")
+            ?.setQueryParameter("cpn", cpn)
+            ?.apply { if (!reloadedWithVision) setQueryParameter("pot", pot) }
+            ?.build()?.toString() ?: solved
+        // A same-client VISIONOS reload can rotate both the endpoint and its ustreamer config.
+        // The browser reference keeps the original config because its reload crosses to WEB;
+        // reusing the old native config with the rotated VISIONOS endpoint is rejected as malformed.
+        val refreshedConfig = if (reloadedWithVision) {
+            findString(response, "videoPlaybackUstreamerConfig")?.takeIf(String::isNotBlank)
+                ?: info.videoPlaybackUstreamerConfig
+        } else info.videoPlaybackUstreamerConfig
+        AppLog.event(
+            "SABR player reload ready video=${info.videoId} client=${if (reloadedWithVision) "VISIONOS" else if (remix) "WEB_REMIX" else "WEB"} " +
+                "config=${info.videoPlaybackUstreamerConfig.length}->${refreshedConfig.length}"
+        )
+        return url to refreshedConfig
+    }
+
+    /** Gets the visitor id used by the standalone WEB player, without NewPipe helpers. */
+    fun standaloneWebVisitorData(remix: Boolean = false): String {
+        val origin = if (remix) "https://music.youtube.com" else "https://www.youtube.com"
+        val clientName = if (remix) "WEB_REMIX" else "WEB"
+        val clientId = if (remix) "67" else "1"
+        val bootstrap = bootstrap(origin, clientName)
+        // bootstrap() loads the actual signed-in page (including Cookie) and captures the
+        // visitor identity paired with that account session. Prefer it over /visitor_id,
+        // which otherwise creates a separate guest identity and invalidates the WEB PoToken.
+        visitorData[origin]?.takeIf(String::isNotBlank)?.let { value ->
+            synchronized(this) { standaloneWebVisitors[origin] = System.currentTimeMillis() to value }
+            return value
         }
+        synchronized(this) {
+            standaloneWebVisitors[origin]?.takeIf { System.currentTimeMillis() - it.first < 30 * 60_000L }
+                ?.second?.let { return it }
+        }
+        val body = JSONObject().put("context", JSONObject()
+            .put("client", JSONObject()
+                    .put("clientName", clientName)
+                .put("clientVersion", bootstrap.version)
+                .put("clientScreen", "WATCH")
+                .put("platform", "DESKTOP")
+                .put("hl", "en").put("gl", "US").put("utcOffsetMinutes", 0))
+            .put("request", JSONObject().put("internalExperimentFlags", JSONArray()).put("useSsl", true))
+            .put("user", JSONObject().put("lockedSafetyMode", false)))
+        val request = Request.Builder()
+            .url("$origin/youtubei/v1/visitor_id?prettyPrint=false&key=${bootstrap.key}")
+            .header("User-Agent", WEB_PLAYER_UA)
+            .header("Content-Type", "application/json")
+            .header("X-Youtube-Client-Name", clientId)
+            .header("X-Youtube-Client-Version", bootstrap.version)
+            .apply {
+                cookies(origin).takeIf(String::isNotBlank)?.let { header("Cookie", it) }
+                authorization(origin)?.let { header("Authorization", it) }
+                header("Origin", origin)
+                header("X-Origin", origin)
+                header("X-Goog-AuthUser", "0")
+            }
+            .post(body.toString().toRequestBody(jsonType)).build()
+        val value = client.newCall(request).execute().use {
+            val raw = it.body?.string().orEmpty()
+            if (!it.isSuccessful) error("YouTube visitor_id returned HTTP ${it.code}")
+            JSONObject(raw).optJSONObject("responseContext")?.optString("visitorData").orEmpty()
+        }
+        check(value.isNotBlank()) { "YouTube visitor_id returned no visitorData" }
+        synchronized(this) { standaloneWebVisitors[origin] = System.currentTimeMillis() to value }
+        AppLog.event("$clientName standalone visitor ready length=${value.length}")
+        return value
     }
 
     private fun iosPlayer(videoId: String): JSONObject {
@@ -917,38 +1221,58 @@ object YouTubeRepository {
     }
 
 
-    private fun mobilePlayer(videoId: String, name: String, version: String, id: String, model: String, os: String, osVersion: String): JSONObject {
+    private fun mobilePlayer(
+        videoId: String, name: String, version: String, id: String, model: String, os: String, osVersion: String,
+        reloadToken: String? = null, cpnOverride: String? = null,
+    ): JSONObject {
         val ua = when (name) {
             "ANDROID_VR" -> "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
             "ANDROID" -> "com.google.android.youtube/$version (Linux; U; Android $osVersion) gzip"
+            "VISIONOS" -> VISIONOS_UA
             else -> "com.google.ios.youtube/$version (iPhone; U; CPU iOS 18_7_2 like Mac OS X)"
         }
-        val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
+        val cpn = cpnOverride?.takeIf(String::isNotBlank)
+            ?: UUID.randomUUID().toString().replace("-", "").take(16)
+        val nativeAnonymous = name == "ANDROID_VR" || name == "VISIONOS"
         val clientContext = JSONObject()
             .put("clientName", name).put("clientVersion", version)
             .put("deviceModel", model).put("osName", os)
-            .put("osVersion", osVersion).put("platform", "MOBILE")
-            .put("clientScreen", "WATCH").put("hl", "en").put("gl", "US")
+            .put("osVersion", osVersion).put("hl", "en").put("gl", "US")
+            .apply {
+                if (name != "VISIONOS") {
+                    put("platform", "MOBILE")
+                    put("clientScreen", "WATCH")
+                }
+            }
             .apply { 
                 val accountOrigin = "https://www.youtube.com"
                 val accountCookies = cookies(accountOrigin)
-                val loggedIn = accountCookies.isNotBlank() && name != "ANDROID_VR"
+                val loggedIn = accountCookies.isNotBlank() && !nativeAnonymous
                 if (!loggedIn) visitorData[accountOrigin]?.let { put("visitorData", it) }
                 if (name == "ANDROID_VR") {
                     put("androidSdkVersion", 32)
                     put("deviceMake", "Oculus")
                 }
+                if (name == "VISIONOS") put("deviceMake", "Apple")
             }
         val body = JSONObject().put("context", JSONObject().put("client", clientContext))
             .put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true)
             .put("cpn", cpn)
+            .apply {
+                reloadToken?.let { token ->
+                    put("playbackContext", JSONObject()
+                        .put("adPlaybackContext", JSONObject().put("pyv", true))
+                        .put("reloadPlaybackContext", JSONObject()
+                            .put("reloadPlaybackParams", JSONObject().put("token", token))))
+                }
+            }
         val request = Request.Builder().url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false&id=$videoId")
             .header("User-Agent", ua).header("Content-Type", "application/json")
             .header("X-Youtube-Client-Name", id).header("X-Youtube-Client-Version", version)
             .apply {
                 val accountOrigin = "https://www.youtube.com"
                 val accountCookies = cookies(accountOrigin)
-                val loggedIn = accountCookies.isNotBlank() && name != "ANDROID_VR"
+                val loggedIn = accountCookies.isNotBlank() && !nativeAnonymous
                 if (loggedIn) header("Cookie", accountCookies)
                 if (loggedIn) authorization(accountOrigin)?.let { header("Authorization", it) }
                 header("Origin", accountOrigin)
@@ -964,7 +1288,7 @@ object YouTubeRepository {
                 val detail = runCatching { JSONObject(raw).optJSONObject("error")?.optString("message") }.getOrNull().orEmpty()
                 error("YouTube player returned HTTP ${it.code}${if (detail.isBlank()) "" else ": $detail"}")
             }
-            JSONObject(raw).put("_materialytCpn", cpn)
+            JSONObject(raw).put("_materialytCpn", cpn).put("_materialytClientName", name)
         }
     }
 
@@ -1053,6 +1377,7 @@ object YouTubeRepository {
         val client = streamUrl?.toHttpUrlOrNull()?.queryParameter("c")?.uppercase()
         put("User-Agent", when (client) {
             "IOS" -> "com.google.ios.youtube/21.03.2 (iPhone16,2; U; CPU iOS 18_7_2 like Mac OS X)"
+            "WEB", "MWEB" -> UA
             else -> "com.google.visionos.youtube/1.04(RealityDevice17,1; U; CPU visionOS 26_6_0 like Mac OS X; US)"
         })
     }
@@ -1099,9 +1424,9 @@ object YouTubeRepository {
             .put("hl", "en").put("gl", "US").apply { visitorData[origin]?.let { put("visitorData", it) } })
     }
 
-    private fun get(url: String): String {
+    private fun get(url: String, userAgent: String = UA): String {
         val origin = if (url.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
-        val request = Request.Builder().url(url).header("User-Agent", UA).header("Accept-Language", "en-US,en;q=0.9").apply {
+        val request = Request.Builder().url(url).header("User-Agent", userAgent).header("Accept-Language", "en-US,en;q=0.9").apply {
             cookies(origin).takeIf { it.isNotBlank() }?.let { header("Cookie", it) }
         }.build()
         return client.newCall(request).execute().use { if (!it.isSuccessful) error("YouTube returned HTTP ${it.code}"); it.body?.string().orEmpty() }

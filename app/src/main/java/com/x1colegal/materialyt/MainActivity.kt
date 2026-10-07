@@ -178,6 +178,20 @@ private fun selectAudioStream(streams: List<PlayerChoice>, preferredCodec: Audio
     return matching.maxByOrNull { it.bitrate } ?: originals.maxByOrNull { it.bitrate } ?: valid.maxByOrNull { it.bitrate }
 }
 
+private fun audioChoiceKey(stream: PlayerChoice): String = when {
+    stream.audioTrackId.isNotBlank() -> "id:${stream.audioTrackId}|${stream.codec.lowercase()}"
+    stream.audioTrackName.isNotBlank() -> "name:${stream.audioTrackName.lowercase()}|${stream.codec.lowercase()}"
+    stream.sabrFormat != null -> "itag:${stream.sabrFormat.itag}"
+    else -> "stream:${stream.url}|${stream.codec.lowercase()}|${stream.bitrate}"
+}
+
+private fun visibleAudioChoices(streams: List<PlayerChoice>, selected: PlayerChoice?): List<PlayerChoice> =
+    (streams + listOfNotNull(selected)).distinctBy(::audioChoiceKey)
+
+private fun audioChoiceLabel(stream: PlayerChoice): String = stream.audioTrackName.ifBlank {
+    if (stream.originalAudio) "Original audio" else "Default audio"
+}
+
 private fun formatTime(milliseconds: Long): String {
     val totalSeconds = (milliseconds.coerceAtLeast(0L) / 1000)
     return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
@@ -1677,10 +1691,9 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 }
             }
             Spacer(Modifier.height(16.dp)); Text("Audio track", style = MaterialTheme.typography.titleMedium)
-            audioTracks.distinctBy { it.url }.forEach { track ->
-                val name = track.audioTrackName.ifBlank { if (track.originalAudio) "Original audio" else "Audio" }
-                ListItem(headlineContent = { Text(name) }, supportingContent = { Text("${track.codec.uppercase()} • ${track.bitrate / 1000} kbps") },
-                    leadingContent = { RadioButton(audio?.url == track.url, null) }, modifier = Modifier.clickable { audio = track; selected?.let(::play) })
+            visibleAudioChoices(audioTracks, audio).forEach { track ->
+                ListItem(headlineContent = { Text(audioChoiceLabel(track)) }, supportingContent = { Text("${track.codec.uppercase()} • ${track.bitrate / 1000} kbps") },
+                    leadingContent = { RadioButton(audio?.let(::audioChoiceKey) == audioChoiceKey(track), null) }, modifier = Modifier.clickable { audio = track; selected?.let(::play) })
             }
         }
     })
@@ -2160,10 +2173,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 ListItem(headlineContent = { Text(label) }, leadingContent = { RadioButton(selectedStream == stream, onClick = null) }, modifier = Modifier.clickable { play(stream) })
             }
             Spacer(Modifier.height(16.dp)); Text("Audio track", style = MaterialTheme.typography.titleMedium)
-            audioStreams.distinctBy { it.sabrFormat?.itag?.toString() ?: "${it.url}|${it.codec}|${it.bitrate}|${it.audioTrackId}" }.forEach { audio ->
+            visibleAudioChoices(audioStreams, selectedAudio).forEach { audio ->
                 val bitrate = if (audio.bitrate > 0) "${audio.bitrate / 1000} kbps" else "Unknown bitrate"
-                val trackLabel = audio.audioTrackName.ifBlank { "Audio track" }
-                ListItem(headlineContent = { Text(trackLabel) }, supportingContent = { Text("${audio.codec.uppercase()} • $bitrate") }, leadingContent = { RadioButton(selectedAudio == audio, onClick = null) }, modifier = Modifier.clickable { selectedAudio = audio; selectedStream?.let(::play) })
+                ListItem(headlineContent = { Text(audioChoiceLabel(audio)) }, supportingContent = { Text("${audio.codec.uppercase()} • $bitrate") }, leadingContent = { RadioButton(selectedAudio?.let(::audioChoiceKey) == audioChoiceKey(audio), onClick = null) }, modifier = Modifier.clickable { selectedAudio = audio; selectedStream?.let(::play) })
             }
         }
     })

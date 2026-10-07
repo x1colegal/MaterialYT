@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.4.46] - 2026-10-06
+
+### Fixed
+- Kept the active audio stream visible and selected in playback settings when YouTube omits the display name of a single SABR audio track.
+- Matched audio-track selection by stable track metadata instead of complete in-memory stream-object equality.
+
 ## [1.4.45] - 2026-10-06
 
 ### Fixed

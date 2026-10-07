@@ -845,7 +845,14 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     val musicLoadStatus by PlaybackLoadStatus.message.collectAsState()
     val musicLoadMessage = musicLoadStatus?.takeIf { it.mediaId == track.id }?.text
     BackHandler { onBack() }
-    DisposableEffect(Unit) { activity.immersive(true); onDispose { activity.immersive(false) } }
+    DisposableEffect(Unit) {
+        activity.immersive(true)
+        activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activity.immersive(false)
+        }
+    }
     LaunchedEffect(track.id, preferredCodec) {
         if (AutoMusicService.nowPlaying.value?.id != track.id || (!AutoMusicService.playing.value && AutoMusicService.position.longValue == 0L)) {
             AutoMusicService.play(activity, track, preferredCodec)

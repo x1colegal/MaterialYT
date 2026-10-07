@@ -54,13 +54,21 @@ internal object SabrMessages {
     // StreamerContext.SabrContext { type=1, value=2 } (echoed back from a SABR_CONTEXT_UPDATE)
     fun sabrContext(type: Long, value: ByteArray): ByteArray = concat(vField(1, type), bField(2, value))
 
-    // StreamerContext { clientInfo=1, poToken=2, playbackCookie=3, sabrContexts=5(repeated) }
-    private fun streamerContext(c: ClientInfo, poToken: ByteArray, cookie: ByteArray?, contexts: List<ByteArray>): ByteArray =
+    // StreamerContext { clientInfo=1, poToken=2, playbackCookie=3,
+    // sabrContexts=5(repeated), unsentSabrContexts=6(repeated) }
+    private fun streamerContext(
+        c: ClientInfo,
+        poToken: ByteArray,
+        cookie: ByteArray?,
+        contexts: List<ByteArray>,
+        unsentContexts: Collection<Long>,
+    ): ByteArray =
         concat(
             bField(1, clientInfo(c)),
             if (poToken.isNotEmpty()) bField(2, poToken) else ByteArray(0),
             cookie?.let { bField(3, it) } ?: ByteArray(0),
             concat(contexts.map { bField(5, it) }),
+            concat(unsentContexts.map { vField(6, it) }),
         )
 
     // BufferedRange { formatId=1, startTimeMs=2, durationMs=3, startSegmentIndex=4, endSegmentIndex=5 }.
@@ -95,15 +103,18 @@ internal object SabrMessages {
         range: TrackState?,
         cookie: ByteArray?,
         sabrContexts: List<ByteArray>,
-        selected: Boolean,
+        unsentSabrContexts: Collection<Long>,
+        initialized: Boolean,
     ): ByteArray = concat(
         bField(1, clientAbrState(playerTimeMs, format.audioTrackId)),
-        if (selected) bField(2, formatId(format)) else ByteArray(0),
+        // Formats listed here are already initialized by the client. Omit until the init segment
+        // has actually arrived, otherwise WEB skips the MP4 header and starts at the media offset.
+        if (initialized) bField(2, formatId(format)) else ByteArray(0),
         if (range != null && range.bufferedEndSeg > 0) bField(3, bufferedRange(range)) else ByteArray(0),
         if (playerTimeMs > 0) vField(4, playerTimeMs) else ByteArray(0),
         bField(5, ustreamerConfig),
         bField(16, formatId(format)),
-        bField(19, streamerContext(clientInfo, poToken, cookie, sabrContexts)),
+        bField(19, streamerContext(clientInfo, poToken, cookie, sabrContexts, unsentSabrContexts)),
     )
 
     /** One track's buffered progress ([startTimeMs]/[startSeg] anchor a seek-restarted session's range). */
@@ -133,7 +144,9 @@ internal object SabrMessages {
         playerTimeMs: Long,
         cookie: ByteArray?,
         sabrContexts: List<ByteArray>,
-        selected: Boolean,
+        unsentSabrContexts: Collection<Long>,
+        videoInitialized: Boolean,
+        audioInitialized: Boolean,
     ): ByteArray {
         val states = listOfNotNull(video, audio)
         return concat(
@@ -142,13 +155,16 @@ internal object SabrMessages {
                 vField(40, 0), // enabledTrackTypesBitfield=0 => video+audio
                 if (audioFormat.audioTrackId.isNotBlank()) sField(69, audioFormat.audioTrackId) else ByteArray(0),
             )),
-            if (selected) concat(states.map { bField(2, formatId(it.format)) }) else ByteArray(0),
+            concat(
+                if (videoInitialized) bField(2, formatId(videoFormat)) else ByteArray(0),
+                if (audioInitialized) bField(2, formatId(audioFormat)) else ByteArray(0),
+            ),
             concat(states.filter { it.bufferedEndSeg > 0 }.map { bField(3, bufferedRange(it)) }),
             if (playerTimeMs > 0) vField(4, playerTimeMs) else ByteArray(0),
             bField(5, ustreamerConfig),
             bField(16, formatId(audioFormat)), // preferredAudioFormatId
             bField(17, formatId(videoFormat)), // preferredVideoFormatId (pins the exact video itag)
-            bField(19, streamerContext(clientInfo, poToken, cookie, sabrContexts)),
+            bField(19, streamerContext(clientInfo, poToken, cookie, sabrContexts, unsentSabrContexts)),
         )
     }
 
@@ -160,9 +176,14 @@ internal object SabrMessages {
     fun parseMediaHeader(payload: ByteArray): MediaHeader {
         val m = SabrProto.read(payload)
         val tr = m.bytesAt(15)?.let { parseTimeRangeMs(it) } ?: (0L to 0L)
+        // Initialization headers may omit the legacy top-level itag (field 3) and identify the
+        // stream only through format_id.itag (field 13 -> field 1). Dropping those headers leaves
+        // an exact init-sized hole at byte zero and ExoPlayer waits forever for the MP4 header.
+        val nestedItag = m.bytesAt(13)?.let { SabrProto.read(it).longAt(1).toInt() } ?: 0
+        val itag = m.longAt(3).toInt().takeIf { it > 0 } ?: nestedItag
         return MediaHeader(
             headerId = m.longAt(1).toInt(),
-            itag = m.longAt(3).toInt(),
+            itag = itag,
             seq = m.longAt(9).toInt(),
             isInit = m.longAt(8) != 0L,
             startRange = m.longAt(6),
@@ -184,14 +205,50 @@ internal object SabrMessages {
     /** FormatInitializationMetadata { end_segment_number=4 } — total segment count. */
     fun parseEndSegment(payload: ByteArray): Int = SabrProto.read(payload).longAt(4).toInt()
 
-    /** NextRequestPolicy.playback_cookie is field 7 (a PlaybackCookie message we echo verbatim). */
-    fun parsePlaybackCookie(payload: ByteArray): ByteArray? = SabrProto.read(payload).bytesAt(7)
+    class NextRequestPolicy(
+        val targetAudioReadaheadMs: Long,
+        val targetVideoReadaheadMs: Long,
+        val maxTimeSinceLastRequestMs: Long,
+        val backoffTimeMs: Long,
+        val playbackCookie: ByteArray?,
+    )
 
-    /** SabrContextUpdate { type=1, value=3 } -> (type, a StreamerContext.SabrContext to echo back). */
-    fun parseContextUpdate(payload: ByteArray): Pair<Long, ByteArray> {
+    /** Server pacing policy. WEB waits for backoff_time_ms before issuing the follow-up POST. */
+    fun parseNextRequestPolicy(payload: ByteArray): NextRequestPolicy {
         val m = SabrProto.read(payload)
-        val type = m.longAt(1)
-        return type to sabrContext(type, m.bytesAt(3) ?: ByteArray(0))
+        return NextRequestPolicy(m.longAt(1), m.longAt(2), m.longAt(3), m.longAt(4), m.bytesAt(7))
+    }
+
+    class ContextUpdate(
+        val type: Long,
+        val scope: Long,
+        val value: ByteArray,
+        val hasSendByDefault: Boolean,
+        val sendByDefault: Boolean,
+        val writePolicy: Long,
+    ) {
+        fun encoded(): ByteArray = sabrContext(type, value)
+    }
+
+    /** Full SabrContextUpdate state, including server-controlled sending semantics. */
+    fun parseContextUpdate(payload: ByteArray): ContextUpdate {
+        val m = SabrProto.read(payload)
+        return ContextUpdate(
+            type = m.longAt(1),
+            scope = m.longAt(2),
+            value = m.bytesAt(3) ?: ByteArray(0),
+            hasSendByDefault = m.containsKey(4),
+            sendByDefault = m.longAt(4) != 0L,
+            writePolicy = m.longAt(5),
+        )
+    }
+
+    class ContextSendingPolicy(val start: List<Long>, val stop: List<Long>, val discard: List<Long>)
+
+    fun parseContextSendingPolicy(payload: ByteArray): ContextSendingPolicy {
+        val m = SabrProto.read(payload)
+        fun values(field: Int) = m[field].orEmpty().map { it.v }
+        return ContextSendingPolicy(values(1), values(2), values(3))
     }
 
     /** SabrRedirect: a length-delimited url at field 1. */

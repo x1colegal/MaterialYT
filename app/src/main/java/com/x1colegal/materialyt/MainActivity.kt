@@ -842,6 +842,8 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     val duration = AutoMusicService.duration.longValue
     val buffered = AutoMusicService.bufferedPosition.longValue
     val playing = AutoMusicService.playing.value
+    val musicLoadStatus by PlaybackLoadStatus.message.collectAsState()
+    val musicLoadMessage = musicLoadStatus?.takeIf { it.mediaId == track.id }?.text
     BackHandler { onBack() }
     DisposableEffect(Unit) { activity.immersive(true); onDispose { activity.immersive(false) } }
     LaunchedEffect(track.id, preferredCodec) {
@@ -913,7 +915,22 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                 NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) { NavigationBarItem(!showLyrics, { showLyrics = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }); NavigationBarItem(showLyrics, { showLyrics = true }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }) }
             }
         }
+        if (musicLoadMessage != null) PlaybackLoadingStatus(
+            musicLoadMessage,
+            Modifier.align(Alignment.TopCenter).padding(top = 88.dp),
+        )
     }
+}
+
+@Composable
+private fun PlaybackLoadingStatus(message: String, modifier: Modifier = Modifier) {
+    Text(
+        message,
+        modifier.background(ComposeColor.Black.copy(alpha = .56f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        color = ComposeColor.White,
+        style = MaterialTheme.typography.labelMedium,
+    )
 }
 
 @Composable
@@ -1716,6 +1733,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var selectedStream by remember { mutableStateOf<PlayerChoice?>(null) }
     var sabrPlayback by remember { mutableStateOf<SabrPlaybackInfo?>(null) }
     var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
+    val videoLoadStatus by PlaybackLoadStatus.message.collectAsState()
+    val videoLoadMessage = videoLoadStatus?.takeIf { it.mediaId == videoId }?.text
     var playerPosition by remember { mutableLongStateOf(0L) }
     var playerBuffered by remember { mutableLongStateOf(0L) }
     var playerDuration by remember { mutableLongStateOf(0L) }
@@ -1782,6 +1801,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 playbackState = state
+                if (state == Player.STATE_READY) PlaybackLoadStatus.clear(videoId)
+                else if (state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == videoId) {
+                    PlaybackLoadStatus.show(videoId, "Buffering media…")
+                }
                 if (state == Player.STATE_ENDED && playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1)
                 mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
                     .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO)
@@ -2033,6 +2056,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
                 modifier = Modifier.fillMaxSize().padding(bottom = 8.dp)
             )
+            if (videoLoadMessage != null) PlaybackLoadingStatus(videoLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
             AnimatedVisibility(controllerVisible, modifier = Modifier.align(Alignment.TopCenter)) { Row(
                 Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 2.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -2052,6 +2076,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                             AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
+                            if (videoLoadMessage != null) PlaybackLoadingStatus(videoLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                         }
                         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
@@ -2096,6 +2121,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 item {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                         AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
+                        if (videoLoadMessage != null) PlaybackLoadingStatus(videoLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                     }
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }

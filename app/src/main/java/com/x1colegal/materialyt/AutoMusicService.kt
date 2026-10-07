@@ -109,7 +109,15 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                     }
                 }
             }
-            override fun onPlaybackStateChanged(playbackState: Int) { publishState(); publishMetadata() }
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                currentTrack?.id?.let { id ->
+                    if (playbackState == Player.STATE_READY) PlaybackLoadStatus.clear(id)
+                    else if (playbackState == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == id) {
+                        PlaybackLoadStatus.show(id, "Buffering media…")
+                    }
+                }
+                publishState(); publishMetadata()
+            }
             override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
                 val failedTrack = currentTrack ?: return
                 AppLog.failure("music stream candidate=${audioCandidateIndex + 1}/${audioCandidates.size} video=${failedTrack.id}", error)

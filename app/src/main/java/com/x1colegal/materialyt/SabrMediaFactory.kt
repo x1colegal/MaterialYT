@@ -20,7 +20,7 @@ object SabrMediaFactory {
         require(!video.audio && audio.audio)
         require(video.contentLength > 0 && audio.contentLength > 0) { "SABR formats have no content length" }
         AppLog.event(
-            "SABR create video=${info.videoId} videoItag=${video.itag} videoXtags=${video.xtags} " +
+            "SABR create video=${info.videoId} clientId=${info.clientId} videoItag=${video.itag} videoXtags=${video.xtags} " +
                 "audioItag=${audio.itag} audioTrackId=${audio.audioTrackId} audioXtags=${audio.xtags}"
         )
         val id = "${info.videoId}-${video.itag}-${audio.itag}"
@@ -32,7 +32,19 @@ object SabrMediaFactory {
                 val refreshed = YouTubeRepository.reloadSabrPlayback(info, token)
                 refreshed.first to decode(refreshed.second)
             },
+            refreshPlayer = when (info.clientId) {
+                1, 67 -> ({
+                    val refreshed = YouTubeRepository.refreshWebSabrAdPlayback(info)
+                    refreshed.first to decode(refreshed.second)
+                })
+                101 -> ({
+                    val refreshed = YouTubeRepository.sabrPlaybackInfo(info.videoId)
+                    refreshed.serverAbrStreamingUrl to decode(refreshed.videoPlaybackUstreamerConfig)
+                })
+                else -> null
+            },
         )
+        PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, config, null, HttpBackend.playbackClient()))
         val videoSource = ProgressiveMediaSource.Factory(ModernSabrDataSource.Factory(true))
             .createMediaSource(MediaItem.fromUri(Uri.parse("sabrmodern://$id/video")))
@@ -51,7 +63,19 @@ object SabrMediaFactory {
                 val refreshed = YouTubeRepository.reloadSabrPlayback(info, token)
                 refreshed.first to decode(refreshed.second)
             },
+            refreshPlayer = when (info.clientId) {
+                1, 67 -> ({
+                    val refreshed = YouTubeRepository.refreshWebSabrAdPlayback(info)
+                    refreshed.first to decode(refreshed.second)
+                })
+                101 -> ({
+                    val refreshed = YouTubeRepository.sabrPlaybackInfo(info.videoId)
+                    refreshed.serverAbrStreamingUrl to decode(refreshed.videoPlaybackUstreamerConfig)
+                })
+                else -> null
+            },
         )
+        PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, null, config, HttpBackend.playbackClient()))
         return ProgressiveMediaSource.Factory(ModernSabrDataSource.Factory(false))
             .createMediaSource(MediaItem.fromUri(Uri.parse("sabrmodern://$id/audio")))

@@ -18,6 +18,7 @@ internal object SabrUmp {
     const val SABR_ERROR = 44
     const val RELOAD_PLAYER_RESPONSE = 46
     const val SABR_CONTEXT_UPDATE = 57
+    const val SABR_CONTEXT_SENDING_POLICY = 59
     const val STREAM_PROTECTION_STATUS = 58
     const val SNACKBAR_MESSAGE = 67
 

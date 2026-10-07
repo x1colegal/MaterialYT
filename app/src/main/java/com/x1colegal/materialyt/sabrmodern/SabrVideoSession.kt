@@ -5,6 +5,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import timber.log.Timber
 
 /**
@@ -34,6 +35,7 @@ internal class SabrVideoConfig(
     /** The listen's cpn for watch-time CDN correlation (DIRECT stampCpn parity); null = download (no stamp). */
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
+    val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
 )
 
 /**
@@ -139,17 +141,26 @@ internal class SabrVideoSession(
         var ustreamerConfig = config.ustreamerConfig
         var playerTimeMs = startTimeMs
         var cookie: ByteArray? = null
-        val ctxByType = LinkedHashMap<Long, ByteArray>()
+        val ctxByType = LinkedHashMap<Long, SabrMessages.ContextUpdate>()
+        val ctxToSend = LinkedHashSet<Long>()
         var iter = 0
         var dry = 0
         var attestationStalls = 0
+        var emptySessionRefreshes = 0
+        var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
+            if (backoffTimeMs > 0) {
+                val delay = backoffTimeMs.coerceAtMost(30_000L)
+                backoffTimeMs = 0
+                AppLog.event("SABR video policy backoff=${delay}ms")
+                Thread.sleep(delay)
+                if (cancelled) return
+            }
             iter++
             // Demand pacing: pause only while BOTH tracks are comfortably ahead of their readers.
             if (paceAheadVideoBytes > 0 || paceAheadAudioBytes > 0) awaitDualDemand()
             if (cancelled) return
-            val anySelected = video.lastSeq > 0 || audio.lastSeq > 0
             val body = SabrMessages.abrRequestVideo(
                 ustreamerConfig = ustreamerConfig,
                 videoFormat = config.videoFormat,
@@ -160,11 +171,18 @@ internal class SabrVideoSession(
                 clientInfo = config.clientInfo,
                 playerTimeMs = playerTimeMs,
                 cookie = cookie,
-                sabrContexts = ctxByType.values.toList(),
-                selected = anySelected,
+                sabrContexts = ctxToSend.mapNotNull { ctxByType[it]?.encoded() },
+                unsentSabrContexts = ctxByType.keys.filterNot { it in ctxToSend },
+                videoInitialized = video.initWritten,
+                audioInitialized = audio.initWritten,
             )
+            val requestUrl = url.toHttpUrlOrNull()?.newBuilder()
+                // WEB numbers SABR requests from zero. Some content-ad sessions only emit their
+                // initialization segments for rn=0 even though ordinary videos tolerate rn=1.
+                ?.setQueryParameter("rn", (iter - 1).toString())
+                ?.build()?.toString() ?: url
             val req = Request.Builder()
-                .url(url)
+                .url(requestUrl)
                 .header("User-Agent", config.userAgent)
                 .post(body.toRequestBody(protobuf))
                 .build()
@@ -189,11 +207,34 @@ internal class SabrVideoSession(
             var snackbarPayload: String? = null
             for (p in parts) when (p.type) {
                 SabrUmp.MEDIA_HEADER -> { val h = SabrMessages.parseMediaHeader(p.payload); headers[h.headerId] = h }
-                SabrUmp.NEXT_REQUEST_POLICY -> SabrMessages.parsePlaybackCookie(p.payload)?.let { cookie = it }
+                SabrUmp.NEXT_REQUEST_POLICY -> {
+                    val policy = SabrMessages.parseNextRequestPolicy(p.payload)
+                    policy.playbackCookie?.let { cookie = it }
+                    backoffTimeMs = policy.backoffTimeMs
+                    if (iter == 1) AppLog.event(
+                        "SABR video policy audio=${policy.targetAudioReadaheadMs} video=${policy.targetVideoReadaheadMs} " +
+                            "max=${policy.maxTimeSinceLastRequestMs} backoff=${policy.backoffTimeMs}"
+                    )
+                }
                 SabrUmp.SABR_CONTEXT_UPDATE -> {
-                    val (type, ctx) = SabrMessages.parseContextUpdate(p.payload)
-                    gotContext = !ctx.contentEquals(ctxByType[type])
-                    ctxByType[type] = ctx
+                    val update = SabrMessages.parseContextUpdate(p.payload)
+                    val old = ctxByType[update.type]
+                    if (update.type != 0L && update.value.isNotEmpty() && update.writePolicy != 0L
+                        && !(update.writePolicy == 2L && old != null)) {
+                        gotContext = gotContext || old == null || !old.value.contentEquals(update.value)
+                        ctxByType[update.type] = update
+                        if (update.sendByDefault) ctxToSend += update.type
+                    }
+                    if (iter == 1) AppLog.event(
+                        "SABR context type=${update.type} scope=${update.scope} sendPresent=${update.hasSendByDefault} " +
+                            "send=${update.sendByDefault} write=${update.writePolicy} value=${update.value.size}"
+                    )
+                }
+                SabrUmp.SABR_CONTEXT_SENDING_POLICY -> {
+                    val policy = SabrMessages.parseContextSendingPolicy(p.payload)
+                    ctxToSend += policy.start
+                    ctxToSend -= policy.stop.toSet()
+                    policy.discard.forEach { ctxToSend -= it; ctxByType.remove(it) }
                 }
                 SabrUmp.SABR_REDIRECT -> redirect = SabrMessages.parseRedirectUrl(p.payload)
                 SabrUmp.SABR_ERROR -> sabrErrors += SabrUmp.errorDescription(p.payload)
@@ -215,6 +256,21 @@ internal class SabrVideoSession(
                 val refreshed = config.reloadPlayer.invoke(reloadToken)
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                dry = 0
+                continue
+            }
+            // A context-only response is a request to echo the new context on the next SABR POST.
+            // Do not throw that state away by refreshing the player before it has been sent once.
+            if (headers.isEmpty() && snackbarPayload != null && !gotContext && video.lastSeq == 0 && audio.lastSeq == 0
+                && emptySessionRefreshes < 2 && config.refreshPlayer != null) {
+                emptySessionRefreshes++
+                AppLog.event("SABR video empty session; refreshing player attempt=$emptySessionRefreshes snackbar=$snackbarPayload")
+                val refreshed = config.refreshPlayer.invoke()
+                url = refreshed.first
+                ustreamerConfig = refreshed.second
+                cookie = null
+                ctxByType.clear()
+                ctxToSend.clear()
                 dry = 0
                 continue
             }
@@ -259,6 +315,11 @@ internal class SabrVideoSession(
             // Advance to the least-buffered track, floored at the requested start until both land.
             playerTimeMs = maxOf(startTimeMs, minOf(video.bufEndMs.orStartIfEmpty(video), audio.bufEndMs.orStartIfEmpty(audio)))
             onProgress?.invoke(videoBuffer.available() + audioBuffer.available())
+            if (iter <= 3) AppLog.event(
+                "SABR video progress iter=$iter headers=${headers.size} new=$newSeg " +
+                    "video=${videoBuffer.available()} first=${video.firstOff} init=${video.initWritten} " +
+                    "audio=${audioBuffer.available()} first=${audio.firstOff} init=${audio.initWritten}"
+            )
 
             if (redirect != null && !newSeg) { url = prepared(redirect); continue }
             dry = if (newSeg || gotContext) 0 else dry + 1

@@ -5,6 +5,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import timber.log.Timber
 
 /**
@@ -41,6 +42,7 @@ internal class SabrConfig(
      */
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
+    val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
 )
 
 /**
@@ -148,12 +150,22 @@ internal class SabrSession(
         var cookie: ByteArray? = null
         var initWritten = false
         val seen = HashSet<Int>()
-        val ctxByType = LinkedHashMap<Long, ByteArray>()
+        val ctxByType = LinkedHashMap<Long, SabrMessages.ContextUpdate>()
+        val ctxToSend = LinkedHashSet<Long>()
         var iter = 0
         var dry = 0
         var attestationStalls = 0
+        var emptySessionRefreshes = 0
+        var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
+            if (backoffTimeMs > 0) {
+                val delay = backoffTimeMs.coerceAtMost(30_000L)
+                backoffTimeMs = 0
+                AppLog.event("SABR audio policy backoff=${delay}ms")
+                Thread.sleep(delay)
+                if (cancelled) return
+            }
             iter++
             if (paceAheadBytes > 0) buffer.awaitDemand(paceAheadBytes) { cancelled }
             if (cancelled) return
@@ -165,11 +177,15 @@ internal class SabrSession(
                 playerTimeMs = playerTimeMs,
                 range = if (lastSeq > 0) SabrMessages.TrackState(config.format, bufEndMs, lastSeq, firstMs, firstSeq) else null,
                 cookie = cookie,
-                sabrContexts = ctxByType.values.toList(),
-                selected = lastSeq > 0,
+                sabrContexts = ctxToSend.mapNotNull { ctxByType[it]?.encoded() },
+                unsentSabrContexts = ctxByType.keys.filterNot { it in ctxToSend },
+                initialized = initWritten,
             )
+            val requestUrl = url.toHttpUrlOrNull()?.newBuilder()
+                ?.setQueryParameter("rn", (iter - 1).toString())
+                ?.build()?.toString() ?: url
             val req = Request.Builder()
-                .url(url)
+                .url(requestUrl)
                 .header("User-Agent", config.userAgent)
                 .post(body.toRequestBody(protobuf))
                 .build()
@@ -191,18 +207,43 @@ internal class SabrSession(
             var gotContext = false
             var protStatus = 0L
             var reloadToken: String? = null
+            var snackbarPayload: String? = null
             for (p in parts) when (p.type) {
                 SabrUmp.MEDIA_HEADER -> { val h = SabrMessages.parseMediaHeader(p.payload); headers[h.headerId] = h }
                 SabrUmp.FORMAT_INITIALIZATION_METADATA -> SabrMessages.parseEndSegment(p.payload).let { if (it > 0) endSeg = it }
-                SabrUmp.NEXT_REQUEST_POLICY -> SabrMessages.parsePlaybackCookie(p.payload)?.let { cookie = it }
+                SabrUmp.NEXT_REQUEST_POLICY -> {
+                    val policy = SabrMessages.parseNextRequestPolicy(p.payload)
+                    policy.playbackCookie?.let { cookie = it }
+                    backoffTimeMs = policy.backoffTimeMs
+                    if (iter == 1) AppLog.event(
+                        "SABR audio policy target=${policy.targetAudioReadaheadMs} max=${policy.maxTimeSinceLastRequestMs} " +
+                            "backoff=${policy.backoffTimeMs}"
+                    )
+                }
                 SabrUmp.SABR_CONTEXT_UPDATE -> {
-                    val (type, ctx) = SabrMessages.parseContextUpdate(p.payload)
-                    gotContext = !ctx.contentEquals(ctxByType[type])
-                    ctxByType[type] = ctx
+                    val update = SabrMessages.parseContextUpdate(p.payload)
+                    val old = ctxByType[update.type]
+                    if (update.type != 0L && update.value.isNotEmpty() && update.writePolicy != 0L
+                        && !(update.writePolicy == 2L && old != null)) {
+                        gotContext = gotContext || old == null || !old.value.contentEquals(update.value)
+                        ctxByType[update.type] = update
+                        if (update.sendByDefault) ctxToSend += update.type
+                    }
+                    if (iter == 1) AppLog.event(
+                        "SABR audio context type=${update.type} scope=${update.scope} sendPresent=${update.hasSendByDefault} " +
+                            "send=${update.sendByDefault} write=${update.writePolicy} value=${update.value.size}"
+                    )
+                }
+                SabrUmp.SABR_CONTEXT_SENDING_POLICY -> {
+                    val policy = SabrMessages.parseContextSendingPolicy(p.payload)
+                    ctxToSend += policy.start
+                    ctxToSend -= policy.stop.toSet()
+                    policy.discard.forEach { ctxToSend -= it; ctxByType.remove(it) }
                 }
                 SabrUmp.SABR_REDIRECT -> redirect = SabrMessages.parseRedirectUrl(p.payload)
                 SabrUmp.SABR_ERROR -> sabrErrors += SabrUmp.errorDescription(p.payload)
                 SabrUmp.RELOAD_PLAYER_RESPONSE -> reloadToken = SabrUmp.reloadToken(p.payload)
+                SabrUmp.SNACKBAR_MESSAGE -> snackbarPayload = p.payload.joinToString("") { "%02x".format(it) }
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
                     protStatus = SabrProto.read(p.payload).longAt(1)
                     AppLog.event("SABR audio protection=$protStatus iter=$iter")
@@ -219,6 +260,21 @@ internal class SabrSession(
                 val refreshed = config.reloadPlayer.invoke(reloadToken)
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                dry = 0
+                continue
+            }
+            // Give a newly supplied SABR context one request to be echoed before replacing the
+            // player session; refreshing here used to discard the server's CONTENT_ADS context.
+            if (headers.isEmpty() && snackbarPayload != null && !gotContext && lastSeq == 0
+                && emptySessionRefreshes < 2 && config.refreshPlayer != null) {
+                emptySessionRefreshes++
+                AppLog.event("SABR audio empty session; refreshing player attempt=$emptySessionRefreshes snackbar=$snackbarPayload")
+                val refreshed = config.refreshPlayer.invoke()
+                url = refreshed.first
+                ustreamerConfig = refreshed.second
+                cookie = null
+                ctxByType.clear()
+                ctxToSend.clear()
                 dry = 0
                 continue
             }

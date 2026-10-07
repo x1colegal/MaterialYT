@@ -915,10 +915,23 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                 NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) { NavigationBarItem(!showLyrics, { showLyrics = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }); NavigationBarItem(showLyrics, { showLyrics = true }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }) }
             }
         }
-        if (musicLoadMessage != null) PlaybackLoadingStatus(
+        if (musicLoadMessage != null) MusicPlaybackLoadingStatus(
             musicLoadMessage,
             Modifier.align(Alignment.TopCenter).padding(top = 88.dp),
         )
+    }
+}
+
+@Composable
+private fun MusicPlaybackLoadingStatus(message: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier.background(ComposeColor.Black.copy(alpha = .56f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        CircularProgressIndicator(color = ComposeColor.White)
+        Spacer(Modifier.height(10.dp))
+        Text(message, color = ComposeColor.White, style = MaterialTheme.typography.labelMedium)
     }
 }
 

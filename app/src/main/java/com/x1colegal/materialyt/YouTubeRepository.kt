@@ -768,7 +768,7 @@ object YouTubeRepository {
                 error(reason.ifBlank { "YouTube VISIONOS SABR player returned $status" })
             }
         }
-        PlaybackLoadStatus.show(videoId, "Preparing available formats…")
+        PlaybackLoadStatus.show(videoId, "Validating stream configuration…")
         val streaming = response.optJSONObject("streamingData")
             ?: error("YouTube SABR player returned no streamingData")
         val unresolvedUrl = streaming.optString("serverAbrStreamingUrl")
@@ -783,12 +783,16 @@ object YouTubeRepository {
         }
         val cpn = response.optString("_materialytCpn")
             .takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no playback nonce")
+        PlaybackLoadStatus.show(videoId, "Preparing history tracking…")
         val accountTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, false) }
             .onFailure { AppLog.failure("SABR authenticated tracking video=$videoId", it) }
             .getOrNull()
         cachePlaybackTracking(videoId, accountTracking ?: response.optJSONObject("playbackTracking"), cpn)
         val webClient = response.optString("_materialytClientName")
-        val solvedUrl = if (direct) unresolvedUrl else solveNChallenge(
+        if (!direct && !response.optBoolean("_materialytNResolved")) {
+            PlaybackLoadStatus.show(videoId, "Solving media URL…")
+        }
+        val solvedUrl = if (direct || response.optBoolean("_materialytNResolved")) unresolvedUrl else solveNChallenge(
             videoId, unresolvedUrl,
             if (webClient == "WEB") playerJavaScript(videoId) else webRemixPlayerJavaScript(videoId),
             false,
@@ -800,6 +804,7 @@ object YouTubeRepository {
             ?.setQueryParameter("cpn", cpn)
             ?.apply { if (!direct) setQueryParameter("pot", poToken) }
             ?.build()?.toString() ?: solvedUrl
+        PlaybackLoadStatus.show(videoId, "Reading available formats…")
         val formats = mutableListOf<SabrFormat>()
         streaming.optJSONArray("adaptiveFormats")?.let { array ->
             for (index in 0 until array.length()) {
@@ -1177,11 +1182,19 @@ object YouTubeRepository {
             }
             .post(body.toString().toRequestBody(jsonType)).build()
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Requesting playback data…")
-        return client.newCall(request).execute().use {
+        val response = client.newCall(request).execute().use {
             val raw = it.body?.string().orEmpty()
             if (!it.isSuccessful) error("YouTube SABR player returned HTTP ${it.code}")
             JSONObject(raw)
-        }.put("_materialytCpn", cpn)
+        }
+        val streaming = response.optJSONObject("streamingData")
+        val sabrUrl = streaming?.optString("serverAbrStreamingUrl").orEmpty()
+        if (sabrUrl.isNotBlank()) {
+            if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Solving media URL…")
+            streaming?.put("serverAbrStreamingUrl", solveNChallenge(videoId, sabrUrl, playerJs, false))
+            response.put("_materialytNResolved", true)
+        }
+        return response.put("_materialytCpn", cpn)
             .put("_materialytPlayerPot", token.playerRequestPoToken)
             .put("_materialytStreamingPot", token.streamingDataPoToken)
             .put("_materialytClientVersion", bootstrap.version)

@@ -1754,6 +1754,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var selectedStream by remember { mutableStateOf<PlayerChoice?>(null) }
     var sabrPlayback by remember { mutableStateOf<SabrPlaybackInfo?>(null) }
     var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
+    var hasStartedPlayback by remember { mutableStateOf(false) }
     val videoLoadStatus by PlaybackLoadStatus.message.collectAsState()
     val videoLoadMessage = videoLoadStatus?.takeIf { it.mediaId == videoId }?.text
     var playerPosition by remember { mutableLongStateOf(0L) }
@@ -1823,7 +1824,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             override fun onPlaybackStateChanged(state: Int) {
                 playbackState = state
                 if (state == Player.STATE_READY) PlaybackLoadStatus.clear(videoId)
-                else if (state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == videoId) {
+                else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == videoId) {
                     PlaybackLoadStatus.show(videoId, "Buffering media…")
                 }
                 if (state == Player.STATE_ENDED && playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1)
@@ -1832,6 +1833,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     .setState(if (player.isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED, player.currentPosition.coerceAtLeast(0L), if (player.isPlaying) 1f else 0f).build())
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    hasStartedPlayback = true
+                    PlaybackLoadStatus.clear(videoId)
+                }
                 activity.updatePipAction()
                 if (!isPlaying) {
                     val pos = player.currentPosition
@@ -1958,11 +1963,27 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, player) {
+        var stoppedOutsideApp = false
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                stoppedOutsideApp = true
+                currentPlayerView?.onPause()
                 if (!activity.getSharedPreferences("settings", 0).getBoolean("background_play", false)) {
                     player.pause()
                 }
+            } else if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && stoppedOutsideApp) {
+                // Android may recreate the SurfaceView while ExoPlayer keeps the old decoded frame.
+                // Reattach the view and seek to the current position to flush only the renderers;
+                // the SABR buffers and media source remain intact.
+                val position = player.currentPosition.coerceAtLeast(0L)
+                currentPlayerView?.let { view ->
+                    view.player = null
+                    view.player = player
+                    view.onResume()
+                    activity.visiblePlayerView(view)
+                }
+                player.seekTo(position)
+                stoppedOutsideApp = false
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)

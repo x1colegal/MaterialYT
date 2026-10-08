@@ -873,14 +873,14 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
         if (Build.VERSION.SDK_INT >= 31) track.thumbnail
         else ImageRequest.Builder(activity)
             .data(track.thumbnail)
-            .transformations(LegacyBlurTransformation(activity, radius = 24f, sampling = 3f))
+            .transformations(LegacyBlurTransformation(activity, radius = 12f, sampling = 2f))
             .build()
     }
     Box(Modifier.fillMaxSize()) {
         AsyncImage(
             backgroundArtwork,
             null,
-            if (Build.VERSION.SDK_INT >= 31) Modifier.matchParentSize().blur(42.dp) else Modifier.matchParentSize(),
+            if (Build.VERSION.SDK_INT >= 31) Modifier.matchParentSize().blur(22.dp) else Modifier.matchParentSize(),
             contentScale = ContentScale.Crop,
         )
         Box(Modifier.matchParentSize().background(ComposeColor.Black.copy(alpha = .64f)))

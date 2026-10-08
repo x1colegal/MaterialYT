@@ -1967,21 +1967,25 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
                 stoppedOutsideApp = true
-                currentPlayerView?.onPause()
                 if (!activity.getSharedPreferences("settings", 0).getBoolean("background_play", false)) {
                     player.pause()
                 }
             } else if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && stoppedOutsideApp) {
-                // Android may recreate the SurfaceView while ExoPlayer keeps the old decoded frame.
-                // Reattach the view and seek to the current position to flush only the renderers;
-                // the SABR buffers and media source remain intact.
+                // Some devices keep MediaCodec bound to the destroyed background SurfaceView. Merely
+                // assigning PlayerView again leaves that codec rendering audio with a frozen frame.
+                // Toggle only the video track so ExoPlayer recreates its video renderer/codec while
+                // retaining the active media source, SABR buffers, audio renderer and position.
                 val position = player.currentPosition.coerceAtLeast(0L)
+                val trackParameters = player.trackSelectionParameters
+                player.trackSelectionParameters = trackParameters.buildUpon()
+                    .setTrackTypeDisabled(com.google.android.exoplayer2.C.TRACK_TYPE_VIDEO, true)
+                    .build()
                 currentPlayerView?.let { view ->
                     view.player = null
                     view.player = player
-                    view.onResume()
                     activity.visiblePlayerView(view)
                 }
+                player.trackSelectionParameters = trackParameters
                 player.seekTo(position)
                 stoppedOutsideApp = false
             }

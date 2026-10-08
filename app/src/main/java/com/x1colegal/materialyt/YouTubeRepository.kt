@@ -768,6 +768,7 @@ object YouTubeRepository {
                 error(reason.ifBlank { "YouTube VISIONOS SABR player returned $status" })
             }
         }
+        PlaybackLoadStatus.show(videoId, "Preparing available formats…")
         val streaming = response.optJSONObject("streamingData")
             ?: error("YouTube SABR player returned no streamingData")
         val unresolvedUrl = streaming.optString("serverAbrStreamingUrl")
@@ -1114,14 +1115,16 @@ object YouTubeRepository {
         val clientName = if (remix) "WEB_REMIX" else "WEB"
         val clientId = if (remix) "67" else "1"
         val origin = if (remix) "https://music.youtube.com" else "https://www.youtube.com"
-        PlaybackLoadStatus.show(videoId, "Preparing WEB session…")
+        val showInitialProgress = reloadToken == null && !adPlayback
+        if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Preparing WEB session…")
         val bootstrap = bootstrap(origin, clientName)
-        PlaybackLoadStatus.show(videoId, "Generating PoToken…")
+        if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Generating PoToken…")
         val token = WebPoTokenProvider.get(videoId, standaloneWebVisitorData(remix), origin, WEB_PLAYER_UA)
-        PlaybackLoadStatus.show(videoId, "Requesting playback data…")
+        if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Loading player JavaScript…")
         val cpn = cpnOverride?.takeIf(String::isNotBlank)
             ?: UUID.randomUUID().toString().replace("-", "").take(16)
         val playerJs = if (remix) webRemixPlayerJavaScript(videoId) else playerJavaScript(videoId)
+        if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Reading player configuration…")
         val signatureTimestamp = Regex("signatureTimestamp['\":\\s]+(\\d{4,6})")
             .find(playerJs)?.groupValues?.get(1)?.toIntOrNull()
             ?: error("YouTube Music player did not expose signatureTimestamp")
@@ -1173,6 +1176,7 @@ object YouTubeRepository {
                 header("X-Youtube-Bootstrap-Logged-In", accountCookies.isNotBlank().toString())
             }
             .post(body.toString().toRequestBody(jsonType)).build()
+        if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Requesting playback data…")
         return client.newCall(request).execute().use {
             val raw = it.body?.string().orEmpty()
             if (!it.isSuccessful) error("YouTube SABR player returned HTTP ${it.code}")

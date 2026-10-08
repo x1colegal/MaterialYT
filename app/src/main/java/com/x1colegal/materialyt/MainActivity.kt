@@ -947,7 +947,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
 @Composable
 private fun MusicPlaybackLoadingStatus(message: String, modifier: Modifier = Modifier) {
     Row(
-        modifier.background(ComposeColor.Black.copy(alpha = .76f), CircleShape)
+        modifier.background(ComposeColor.Black, CircleShape)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -965,7 +965,7 @@ private fun MusicPlaybackLoadingStatus(message: String, modifier: Modifier = Mod
 private fun PlaybackLoadingStatus(message: String, modifier: Modifier = Modifier) {
     Text(
         message,
-        modifier.background(ComposeColor.Black.copy(alpha = .56f), RoundedCornerShape(12.dp))
+        modifier.background(ComposeColor.Black, RoundedCornerShape(12.dp))
             .padding(horizontal = 12.dp, vertical = 7.dp),
         color = ComposeColor.White,
         style = MaterialTheme.typography.labelMedium,

@@ -98,6 +98,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.DefaultRenderersFactory
 import com.google.android.exoplayer2.mediacodec.MediaCodecSelector
@@ -868,8 +869,20 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
         else if (duration > 0) ((position.toDouble() / duration) * lines.size).toInt().coerceIn(lines.indices) else 0
     LaunchedEffect(currentLine, showLyrics) { if (lines.isNotEmpty()) lyricsState.animateScrollToItem(currentLine, -300) }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    val backgroundArtwork = remember(track.thumbnail) {
+        if (Build.VERSION.SDK_INT >= 31) track.thumbnail
+        else ImageRequest.Builder(activity)
+            .data(track.thumbnail)
+            .transformations(LegacyBlurTransformation(activity, radius = 24f, sampling = 3f))
+            .build()
+    }
     Box(Modifier.fillMaxSize()) {
-        AsyncImage(track.thumbnail, null, Modifier.matchParentSize().blur(42.dp), contentScale = ContentScale.Crop)
+        AsyncImage(
+            backgroundArtwork,
+            null,
+            if (Build.VERSION.SDK_INT >= 31) Modifier.matchParentSize().blur(42.dp) else Modifier.matchParentSize(),
+            contentScale = ContentScale.Crop,
+        )
         Box(Modifier.matchParentSize().background(ComposeColor.Black.copy(alpha = .64f)))
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -933,13 +946,18 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
 
 @Composable
 private fun MusicPlaybackLoadingStatus(message: String, modifier: Modifier = Modifier) {
-    Column(
-        modifier.padding(horizontal = 18.dp, vertical = 10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+    Row(
+        modifier.background(ComposeColor.Black.copy(alpha = .76f), CircleShape)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        CircularProgressIndicator(color = ComposeColor.White)
-        Spacer(Modifier.height(10.dp))
-        Text(message, color = ComposeColor.White, style = MaterialTheme.typography.labelMedium)
+        CircularProgressIndicator(
+            modifier = Modifier.size(20.dp),
+            color = ComposeColor.White,
+            strokeWidth = 2.dp,
+        )
+        Spacer(Modifier.width(9.dp))
+        Text(message, color = ComposeColor.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
     }
 }
 

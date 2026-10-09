@@ -1485,8 +1485,14 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
                 val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.shortsContinuation() } }
                     .onFailure { AppLog.failure("shorts UI continuation", it) }
                     .getOrDefault(emptyList())
+                val wasAtEnd = pager.currentPage == before - 1
                 if (more.isNotEmpty()) shorts = (shorts + more).distinctBy { it.id }
-                if (shorts.size > before) attempts = 0 else {
+                if (shorts.size > before) {
+                    attempts = 0
+                    if (wasAtEnd) {
+                        pager.animateScrollToPage(before)
+                    }
+                } else {
                     attempts++
                     delay(750L * attempts)
                 }
@@ -1495,13 +1501,14 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
         }
     }
     VerticalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
-        ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, audioCodec, quality, onPlayer) { channelUrl = it }
+        ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, audioCodec, quality, onPlayer,
+            waitingForNext = loadingMore && page == pager.currentPage && page == shorts.lastIndex) { channelUrl = it }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onOpenChannel: (String) -> Unit) {
+private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, waitingForNext: Boolean = false, onOpenChannel: (String) -> Unit) {
     val context = LocalContext.current
     val player = remember(item.id) { PlayerFactory.bufferedPlayer(context).apply { repeatMode = Player.REPEAT_MODE_ONE }.also(onPlayer) }
     var streams by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
@@ -1521,9 +1528,17 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var comments by remember(item.id) { mutableStateOf<List<CommentsInfoItem>>(emptyList()) }
     var commentsLoading by remember { mutableStateOf(false) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
+    var hasStartedPlayback by remember(item.id) { mutableStateOf(false) }
+    var shortLoadMessage by remember(item.id) { mutableStateOf<String?>(null) }
     var showPlayPauseIndicator by remember { mutableStateOf(false) }
     var lastActionWasPlay by remember { mutableStateOf(false) }
     var indicatorKey by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(item.id) {
+        PlaybackLoadStatus.message.collect { status ->
+            if (!hasStartedPlayback && status?.mediaId == item.id) shortLoadMessage = status.text
+        }
+    }
 
     fun play(stream: PlayerChoice) {
         val sabr = sabrPlayback
@@ -1616,12 +1631,24 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         lifecycleOwner.lifecycle.addObserver(observer)
         val playbackListener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    hasStartedPlayback = true
+                    shortLoadMessage = null
+                    PlaybackLoadStatus.clear(item.id)
+                }
                 if (!isPlaying) {
                     val pos = player.currentPosition
                     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { YouTubeRepository.reportPlayback(item.id, maxOf(0, pos - 1000L), pos, paused = true) } }
                 }
             }
             override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) {
+                    shortLoadMessage = null
+                    PlaybackLoadStatus.clear(item.id)
+                }
+                else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == item.id) {
+                    PlaybackLoadStatus.show(item.id, "Buffering media…")
+                }
                 if (state == Player.STATE_ENDED) {
                     player.seekTo(0L)
                     player.play()
@@ -1630,6 +1657,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         }
         player.addListener(playbackListener)
         onDispose {
+            PlaybackLoadStatus.clear(item.id)
             lifecycleOwner.lifecycle.removeObserver(observer)
             player.removeListener(playbackListener)
             player.pause()
@@ -1640,7 +1668,8 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     Box(Modifier.fillMaxSize().background(ComposeColor.Black), contentAlignment = Alignment.Center) {
-        Box(Modifier.fillMaxHeight().then(if (tablet) Modifier.widthIn(max = 480.dp).aspectRatio(9f / 16f) else Modifier.fillMaxWidth())) {
+        Box(Modifier.fillMaxHeight().padding(bottom = if (waitingForNext) 72.dp else 0.dp)
+            .then(if (tablet) Modifier.widthIn(max = 480.dp).aspectRatio(9f / 16f) else Modifier.fillMaxWidth())) {
             AndroidView(factory = { PlayerView(it).apply {
                 this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); hideController()
@@ -1684,6 +1713,9 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 }
             }
             error?.let { Text(it, color = ComposeColor.White, modifier = Modifier.align(Alignment.Center).background(ComposeColor.Black.copy(alpha = .7f)).padding(16.dp)) }
+            if (!hasStartedPlayback) shortLoadMessage?.let { message ->
+                PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
+            }
             Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Bottom) {
                 Column(Modifier.weight(1f)) {
                     Row(
@@ -1716,6 +1748,15 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall,
                     modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()))
             }
+        }
+        if (waitingForNext) Row(
+            Modifier.align(Alignment.BottomCenter).height(72.dp).fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(Modifier.size(22.dp), color = ComposeColor.White, strokeWidth = 2.dp)
+            Spacer(Modifier.width(12.dp))
+            Text("Loading more Shorts…", color = ComposeColor.White, style = MaterialTheme.typography.labelLarge)
         }
     }
     if (showDetails) AlertDialog(

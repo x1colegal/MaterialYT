@@ -42,6 +42,7 @@ Only Google sign-in is presented as a web page. Home, History, search, channels,
 ### Shorts
 
 - Native vertical Shorts feed with automatic continuation loading
+- End-of-feed loading shelf with automatic advance when the next Reel page arrives
 - Shorts tabs on channel pages
 - WEB + PoToken + SABR playback using the same current pipeline as regular videos and YouTube Music
 - Comments, channel navigation, playback settings, details, account history reporting, and audio-track selection

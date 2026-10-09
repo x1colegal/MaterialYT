@@ -1870,8 +1870,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var fullscreen by remember { mutableStateOf(false) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
     var speed by remember { mutableFloatStateOf(1f) }
+    var playerGeneration by remember(videoId) { mutableIntStateOf(0) }
+    var decoderRecoveryPosition by remember(videoId) { mutableStateOf<Long?>(null) }
     if (channelUrl != null) { ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }; return }
-    val player = remember(videoId) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
+    val player = remember(videoId, playerGeneration) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
     var isMinimized by remember { mutableStateOf(false) }
     LaunchedEffect(isMinimized) { onPlayerMode?.invoke(!isMinimized) }
     var miniplayerDismissed by remember { mutableStateOf(false) }
@@ -1906,7 +1908,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position); player.setPlaybackSpeed(speed); player.playWhenReady = true
         selectedStream = stream
     }
-    val mediaSession = remember { MediaSessionCompat(context, "MaterialYT Video") }
+    val mediaSession = remember(player) { MediaSessionCompat(context, "MaterialYT Video") }
     LaunchedEffect(info, videoMetadata, channelInfo) {
         if (info != null || videoMetadata != null) {
             val title = info?.name ?: videoMetadata?.title ?: "Video"
@@ -1957,11 +1959,24 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             override fun onRenderedFirstFrame() {
                 hasStartedPlayback = true
+                decoderRecoveryPosition = null
                 PlaybackLoadStatus.clear(videoId)
             }
             override fun onPlayerError(cause: PlaybackException) {
                 Log.e("MaterialYT", "video player ${cause.errorCodeName}", cause)
-                error = "${cause.errorCodeName}: ${cause.cause?.message ?: cause.localizedMessage}"
+                if (cause.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED && selectedStream != null) {
+                    // A runtime MediaCodec failure cannot be recovered by preparing the same
+                    // ExoPlayer instance: its renderer still owns the failed codec. Recreate the
+                    // player, then rebuild the exact same video/audio source at the current point.
+                    // Deliberately do not select another format, codec, or decoder mode here.
+                    decoderRecoveryPosition = player.currentPosition.coerceAtLeast(playerPosition)
+                    error = null
+                    AppLog.event("video decoder restart video=$videoId position=${decoderRecoveryPosition} codec=${selectedStream?.codec}")
+                    PlaybackLoadStatus.show(videoId, "Restarting video decoder…")
+                    playerGeneration++
+                } else {
+                    error = "${cause.errorCodeName}: ${cause.cause?.message ?: cause.localizedMessage}"
+                }
             }
         }
         player.addListener(listener)
@@ -2000,6 +2015,12 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             currentPlayerView?.let(::bindPlaylistControls)
             delay(250)
         }
+    }
+    LaunchedEffect(player, playerGeneration) {
+        val recoveryPosition = decoderRecoveryPosition ?: return@LaunchedEffect
+        val stream = selectedStream ?: return@LaunchedEffect
+        play(stream)
+        player.seekTo(recoveryPosition)
     }
     LaunchedEffect(url, codec, audioCodec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')

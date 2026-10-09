@@ -41,10 +41,10 @@ Only Google sign-in is presented as a web page. Home, History, search, channels,
 
 ### Shorts
 
-> [!NOTE]
-> Shorts support is currently hidden because its upstream extraction flow is unstable. It will be reintroduced after its feed and playback behavior are reliable again.
-
-The retained Shorts player already uses the same SABR playback pipeline as regular videos and YouTube Music; only its feed and public UI remain disabled.
+- Native vertical Shorts feed with automatic continuation loading
+- Shorts tabs on channel pages
+- WEB + PoToken + SABR playback using the same current pipeline as regular videos and YouTube Music
+- Comments, channel navigation, playback settings, details, account history reporting, and audio-track selection
 
 ### Playback
 

@@ -474,6 +474,7 @@ private fun AppScaffold(
     val hideNavigation = playerMode || activity.isFullscreen
     val tabs = buildList {
         add("Home" to Icons.Default.OndemandVideo)
+        add("Shorts" to Icons.Default.SmartDisplay)
         add("YT Music" to Icons.Default.Album)
         if (authenticated) add("History" to Icons.Default.History)
         add("Account" to Icons.Default.AccountCircle)
@@ -483,6 +484,7 @@ private fun AppScaffold(
         Box(Modifier.padding(effectivePadding).fillMaxSize()) {
             when (tabs.getOrNull(tab)?.first) {
                 "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }) { tab = tabs.indexOfFirst { it.first == "Account" } }
+                "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer) { playerMode = it }
                 "YT Music" -> MusicScreen(activity, audioCodec, onPlayer, reopenMusicPlayer) { playerMode = it }
                 "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, loader = { YouTubeRepository.history() })
                 else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
@@ -1312,12 +1314,13 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
     var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
     var selectedTab by remember { mutableStateOf("videos") }
     var selectedVideo by remember { mutableStateOf<String?>(null) }
+    var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
     var tabHandler by remember { mutableStateOf<org.schabi.newpipe.extractor.linkhandler.ListLinkHandler?>(null) }
     var nextPage by remember { mutableStateOf<org.schabi.newpipe.extractor.Page?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    BackHandler { if (selectedVideo != null) selectedVideo = null else onBack() }
+    BackHandler { when { selectedShort != null -> selectedShort = null; selectedVideo != null -> selectedVideo = null; else -> onBack() } }
     LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url) } }
         .onSuccess { channel = it }.onFailure { error = it.message } }
     LaunchedEffect(channel, selectedTab) {
@@ -1372,6 +1375,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
             item {
                 LazyRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item { FilterChip(selectedTab == "videos", { selectedTab = "videos" }, { Text("Videos") }) }
+                    item { FilterChip(selectedTab == "shorts", { selectedTab = "shorts" }, { Text("Shorts") }) }
                     item { FilterChip(selectedTab == "posts", { selectedTab = "posts" }, { Text("Posts") }) }
                 }
             }
@@ -1390,7 +1394,15 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
             } else {
                 items(channelItems) { item -> ResultRow(item, showSubtitle = false) {
                     if (item.infoType == InfoItem.InfoType.STREAM) {
-                        selectedVideo = item.url
+                        if (selectedTab == "shorts") {
+                            val id = item.url.substringAfterLast('/').substringBefore('?').takeIf { it.length == 11 }
+                                ?: Regex("[?&]v=([^&]+)").find(item.url)?.groupValues?.getOrNull(1)
+                            if (id != null) selectedShort = FeedItem(
+                                id, item.name, channel?.name.orEmpty(), item.thumbnails.firstOrNull()?.url.orEmpty(),
+                                9, 16, channel?.avatars?.lastOrNull()?.url.orEmpty(), "https://www.youtube.com/shorts/$id",
+                                channelUrl = url,
+                            )
+                        } else selectedVideo = item.url
                     }
                 } }
                 if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
@@ -1398,6 +1410,11 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         }
     }
     selectedVideo?.let { selected -> VideoScreen(activity, selected, codec, audioCodec, quality, onPlayer) { selectedVideo = null } }
+    selectedShort?.let { selected ->
+        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+            ShortPlayer(activity, selected, true, codec, audioCodec, quality, onPlayer) { }
+        }
+    }
     }
 }
 
@@ -1458,12 +1475,22 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
         return
     }
     val pager = rememberPagerState(pageCount = { shorts.size })
-    LaunchedEffect(pager.currentPage, shorts.size) {
-        if (pager.currentPage >= shorts.lastIndex - 4 && !loadingMore) {
+    LaunchedEffect(pager) {
+        snapshotFlow { pager.currentPage to shorts.size }.collect { (page, _) ->
+            if (page < shorts.lastIndex - 5 || loadingMore) return@collect
             loadingMore = true
-            val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.shortsContinuation() } }
-                .getOrDefault(emptyList())
-            if (more.isNotEmpty()) shorts = (shorts + more).distinctBy { it.id }
+            var attempts = 0
+            while (pager.currentPage >= shorts.lastIndex - 5 && attempts < 4) {
+                val before = shorts.size
+                val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.shortsContinuation() } }
+                    .onFailure { AppLog.failure("shorts UI continuation", it) }
+                    .getOrDefault(emptyList())
+                if (more.isNotEmpty()) shorts = (shorts + more).distinctBy { it.id }
+                if (shorts.size > before) attempts = 0 else {
+                    attempts++
+                    delay(750L * attempts)
+                }
+            }
             loadingMore = false
         }
     }
@@ -1484,6 +1511,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var sabrPlayback by remember(item.id) { mutableStateOf<SabrPlaybackInfo?>(null) }
     var preferredAudioCodec by remember(item.id, audioCodec) { mutableStateOf(audioCodec) }
     var shortInfo by remember(item.id) { mutableStateOf<StreamInfo?>(null) }
+    var shortMetadata by remember(item.id) { mutableStateOf<VideoDetails?>(YouTubeRepository.videoDetails(item.id)) }
     var speed by remember { mutableFloatStateOf(1f) }
     var expandedTitle by remember { mutableStateOf(false) }
     
@@ -1541,6 +1569,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                         it.bitrate, true, sabrFormat = it)
                 }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
                 selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
+                shortMetadata = YouTubeRepository.videoDetails(item.id)
                 AppLog.event("shorts SABR primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
             }.onFailure { AppLog.failure("shorts SABR primary video=${item.id}", it) }
         }
@@ -1694,17 +1723,24 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         confirmButton = { TextButton(onClick = { showDetails = false }) { Text("Close") } },
         title = { Text("Short details") },
         text = {
-            val views = shortInfo?.viewCount ?: -1L
-            val likes = shortInfo?.likeCount ?: -1L
+            LaunchedEffect(item.id) {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(item.id) } }
+                    .onSuccess { shortMetadata = it }
+                    .onFailure { AppLog.failure("shorts details video=${item.id}", it) }
+            }
+            val views = shortInfo?.viewCount?.takeIf { it >= 0 } ?: shortMetadata?.viewCount ?: -1L
+            val likes = shortInfo?.likeCount?.takeIf { it >= 0 }?.let(::formatCount)
+                ?: shortMetadata?.likeText?.takeIf { it.isNotBlank() } ?: "—"
             val published = shortInfo?.uploadDate?.localDateTime?.toLocalDate()?.let { date ->
                 java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.LONG).withLocale(java.util.Locale.getDefault()).format(date)
             } ?: shortInfo?.textualUploadDate?.takeIf { it.isNotBlank() }
-            val raw = shortInfo?.description?.content.orEmpty()
+                ?: shortMetadata?.publishedDate?.takeIf { it.isNotBlank() }
+            val raw = shortInfo?.description?.content.orEmpty().ifBlank { shortMetadata?.description.orEmpty() }
             val description = if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString() else @Suppress("DEPRECATION") Html.fromHtml(raw).toString()
             Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                     Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium) }
-                    Column { Text(if (likes >= 0) formatCount(likes) else "—", style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
+                    Column { Text(likes, style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
                 }
                 Spacer(Modifier.height(16.dp)); Text("Published", style = MaterialTheme.typography.labelMedium); Text(published ?: "Date unavailable", style = MaterialTheme.typography.titleMedium)
                 HorizontalDivider(Modifier.padding(vertical = 16.dp)); Text("Description", style = MaterialTheme.typography.titleMedium); Spacer(Modifier.height(8.dp)); Text(description.ifBlank { "No description was provided." })

@@ -85,6 +85,7 @@ object YouTubeRepository {
     @Volatile private var searchToken: String? = null
     @Volatile private var activeSearchQuery: String? = null
     @Volatile private var shortsToken: String? = null
+    @Volatile private var shortsTokenIsContinuation = false
     @Volatile private var musicHomeToken: String? = null
     @Volatile private var musicSearchToken: String? = null
     @Volatile private var activeMusicQuery: String? = null
@@ -125,6 +126,8 @@ object YouTubeRepository {
         }
     }
     fun shorts(): List<FeedItem> {
+        shortsToken = null
+        shortsTokenIsContinuation = false
         synchronized(shortsSeenIds) { shortsSeenIds.clear() }
         return shortsBatch().also { items -> synchronized(shortsSeenIds) { shortsSeenIds.addAll(items.map { it.id }) } }
     }
@@ -143,34 +146,41 @@ object YouTubeRepository {
         if (!containsAdMarker(seed)) {
             reelFeedItem(seed)?.let(result::add)
         }
-        val continuation = reelContinuation(seed).orEmpty()
-        if (continuation.isNotBlank()) result += shortsSequence(continuation, bootstrap)
+        val continuation = reelInitialContinuation(seed).orEmpty()
+        if (continuation.isNotBlank()) result += shortsSequence(continuation, bootstrap, false)
         return result.distinctBy { it.id }.also { AppLog.event("shorts reel items=${it.size}") }
     }
 
     fun shortsContinuation(): List<FeedItem> {
         return runCatching {
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
-            val token = shortsToken
-            val batches = if (token != null) listOf(shortsSequence(token, bootstrap)) else List(4) { shortsBatch() }
-            batches.asSequence().flatten().filter { item -> synchronized(shortsSeenIds) { shortsSeenIds.add(item.id) } }.toList()
+            val result = mutableListOf<FeedItem>()
+            var attempts = 0
+            while (result.size < 8 && attempts < 6) {
+                val token = shortsToken
+                val batch = if (token != null) shortsSequence(token, bootstrap, shortsTokenIsContinuation) else shortsBatch()
+                result += batch.filter { item -> synchronized(shortsSeenIds) { shortsSeenIds.add(item.id) } }
+                attempts++
+            }
+            result
         }.onFailure { AppLog.failure("shorts continuation", it) }.getOrDefault(emptyList())
     }
 
-    private fun shortsSequence(token: String, bootstrap: Bootstrap): List<FeedItem> {
+    private fun shortsSequence(token: String, bootstrap: Bootstrap, continuationToken: Boolean): List<FeedItem> {
         val origin = "https://www.youtube.com"
         val sequence = post("$origin/youtubei/v1/reel/reel_watch_sequence?key=${bootstrap.key}", JSONObject()
-            .put("context", context("WEB", bootstrap.version)).put("sequenceParams", token), origin)
-        var next = reelContinuation(sequence).orEmpty()
+            .put("context", context("WEB", bootstrap.version))
+            .put(if (continuationToken) "continuation" else "sequenceParams", token), origin)
+        var next = reelNextContinuation(sequence).orEmpty()
         val result = mutableListOf<FeedItem>()
-        val entries = sequence.optJSONArray("entries")
+        val entries = sequence.optJSONArray("entries") ?: findArray(sequence, "entries")
         if (entries != null) for (index in 0 until entries.length()) {
             val entry = entries.optJSONObject(index) ?: continue
             if (containsAdMarker(entry)) continue
             val watch = entry.optJSONObject("command")?.optJSONObject("reelWatchEndpoint") ?: continue
             if (containsAdMarker(watch)) continue
             val videoId = watch.optString("videoId")
-            val params = watch.optString("params")
+            val params = watch.optString("params").ifBlank { watch.optString("playerParams") }
             if (videoId.length != 11 || params.isBlank()) continue
             runCatching {
                 post("$origin/youtubei/v1/reel/reel_item_watch?key=${bootstrap.key}", JSONObject()
@@ -179,18 +189,27 @@ object YouTubeRepository {
             }.getOrNull()?.let { details ->
                 if (!containsAdMarker(details)) {
                     reelFeedItem(details, watch)?.let(result::add)
-                    val candidate = reelContinuation(details).orEmpty()
-                    if (candidate.isNotBlank() && candidate != token) next = candidate
+                    if (next.isBlank()) {
+                        val candidate = reelInitialContinuation(details).orEmpty()
+                        if (candidate.isNotBlank() && candidate != token) next = candidate
+                    }
                 }
             }
         }
         shortsToken = next.takeIf { it.isNotBlank() && it != token }
-        return result.distinctBy { it.id }.also { AppLog.event("shorts continuation items=${it.size} hasNext=${shortsToken != null}") }
+        shortsTokenIsContinuation = shortsToken != null && sequence.optString("continuation").isNotBlank()
+        return result.distinctBy { it.id }.also {
+            AppLog.event("shorts continuation request=${if (continuationToken) "continuation" else "sequenceParams"} entries=${entries?.length() ?: 0} items=${it.size} hasNext=${shortsToken != null} nextType=${if (shortsTokenIsContinuation) "continuation" else "sequenceParams"}")
+        }
     }
 
-    private fun reelContinuation(value: JSONObject): String? =
+    private fun reelInitialContinuation(value: JSONObject): String? =
         value.optString("sequenceContinuation").takeIf(String::isNotBlank)
-            ?: value.optString("continuation").takeIf(String::isNotBlank)
+            ?: value.optJSONObject("continuationEndpoint")?.optJSONObject("continuationCommand")
+                ?.optString("token")?.takeIf(String::isNotBlank)
+
+    private fun reelNextContinuation(value: JSONObject): String? =
+        value.optString("continuation").takeIf(String::isNotBlank)
             ?: value.optJSONObject("continuationEndpoint")?.optJSONObject("continuationCommand")
                 ?.optString("token")?.takeIf(String::isNotBlank)
 

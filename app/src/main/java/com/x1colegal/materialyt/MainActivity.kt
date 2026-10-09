@@ -1553,7 +1553,12 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         player.setMediaSource(source); player.prepare(); player.setPlaybackSpeed(speed); player.playWhenReady = active
         selected = stream
     }
-    LaunchedEffect(item.id, codec, preferredAudioCodec, quality) {
+    LaunchedEffect(item.id, active, codec, preferredAudioCodec, quality) {
+        if (!active) {
+            player.stop()
+            player.clearMediaItems()
+            return@LaunchedEffect
+        }
         streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; sabrPlayback = null; error = null
         val infoResult = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(item.id) } }
             else Result.failure(IllegalStateException("NewPipe disabled by playback backend setting"))
@@ -1640,6 +1645,11 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     val pos = player.currentPosition
                     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { YouTubeRepository.reportPlayback(item.id, maxOf(0, pos - 1000L), pos, paused = true) } }
                 }
+            }
+            override fun onRenderedFirstFrame() {
+                hasStartedPlayback = true
+                shortLoadMessage = null
+                PlaybackLoadStatus.clear(item.id)
             }
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) {
@@ -1861,7 +1871,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var channelUrl by remember { mutableStateOf<String?>(null) }
     var speed by remember { mutableFloatStateOf(1f) }
     if (channelUrl != null) { ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }; return }
-    val player = remember { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
+    val player = remember(videoId) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
     var isMinimized by remember { mutableStateOf(false) }
     LaunchedEffect(isMinimized) { onPlayerMode?.invoke(!isMinimized) }
     var miniplayerDismissed by remember { mutableStateOf(false) }
@@ -1905,7 +1915,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             activity.showPlaybackNotification(mediaSession, title, author, thumb, player.isPlaying)
         }
     }
-    DisposableEffect(Unit) {
+    DisposableEffect(player, videoId) {
         activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         activity.videoPlayerActive(true)
         mediaSession.setCallback(object : MediaSessionCompat.Callback() {
@@ -1945,6 +1955,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO)
                     .setState(if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED, player.currentPosition.coerceAtLeast(0L), if (isPlaying) 1f else 0f).build())
             }
+            override fun onRenderedFirstFrame() {
+                hasStartedPlayback = true
+                PlaybackLoadStatus.clear(videoId)
+            }
             override fun onPlayerError(cause: PlaybackException) {
                 Log.e("MaterialYT", "video player ${cause.errorCodeName}", cause)
                 error = "${cause.errorCodeName}: ${cause.cause?.message ?: cause.localizedMessage}"
@@ -1979,6 +1993,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             playerPosition = player.currentPosition.coerceAtLeast(0L)
             playerBuffered = player.bufferedPosition.coerceAtLeast(playerPosition)
             playerDuration = player.duration.coerceAtLeast(0L)
+            if (!hasStartedPlayback && playerPosition > 0L) {
+                hasStartedPlayback = true
+                PlaybackLoadStatus.clear(videoId)
+            }
             currentPlayerView?.let(::bindPlaylistControls)
             delay(250)
         }

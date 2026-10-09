@@ -1849,7 +1849,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var selectedStream by remember { mutableStateOf<PlayerChoice?>(null) }
     var sabrPlayback by remember { mutableStateOf<SabrPlaybackInfo?>(null) }
     var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
-    var hasStartedPlayback by remember { mutableStateOf(false) }
+    var hasStartedPlayback by remember(videoId) { mutableStateOf(false) }
     val videoLoadStatus by PlaybackLoadStatus.message.collectAsState()
     val videoLoadMessage = videoLoadStatus?.takeIf { it.mediaId == videoId }?.text
     var playerPosition by remember { mutableLongStateOf(0L) }
@@ -2197,7 +2197,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
                 modifier = Modifier.fillMaxSize().padding(bottom = 8.dp)
             )
-            if (videoLoadMessage != null) PlaybackLoadingStatus(videoLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
+            if (!hasStartedPlayback) videoLoadMessage?.let { message ->
+                PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
+            }
             AnimatedVisibility(controllerVisible, modifier = Modifier.align(Alignment.TopCenter)) { Row(
                 Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 2.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -2217,7 +2219,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                             AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
-                            if (videoLoadMessage != null) PlaybackLoadingStatus(videoLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
+                            if (!hasStartedPlayback) videoLoadMessage?.let { message ->
+                                PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
+                            }
                         }
                         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
@@ -2262,7 +2266,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 item {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                         AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
-                        if (videoLoadMessage != null) PlaybackLoadingStatus(videoLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
+                        if (!hasStartedPlayback) videoLoadMessage?.let { message ->
+                            PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
+                        }
                     }
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }

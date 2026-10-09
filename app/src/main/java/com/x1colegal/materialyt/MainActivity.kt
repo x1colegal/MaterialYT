@@ -11,6 +11,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
@@ -51,6 +52,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -86,6 +88,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -139,6 +142,31 @@ enum class AudioCodecChoice(val label: String, val tokens: List<String>) {
 }
 enum class QualityChoice(val label: String, val height: Int) {
     AUTO("Auto", 0), UHD2160("2160p", 2160), QHD1440("1440p", 1440), FHD1080("1080p", 1080), HD720("720p", 720), SD480("480p", 480), SD360("360p", 360)
+}
+
+private fun isTelevision(context: Context): Boolean {
+    val mode = context.resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK
+    return mode == Configuration.UI_MODE_TYPE_TELEVISION ||
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+}
+
+@Composable
+private fun Modifier.tvCardFocus(shape: RoundedCornerShape = RoundedCornerShape(16.dp)): Modifier {
+    if (!isTelevision(LocalContext.current)) return this
+    var focused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(if (focused) 1.055f else 1f, label = "tv_card_focus")
+    return this
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+        }
+        .border(
+            width = if (focused) 3.dp else 0.dp,
+            color = if (focused) MaterialTheme.colorScheme.primary else ComposeColor.Transparent,
+            shape = shape
+        )
+        .clip(shape)
+        .onFocusChanged { focused = it.isFocused }
 }
 
 private data class PlayerChoice(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val videoOnly: Boolean, val audioTrackName: String = "", val audioTrackId: String = "", val originalAudio: Boolean = false, val sabrFormat: SabrFormat? = null)
@@ -451,7 +479,7 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
         activity.window.navigationBarColor = if (theme == ThemeMode.OLED) Color.BLACK else scheme.surface.value.toInt()
     }
     MaterialTheme(colorScheme = scheme) {
-        AppScaffold(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme = { theme = it; prefs.edit().putString("theme", it.name).apply() },
+        AppScaffold(activity, isTelevision(activity), theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme = { theme = it; prefs.edit().putString("theme", it.name).apply() },
             onColor = { color = it; prefs.edit().putString("color", it.name).apply() },
             onCodec = { codec = it; prefs.edit().putString("codec", it.name).apply() },
             onAudioCodec = { audioCodec = it; prefs.edit().putString("audio_codec", it.name).apply() },
@@ -462,7 +490,7 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
 
 @Composable
 private fun AppScaffold(
-    activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode,
+    activity: MainActivity, television: Boolean, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode,
     onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit,
     onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit,
     onPlayer: (ExoPlayer) -> Unit
@@ -492,7 +520,43 @@ private fun AppScaffold(
         }
     }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-    if (tablet) {
+    if (television) {
+        Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            if (!hideNavigation) {
+                NavigationRail(
+                    modifier = Modifier.width(176.dp),
+                    header = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Surface(Modifier.size(54.dp), RoundedCornerShape(16.dp), color = ComposeColor(0xFFFF1744)) {
+                                Icon(Icons.Default.PlayArrow, null, Modifier.padding(11.dp), tint = ComposeColor.White)
+                            }
+                            Text("MaterialYT", Modifier.padding(top = 10.dp, bottom = 18.dp), style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                ) {
+                    tabs.forEachIndexed { index, item ->
+                        NavigationRailItem(
+                            selected = tab == index,
+                            onClick = { playerMode = false; tab = index },
+                            icon = { Icon(item.second, null, Modifier.size(30.dp)) },
+                            label = { Text(item.first, style = MaterialTheme.typography.labelLarge) },
+                            alwaysShowLabel = true,
+                            modifier = Modifier.padding(vertical = 5.dp)
+                        )
+                    }
+                }
+            }
+            Scaffold(
+                Modifier.weight(1f),
+                bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ } },
+                content = { padding ->
+                    Box(Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp)) {
+                        content(PaddingValues(0.dp))
+                    }
+                }
+            )
+        }
+    } else if (tablet) {
         Row(Modifier.fillMaxSize()) {
             if (!hideNavigation) NavigationRail {
                 Spacer(Modifier.weight(1f))
@@ -1127,6 +1191,7 @@ private fun ChannelRow(item: FeedItem, click: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .tvCardFocus()
             .clickable(onClick = click)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1192,7 +1257,7 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
         ChannelRow(item, click)
         return
     }
-    Column(Modifier.fillMaxWidth().padding(bottom = 18.dp).clickable(onClick = click)) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 18.dp).tvCardFocus().clickable(onClick = click)) {
         AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(item.thumbnailWidth.toFloat() / item.thumbnailHeight.coerceAtLeast(1)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
         Row(Modifier.padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.Top) {
             if (item.channelThumbnail.isNotBlank()) AsyncImage(item.channelThumbnail, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
@@ -1235,7 +1300,7 @@ private fun TopicChips(labels: List<String>) {
 @Composable
 private fun ResultRow(item: InfoItem, showSubtitle: Boolean = true, click: () -> Unit) {
     val isChannel = item.infoType == InfoItem.InfoType.CHANNEL
-    Row(Modifier.fillMaxWidth().clickable(onClick = click).padding(horizontal = 16.dp, vertical = if (isChannel) 14.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().tvCardFocus().clickable(onClick = click).padding(horizontal = 16.dp, vertical = if (isChannel) 14.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
         val thumb = item.thumbnails.firstOrNull()?.url
         if (isChannel) {
             if (!thumb.isNullOrBlank()) {

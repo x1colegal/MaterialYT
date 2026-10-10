@@ -553,15 +553,10 @@ private fun AppScaffold(
                     Spacer(Modifier.weight(1f))
                 }
             }
-            Scaffold(
-                Modifier.weight(1f),
-                bottomBar = {},
-                content = { padding ->
-                    Box(Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp)) {
-                        content(PaddingValues(0.dp))
-                    }
-                }
-            )
+            Box(
+                Modifier.weight(1f).fillMaxHeight()
+                    .then(if (hideNavigation) Modifier else Modifier.padding(horizontal = 20.dp))
+            ) { content(PaddingValues(0.dp)) }
         }
     } else if (tablet) {
         Row(Modifier.fillMaxSize()) {
@@ -762,7 +757,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             }
         } else {
             val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-            if (tablet) {
+            if (tablet || television) {
                 LaunchedEffect(homeGridState, feed.size, query) {
                     snapshotFlow { homeGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
                         if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
@@ -823,7 +818,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-        if (tablet) {
+        if (tablet || television) {
             LazyVerticalGrid(if (television) GridCells.Fixed(5) else GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
             }
@@ -909,7 +904,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-        if (tablet) {
+        if (tablet || television) {
             LaunchedEffect(musicGridState, tracks.size, query) {
                 snapshotFlow { musicGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
                     if (query.isNotBlank() && tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
@@ -973,7 +968,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             AutoMusicService.play(activity, track, preferredCodec)
         }
     }
-    if ((showLyrics || LocalConfiguration.current.smallestScreenWidthDp >= 600) && lyrics == null && lyricsError == null) LaunchedEffect(track.id) {
+    if ((showLyrics || television || LocalConfiguration.current.smallestScreenWidthDp >= 600) && lyrics == null && lyricsError == null) LaunchedEffect(track.id) {
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.lyrics(track.id) } }
             .onSuccess { lyrics = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) lyricsError = it.message ?: "Lyrics unavailable" }
     }
@@ -1003,7 +998,8 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                     Column(Modifier.width(340.dp).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                         Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(24.dp))) {
                             AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                            if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
+                            val visibleLoadMessage = musicLoadMessage ?: if (!playing && position == 0L) "Preparing playback…" else null
+                            if (visibleLoadMessage != null) MusicPlaybackLoadingStatus(visibleLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
                     }
                     Column(Modifier.weight(1f).fillMaxHeight()) {
@@ -1021,7 +1017,12 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                         }
                         Text("Lyrics", color = ComposeColor.White, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp, bottom = 6.dp))
                         LazyColumn(state = lyricsState, modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            if (lines.isEmpty()) item { Text(lyricsError ?: if (lyrics == null) "Loading lyrics…" else "Lyrics unavailable", color = ComposeColor.White.copy(alpha = .65f)) }
+                            if (lines.isEmpty()) item {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    if (lyrics == null && lyricsError == null) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = ComposeColor.White)
+                                    Text(lyricsError ?: if (lyrics == null) "Loading lyrics…" else "Lyrics unavailable", color = ComposeColor.White.copy(alpha = .65f))
+                                }
+                            }
                             else items(lines.size) { index ->
                                 Text(lines[index].text, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .46f), style = if (index == currentLine) MaterialTheme.typography.titleLarge else MaterialTheme.typography.bodyLarge)
                             }
@@ -1650,7 +1651,6 @@ private fun CommunityCommentsButton(post: CommunityPost) {
 @Composable
 private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit) {
     val television = isTelevision(LocalContext.current)
-    val scope = rememberCoroutineScope()
     var shorts by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
@@ -1668,6 +1668,42 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
     if (shorts.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             if (error == null) CircularProgressIndicator() else Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(24.dp))
+        }
+        return
+    }
+    if (television) {
+        var page by remember { mutableIntStateOf(0) }
+        LaunchedEffect(page, shorts.size) {
+            if (page < shorts.lastIndex - 5 || loadingMore) return@LaunchedEffect
+            loadingMore = true
+            val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.shortsContinuation() } }
+                .onFailure { AppLog.failure("shorts TV continuation", it) }
+                .getOrDefault(emptyList())
+            if (more.isNotEmpty()) shorts = (shorts + more).distinctBy { it.id }
+            loadingMore = false
+        }
+        Box(
+            Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
+                when (event.nativeKeyEvent.keyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        if (page < shorts.lastIndex) page++
+                        true
+                    }
+                    android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                        if (page > 0) page--
+                        true
+                    }
+                    else -> false
+                }
+            }
+        ) {
+            shorts.getOrNull(page)?.let { item ->
+                key(item.id) {
+                    ShortPlayer(activity, item, true, codec, audioCodec, quality, onPlayer,
+                        waitingForNext = loadingMore && page == shorts.lastIndex) { channelUrl = it }
+                }
+            }
         }
         return
     }
@@ -1695,22 +1731,9 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
     }
     VerticalPager(
         state = pager,
-        userScrollEnabled = !television,
+        userScrollEnabled = true,
         key = { shorts[it].id },
-        modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
-            if (!television || event.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
-            when (event.nativeKeyEvent.keyCode) {
-                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    if (pager.currentPage < shorts.lastIndex) scope.launch { pager.animateScrollToPage(pager.currentPage + 1) }
-                    true
-                }
-                android.view.KeyEvent.KEYCODE_DPAD_UP -> {
-                    if (pager.currentPage > 0) scope.launch { pager.animateScrollToPage(pager.currentPage - 1) }
-                    true
-                }
-                else -> false
-            }
-        },
+        modifier = Modifier.fillMaxSize(),
     ) { page ->
         ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, audioCodec, quality, onPlayer,
             waitingForNext = loadingMore && page == pager.currentPage && page == shorts.lastIndex) { channelUrl = it }
@@ -2095,6 +2118,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var decoderRecoveryPosition by remember(videoId) { mutableStateOf<Long?>(null) }
     if (channelUrl != null) { ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }; return }
     val player = remember(videoId, playerGeneration) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
+    DisposableEffect(television) {
+        if (television) activity.fullscreen(true)
+        onDispose { if (television) activity.fullscreen(false) }
+    }
     var isMinimized by remember { mutableStateOf(false) }
     LaunchedEffect(isMinimized) { onPlayerMode?.invoke(!isMinimized) }
     var miniplayerDismissed by remember { mutableStateOf(false) }

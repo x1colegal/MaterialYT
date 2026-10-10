@@ -559,7 +559,7 @@ private fun AppScaffold(
             }
             Box(
                 Modifier.weight(1f).fillMaxHeight()
-                    .then(if (hideNavigation) Modifier else Modifier.padding(horizontal = 20.dp))
+                    .then(if (hideNavigation) Modifier else Modifier.padding(horizontal = 12.dp))
             ) { content(PaddingValues(0.dp)) }
         }
     } else if (tablet) {
@@ -768,7 +768,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                         if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
                     }
                 }
-                LazyVerticalGrid(if (television) GridCells.Fixed(3) else GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(if (television) 8.dp else 12.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                LazyVerticalGrid(if (television) GridCells.Fixed(3) else GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(if (television) 4.dp else 12.dp), horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (television) 12.dp else 16.dp)) {
                     if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
@@ -824,7 +824,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet || television) {
-            LazyVerticalGrid(if (television) GridCells.Fixed(3) else GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            LazyVerticalGrid(if (television) GridCells.Fixed(3) else GridCells.Adaptive(320.dp), contentPadding = PaddingValues(if (television) 4.dp else 8.dp), horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (television) 12.dp else 16.dp)) {
                 gridItems(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
             }
         } else {
@@ -920,8 +920,8 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                 if (television) GridCells.Fixed(3) else GridCells.Adaptive(minSize = 300.dp),
                 state = musicGridState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(if (television) 4.dp else 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 gridItems(tracks) { track -> MusicCard(track) { selected = track } }
@@ -2726,6 +2726,8 @@ private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCo
 
 @Composable
 private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onAuth: (Boolean) -> Unit) {
+    val television = isTelevision(LocalContext.current)
+    val headingColor = if (television) ComposeColor.White else MaterialTheme.colorScheme.onBackground
     var destination by remember { mutableStateOf("account") }
     var signedIn by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     var playbackBackend by remember { mutableStateOf(PlaybackBackendPreferences.backend) }
@@ -2734,7 +2736,7 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
     if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, {}, { destination = "account" }) { YouTubeRepository.library() }; return }
     if (destination == "account") {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            item { Text("Account", style = MaterialTheme.typography.headlineMedium) }
+            item { Text("Account", color = headingColor, style = MaterialTheme.typography.headlineMedium) }
             item { ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp)) { Column(Modifier.padding(22.dp)) { Icon(Icons.Default.AccountCircle, null, Modifier.size(54.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(12.dp)); Text(if (signedIn) "Google account connected" else "Make MaterialYT yours", style = MaterialTheme.typography.titleLarge); Text(if (signedIn) "Your session powers native Home, History, YT Music, playback and comments." else "Sign in once. Only the Google login screen uses the web; your content stays in MaterialYT's native UI."); Spacer(Modifier.height(16.dp)); Button(onClick = { destination = "login" }) { Text(if (signedIn) "Refresh sign-in" else "Sign in with Google") } } } }
             if (signedIn) item { ListItem(headlineContent = { Text("Your Account") }, supportingContent = { Text("Open your channel") }, leadingContent = { Icon(Icons.Default.AccountCircle, null) }, trailingContent = { Icon(Icons.Default.ChevronRight, null) }, modifier = Modifier.clickable { destination = "your_account" }) }
             if (signedIn) item { ListItem(headlineContent = { Text("Playlists") }, leadingContent = { Icon(Icons.Default.PlaylistPlay, null) }, trailingContent = { Icon(Icons.Default.ChevronRight, null) }, modifier = Modifier.clickable { destination = "playlists" }) }
@@ -2743,7 +2745,7 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
         return
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item { Row(verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = { destination = "account" }) { Icon(Icons.Default.ArrowBack, "Back to Account") }; Text("Settings", style = MaterialTheme.typography.headlineMedium) } }
+        item { Row(verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = { destination = "account" }) { Icon(Icons.Default.ArrowBack, "Back to Account", tint = headingColor) }; Text("Settings", color = headingColor, style = MaterialTheme.typography.headlineMedium) } }
         item {
             val prefs = activity.getSharedPreferences("settings", 0)
             var backgroundPlay by remember { mutableStateOf(prefs.getBoolean("background_play", false)) }

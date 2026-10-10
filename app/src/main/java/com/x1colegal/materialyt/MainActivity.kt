@@ -1362,12 +1362,12 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
     val television = isTelevision(LocalContext.current)
     if (television) {
         Column(
-            modifier = Modifier.fillMaxWidth().tvCardFocus(RoundedCornerShape(14.dp)).clickable(onClick = click)
+            modifier = Modifier.fillMaxWidth().tvCardFocus().clickable(onClick = click)
         ) {
             AsyncImage(
                 item.thumbnail,
                 null,
-                Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
+                Modifier.fillMaxWidth().aspectRatio(16f / 9f)
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentScale = ContentScale.Crop,
             )
@@ -1395,17 +1395,18 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
 
 @Composable
 private fun MusicCard(item: FeedItem, click: () -> Unit) {
+    val television = isTelevision(LocalContext.current)
     Column(
-        Modifier.fillMaxWidth().tvCardFocus(RoundedCornerShape(18.dp)).clickable(onClick = click).padding(8.dp)
+        Modifier.fillMaxWidth().tvCardFocus(if (television) androidx.compose.ui.graphics.RectangleShape else RoundedCornerShape(18.dp)).clickable(onClick = click).padding(8.dp)
     ) {
         AsyncImage(
             item.thumbnail,
             null,
-            Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(16.dp))
+            Modifier.fillMaxWidth().aspectRatio(1f).then(if (television) Modifier else Modifier.clip(RoundedCornerShape(16.dp)))
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentScale = ContentScale.Crop,
         )
-        Text(item.title, Modifier.padding(top = 10.dp).then(if (isTelevision(LocalContext.current)) Modifier.autoMarquee() else Modifier), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+        Text(item.title, Modifier.padding(top = 10.dp).then(if (television) Modifier.autoMarquee() else Modifier), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
@@ -2494,6 +2495,16 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
                     setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE })
+                    setOnKeyListener { _, keyCode, event ->
+                        val confirm = keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                            keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                            keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+                        if (confirm && event.action == android.view.KeyEvent.ACTION_UP && !controllerVisible) {
+                            showController()
+                            controllerVisible = true
+                            true
+                        } else false
+                    }
                     currentPlayerView = this
                     activity.visiblePlayerView(this)
                     post {

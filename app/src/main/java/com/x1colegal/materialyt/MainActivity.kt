@@ -91,6 +91,9 @@ import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -765,7 +768,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                         if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
                     }
                 }
-                LazyVerticalGrid(if (television) GridCells.Fixed(4) else GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                LazyVerticalGrid(if (television) GridCells.Fixed(5) else GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
@@ -821,7 +824,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet) {
-            LazyVerticalGrid(if (television) GridCells.Fixed(4) else GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            LazyVerticalGrid(if (television) GridCells.Fixed(5) else GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
             }
         } else {
@@ -945,8 +948,6 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
         onBack()
     }
     var showLyrics by remember { mutableStateOf(false) }
-    var showMusicSettings by remember { mutableStateOf(false) }
-    var activeMusicCodec by remember(track.id) { mutableStateOf(preferredCodec) }
     
     var lyrics by remember { mutableStateOf<List<LyricLine>?>(null) }
     var lyricsError by remember { mutableStateOf<String?>(null) }
@@ -989,6 +990,48 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             .transformations(LegacyBlurTransformation(activity, radius = 12f, sampling = 2f))
             .build()
     }
+    if (television) {
+        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+            AsyncImage(backgroundArtwork, null, Modifier.matchParentSize().blur(12.dp), contentScale = ContentScale.Crop)
+            Box(Modifier.matchParentSize().background(ComposeColor.Black.copy(alpha = .78f)))
+            Column(Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 28.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = ::closePlayer, modifier = Modifier.tvCardFocus(CircleShape)) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
+                    Text("Now playing", Modifier.padding(start = 12.dp), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall)
+                }
+                Row(Modifier.fillMaxSize().padding(top = 18.dp), horizontalArrangement = Arrangement.spacedBy(42.dp)) {
+                    Column(Modifier.width(340.dp).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(24.dp))) {
+                            AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                            if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
+                        }
+                    }
+                    Column(Modifier.weight(1f).fillMaxHeight()) {
+                        Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(track.subtitle, color = ComposeColor.White.copy(alpha = .7f), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.height(18.dp))
+                        Slider(
+                            value = if (duration > 0) position.toFloat() / duration else 0f,
+                            onValueChange = { if (duration > 0) AutoMusicService.seekTo((duration * it).toLong()) },
+                            modifier = Modifier.fillMaxWidth().tvCardFocus(RoundedCornerShape(12.dp)),
+                        )
+                        Row(Modifier.fillMaxWidth()) { Text(formatTime(position), color = ComposeColor.White.copy(alpha = .75f)); Spacer(Modifier.weight(1f)); Text(formatTime(duration), color = ComposeColor.White.copy(alpha = .75f)) }
+                        IconButton(onClick = { AutoMusicService.toggle() }, Modifier.align(Alignment.CenterHorizontally).size(78.dp).tvCardFocus(CircleShape)) {
+                            Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White)
+                        }
+                        Text("Lyrics", color = ComposeColor.White, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp, bottom = 6.dp))
+                        LazyColumn(state = lyricsState, modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (lines.isEmpty()) item { Text(lyricsError ?: if (lyrics == null) "Loading lyrics…" else "Lyrics unavailable", color = ComposeColor.White.copy(alpha = .65f)) }
+                            else items(lines.size) { index ->
+                                Text(lines[index].text, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .46f), style = if (index == currentLine) MaterialTheme.typography.titleLarge else MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
     Box(Modifier.fillMaxSize()) {
         AsyncImage(
             backgroundArtwork,
@@ -1001,7 +1044,6 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             Row(Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = ::closePlayer, modifier = Modifier.tvCardFocus(CircleShape)) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
                 Text("Now playing", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
-                IconButton(onClick = { showMusicSettings = true }, modifier = Modifier.tvCardFocus(CircleShape)) { Icon(Icons.Default.Settings, "Audio settings", tint = ComposeColor.White) }
             }
             if (tablet) {
                 Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
@@ -1061,26 +1103,6 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             }
         }
     }
-    if (showMusicSettings) AlertDialog(
-        onDismissRequest = { showMusicSettings = false },
-        title = { Text("Audio settings") },
-        text = {
-            Column {
-                AudioCodecChoice.entries.forEach { choice ->
-                    ListItem(
-                        headlineContent = { Text(choice.label) },
-                        leadingContent = { RadioButton(activeMusicCodec == choice, null) },
-                        modifier = Modifier.tvCardFocus().clickable {
-                            activeMusicCodec = choice
-                            AutoMusicService.play(activity, track, choice)
-                            showMusicSettings = false
-                        },
-                    )
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = { showMusicSettings = false }) { Text("Close") } },
-    )
 }
 
 @Composable
@@ -1333,16 +1355,16 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
     val television = isTelevision(LocalContext.current)
     if (television) {
         Surface(
-            modifier = Modifier.fillMaxWidth().padding(6.dp).tvCardFocus(RoundedCornerShape(18.dp)).clickable(onClick = click),
-            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth().padding(3.dp).tvCardFocus(RoundedCornerShape(14.dp)).clickable(onClick = click),
+            shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f),
         ) {
             Column {
                 AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
-                Column(Modifier.padding(12.dp)) {
-                    Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(4.dp))
-                    Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Column(Modifier.padding(horizontal = 9.dp, vertical = 8.dp)) {
+                    Text(item.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(2.dp))
+                    Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
@@ -1627,6 +1649,8 @@ private fun CommunityCommentsButton(post: CommunityPost) {
 
 @Composable
 private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit) {
+    val television = isTelevision(LocalContext.current)
+    val scope = rememberCoroutineScope()
     var shorts by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
@@ -1669,7 +1693,25 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
             loadingMore = false
         }
     }
-    VerticalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+    VerticalPager(
+        state = pager,
+        userScrollEnabled = !television,
+        key = { shorts[it].id },
+        modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+            if (!television || event.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
+            when (event.nativeKeyEvent.keyCode) {
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (pager.currentPage < shorts.lastIndex) scope.launch { pager.animateScrollToPage(pager.currentPage + 1) }
+                    true
+                }
+                android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                    if (pager.currentPage > 0) scope.launch { pager.animateScrollToPage(pager.currentPage - 1) }
+                    true
+                }
+                else -> false
+            }
+        },
+    ) { page ->
         ShortPlayer(activity, shorts[page], page == pager.currentPage, codec, audioCodec, quality, onPlayer,
             waitingForNext = loadingMore && page == pager.currentPage && page == shorts.lastIndex) { channelUrl = it }
     }
@@ -1924,7 +1966,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     Spacer(Modifier.height(10.dp))
                     Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
                 }
-                Column(Modifier.focusGroup(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { showDetails = true }, modifier = Modifier.tvCardFocus(CircleShape).then(if (television) Modifier.focusRequester(shortActionFocus) else Modifier)) { Icon(Icons.Default.MoreVert, "Short details", tint = ComposeColor.White) }
                     IconButton(onClick = {
                         showComments = true; commentsLoading = true
@@ -2405,7 +2447,41 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         return
     }
 
-    if (activity.pipMode) {
+    if (television) {
+        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+            AndroidView(
+                factory = { PlayerView(it).apply {
+                    this.player = player
+                    useController = true
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    controllerShowTimeoutMs = 3_000
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+                    setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE })
+                    currentPlayerView = this
+                    activity.visiblePlayerView(this)
+                    post {
+                        bindPlaylistControls(this)
+                        requestFocus()
+                        showController()
+                    }
+                } },
+                update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (!hasStartedPlayback) videoLoadMessage?.let { message ->
+                PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
+            }
+            AnimatedVisibility(controllerVisible, modifier = Modifier.align(Alignment.TopEnd)) {
+                Row(Modifier.padding(24.dp)) {
+                    IconButton(onClick = { showPlayerSettings = true }, modifier = Modifier.tvCardFocus(CircleShape)) {
+                        Icon(Icons.Default.Settings, "Player settings", tint = ComposeColor.White)
+                    }
+                }
+            }
+        }
+    } else if (activity.pipMode) {
         AndroidView(
             factory = { PlayerView(it).apply { this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER); currentPlayerView = this; activity.visiblePlayerView(this) } },
             modifier = Modifier.fillMaxSize(),

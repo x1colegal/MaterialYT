@@ -1357,18 +1357,20 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
     }
     val television = isTelevision(LocalContext.current)
     if (television) {
-        Surface(
-            modifier = Modifier.fillMaxWidth().tvCardFocus(RoundedCornerShape(14.dp)).clickable(onClick = click),
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f),
+        Column(
+            modifier = Modifier.fillMaxWidth().tvCardFocus(RoundedCornerShape(14.dp)).clickable(onClick = click)
         ) {
-            Column {
-                AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
-                Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp).heightIn(min = 62.dp)) {
-                    Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(4.dp))
-                    Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+            AsyncImage(
+                item.thumbnail,
+                null,
+                Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentScale = ContentScale.Crop,
+            )
+            Column(Modifier.padding(horizontal = 4.dp, vertical = 10.dp).heightIn(min = 66.dp)) {
+                Text(item.title, color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(4.dp))
+                Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         return
@@ -1399,8 +1401,8 @@ private fun MusicCard(item: FeedItem, click: () -> Unit) {
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentScale = ContentScale.Crop,
         )
-        Text(item.title, Modifier.padding(top = 10.dp), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(item.title, Modifier.padding(top = 10.dp), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

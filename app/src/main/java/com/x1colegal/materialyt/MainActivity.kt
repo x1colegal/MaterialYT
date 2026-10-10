@@ -983,7 +983,9 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     val timed = lines.any { it.startMs >= 0 }
     val currentLine = if (lines.isEmpty()) 0 else if (timed) lines.indexOfLast { it.startMs in 0..position }.coerceAtLeast(0)
         else if (duration > 0) ((position.toDouble() / duration) * lines.size).toInt().coerceIn(lines.indices) else 0
-    LaunchedEffect(currentLine, showLyrics) { if (lines.isNotEmpty()) lyricsState.animateScrollToItem(currentLine, -300) }
+    LaunchedEffect(currentLine, showLyrics, television) {
+        if (lines.isNotEmpty()) lyricsState.animateScrollToItem(currentLine, if (television) 0 else -300)
+    }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     val backgroundArtwork = remember(track.thumbnail) {
         if (Build.VERSION.SDK_INT >= 31) track.thumbnail

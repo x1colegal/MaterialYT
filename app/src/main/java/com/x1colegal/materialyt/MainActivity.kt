@@ -162,7 +162,7 @@ private fun isTelevision(context: Context): Boolean {
 private fun Modifier.tvCardFocus(shape: Shape = RoundedCornerShape(16.dp)): Modifier {
     if (!isTelevision(LocalContext.current)) return this
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.055f else 1f, label = "tv_card_focus")
+    val scale by animateFloatAsState(if (focused) 1.03f else 1f, label = "tv_card_focus")
     return this
         .graphicsLayer {
             scaleX = scale
@@ -768,7 +768,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                         if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
                     }
                 }
-                LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(if (television) 4.dp else 12.dp), horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (television) 12.dp else 16.dp)) {
+                LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = if (television) PaddingValues(horizontal = 4.dp, vertical = 18.dp) else PaddingValues(12.dp), horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (television) 22.dp else 16.dp)) {
                     if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
@@ -825,7 +825,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet || television) {
-            LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(if (television) 4.dp else 8.dp), horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (television) 12.dp else 16.dp)) {
+            LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = if (television) PaddingValues(horizontal = 4.dp, vertical = 18.dp) else PaddingValues(8.dp), horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (television) 22.dp else 16.dp)) {
                 gridItems(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
             }
         } else {
@@ -921,9 +921,9 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                 GridCells.Adaptive(minSize = if (television) 320.dp else 300.dp),
                 state = musicGridState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(if (television) 4.dp else 12.dp),
+                contentPadding = if (television) PaddingValues(horizontal = 4.dp, vertical = 18.dp) else PaddingValues(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(if (television) 22.dp else 12.dp)
             ) {
                 gridItems(tracks) { track -> MusicCard(track) { selected = track } }
                 if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
@@ -2137,6 +2137,13 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var miniplayerDismissed by remember { mutableStateOf(false) }
     var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(true) }
+    val tvPlayerFocus = remember { FocusRequester() }
+    LaunchedEffect(television, controllerVisible) {
+        if (television && !controllerVisible) {
+            delay(60)
+            runCatching { tvPlayerFocus.requestFocus() }
+        }
+    }
     fun bindPlaylistControls(view: PlayerView) {
         val previous = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_prev)
         val next = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_next)
@@ -2485,7 +2492,23 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
 
     if (television) {
-        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+        Box(
+            Modifier.fillMaxSize().background(ComposeColor.Black)
+                .focusRequester(tvPlayerFocus)
+                .focusable()
+                .onPreviewKeyEvent { event ->
+                    val keyCode = event.nativeKeyEvent.keyCode
+                    val confirm = keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                        keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                        keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+                    if (confirm && event.type == KeyEventType.KeyUp && !controllerVisible) {
+                        currentPlayerView?.showController()
+                        controllerVisible = true
+                        currentPlayerView?.post { currentPlayerView?.requestFocus() }
+                        true
+                    } else false
+                }
+        ) {
             AndroidView(
                 factory = { PlayerView(it).apply {
                     this.player = player

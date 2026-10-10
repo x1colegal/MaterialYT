@@ -921,7 +921,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                 GridCells.Adaptive(minSize = if (television) 320.dp else 300.dp),
                 state = musicGridState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = if (television) PaddingValues(horizontal = 4.dp, vertical = 18.dp) else PaddingValues(12.dp),
+                contentPadding = if (television) PaddingValues(start = 4.dp, top = 18.dp, end = 4.dp, bottom = 40.dp) else PaddingValues(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(if (television) 8.dp else 12.dp),
                 verticalArrangement = Arrangement.spacedBy(if (television) 22.dp else 12.dp)
             ) {
@@ -1397,18 +1397,21 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
 @Composable
 private fun MusicCard(item: FeedItem, click: () -> Unit) {
     val television = isTelevision(LocalContext.current)
-    Column(
-        Modifier.fillMaxWidth().tvCardFocus(if (television) androidx.compose.ui.graphics.RectangleShape else RoundedCornerShape(18.dp)).clickable(onClick = click).padding(8.dp)
-    ) {
-        AsyncImage(
-            item.thumbnail,
-            null,
-            Modifier.fillMaxWidth().aspectRatio(1f).then(if (television) Modifier else Modifier.clip(RoundedCornerShape(16.dp)))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentScale = ContentScale.Crop,
-        )
-        Text(item.title, Modifier.padding(top = 10.dp).then(if (television) Modifier.autoMarquee() else Modifier), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-        Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Column(Modifier.fillMaxWidth().then(if (television) Modifier.padding(bottom = 14.dp) else Modifier)) {
+        Column(
+            Modifier.fillMaxWidth().tvCardFocus(if (television) androidx.compose.ui.graphics.RectangleShape else RoundedCornerShape(18.dp)).clickable(onClick = click)
+                .padding(start = 8.dp, top = 8.dp, end = 8.dp, bottom = if (television) 16.dp else 8.dp)
+        ) {
+            AsyncImage(
+                item.thumbnail,
+                null,
+                Modifier.fillMaxWidth().aspectRatio(1f).then(if (television) Modifier else Modifier.clip(RoundedCornerShape(16.dp)))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentScale = ContentScale.Crop,
+            )
+            Text(item.title, Modifier.padding(top = 10.dp).then(if (television) Modifier.autoMarquee() else Modifier), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            Text(item.subtitle, color = MaterialTheme.colorScheme.onBackground.copy(alpha = .72f), style = MaterialTheme.typography.bodyMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 

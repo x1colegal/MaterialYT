@@ -53,6 +53,7 @@ import kotlin.math.roundToInt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.rememberScrollState
@@ -83,6 +84,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -578,6 +581,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var selectedResult by remember { mutableStateOf<InfoItem?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
+    val initialContentFocus = remember { FocusRequester() }
     val homeListState = rememberLazyListState()
     val homeGridState = rememberLazyGridState()
     fun scrollHomeToTop() = scope.launch {
@@ -627,9 +631,16 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
+        val keyboardController = LocalSoftwareKeyboardController.current
+        val focusManager = LocalFocusManager.current
+        LaunchedEffect(Unit) {
+            delay(80)
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+            runCatching { initialContentFocus.requestFocus() }
+        }
+        Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            val keyboardController = LocalSoftwareKeyboardController.current
-            val focusManager = LocalFocusManager.current
             OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = {
                 IconButton(onClick = {
                     scrollHomeToTop()
@@ -741,6 +752,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
 @Composable
 private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, onPlayer: (ExoPlayer) -> Unit, reopenPlayerRequest: Int, onPlayerMode: (Boolean) -> Unit) {
     val scope = rememberCoroutineScope()
+    val initialContentFocus = remember { FocusRequester() }
     var query by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var homeTracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
@@ -774,9 +786,16 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     }
     if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
     Column(Modifier.fillMaxSize()) {
+        val keyboardController = LocalSoftwareKeyboardController.current
+        val focusManager = LocalFocusManager.current
+        LaunchedEffect(Unit) {
+            delay(80)
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+            runCatching { initialContentFocus.requestFocus() }
+        }
+        Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            val keyboardController = LocalSoftwareKeyboardController.current
-            val focusManager = LocalFocusManager.current
             OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search music") }, shape = CircleShape, leadingIcon = {
                 IconButton(onClick = {
                     scrollMusicToTop()

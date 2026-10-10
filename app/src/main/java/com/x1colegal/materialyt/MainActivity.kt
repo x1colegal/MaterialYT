@@ -713,8 +713,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             if (!television) runCatching { initialContentFocus.requestFocus() }
         }
         Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
-        if (television) Text("Home", Modifier.padding(start = 18.dp, top = 18.dp, bottom = 4.dp), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Row(Modifier.fillMaxWidth().widthIn(max = 1000.dp).align(Alignment.CenterHorizontally).padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().then(if (television) Modifier else Modifier.widthIn(max = 1000.dp)).align(Alignment.CenterHorizontally).padding(horizontal = 12.dp, vertical = if (television) 6.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = {
                 IconButton(onClick = {
                     scrollHomeToTop()
@@ -726,7 +725,8 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     keyboardController?.hide()
                 }) { Icon(Icons.Default.Close, "Exit search") }
             }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) { scrollHomeToTop(); scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(query) } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }; loading = false } } }))
-            IconButton(onClick = {
+            Spacer(Modifier.width(8.dp))
+            FilledTonalIconButton(onClick = {
                 focusManager.clearFocus()
                 keyboardController?.hide()
                 if (query.isNotBlank()) { scrollHomeToTop(); scope.launch {
@@ -735,8 +735,9 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                         .onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }
                     loading = false
                 } }
-            }) { Icon(Icons.Default.Search, "Search") }
-            IconButton(onClick = {
+            }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Search, "Search") }
+            Spacer(Modifier.width(8.dp))
+            FilledTonalIconButton(onClick = {
                 query = ""
                 focusManager.clearFocus()
                 keyboardController?.hide()
@@ -746,7 +747,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                         .onSuccess { homeFeed = it; feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
                     loading = false
                 }
-            }) { Icon(Icons.Default.Refresh, "Refresh") }
+            }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Refresh, "Refresh") }
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
@@ -763,11 +764,11 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                         if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
                     }
                 }
-                LazyVerticalGrid(if (television) GridCells.Fixed(5) else GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyVerticalGrid(if (television) GridCells.Fixed(4) else GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(if (television) 8.dp else 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
-                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+                    gridItems(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
                     if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             } else {
@@ -819,8 +820,8 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet || television) {
-            LazyVerticalGrid(if (television) GridCells.Fixed(5) else GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+            LazyVerticalGrid(if (television) GridCells.Fixed(4) else GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                gridItems(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
             }
         } else {
             LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
@@ -877,8 +878,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
             if (!television) runCatching { initialContentFocus.requestFocus() }
         }
         Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
-        if (television) Text("YT Music", Modifier.padding(start = 18.dp, top = 18.dp, bottom = 4.dp), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Row(Modifier.fillMaxWidth().widthIn(max = 1000.dp).align(Alignment.CenterHorizontally).padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().then(if (television) Modifier else Modifier.widthIn(max = 1000.dp)).align(Alignment.CenterHorizontally).padding(horizontal = 12.dp, vertical = if (television) 6.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search music") }, shape = CircleShape, leadingIcon = {
                 IconButton(onClick = {
                     scrollMusicToTop()
@@ -889,8 +889,10 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                     keyboardController?.hide()
                 }) { Icon(Icons.Default.Close, "Exit search") }
             }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus(); keyboardController?.hide(); if (query.isNotBlank()) { scrollMusicToTop(); load { YouTubeRepository.musicSearch(query) } } }))
-            IconButton(onClick = { if (query.isNotBlank()) { scrollMusicToTop(); load { YouTubeRepository.musicSearch(query) } } }) { Icon(Icons.Default.Search, "Search music") }
-            IconButton(onClick = {
+            Spacer(Modifier.width(8.dp))
+            FilledTonalIconButton(onClick = { if (query.isNotBlank()) { scrollMusicToTop(); load { YouTubeRepository.musicSearch(query) } } }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Search, "Search music") }
+            Spacer(Modifier.width(8.dp))
+            FilledTonalIconButton(onClick = {
                 query = ""
                 scope.launch {
                     loading = true; error = null
@@ -899,7 +901,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                         .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
                     loading = false
                 }
-            }) { Icon(Icons.Default.Refresh, "Refresh") }
+            }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Refresh, "Refresh") }
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
@@ -911,7 +913,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                 }
             }
             LazyVerticalGrid(
-                if (television) GridCells.Fixed(5) else GridCells.Adaptive(minSize = 300.dp),
+                if (television) GridCells.Fixed(4) else GridCells.Adaptive(minSize = 300.dp),
                 state = musicGridState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(12.dp),
@@ -1356,16 +1358,16 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
     val television = isTelevision(LocalContext.current)
     if (television) {
         Surface(
-            modifier = Modifier.fillMaxWidth().padding(3.dp).tvCardFocus(RoundedCornerShape(14.dp)).clickable(onClick = click),
+            modifier = Modifier.fillMaxWidth().tvCardFocus(RoundedCornerShape(14.dp)).clickable(onClick = click),
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f),
         ) {
             Column {
                 AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
-                Column(Modifier.padding(horizontal = 9.dp, vertical = 8.dp)) {
-                    Text(item.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(2.dp))
-                    Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp).heightIn(min = 62.dp)) {
+                    Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(4.dp))
+                    Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }

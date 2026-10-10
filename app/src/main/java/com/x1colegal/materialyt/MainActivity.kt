@@ -55,6 +55,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.rememberScrollState
@@ -527,23 +529,13 @@ private fun AppScaffold(
     if (television) {
         LaunchedEffect(hideNavigation) {
             if (!hideNavigation) {
-                delay(100)
+                delay(400)
                 runCatching { tvInitialFocus.requestFocus() }
             }
         }
         Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             if (!hideNavigation) {
-                NavigationRail(
-                    modifier = Modifier.width(176.dp),
-                    header = {
-                        Column(Modifier.padding(top = 36.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Surface(Modifier.size(54.dp), RoundedCornerShape(16.dp), color = ComposeColor(0xFFFF1744)) {
-                                Icon(Icons.Default.PlayArrow, null, Modifier.padding(11.dp), tint = ComposeColor.White)
-                            }
-                            Text("MaterialYT", Modifier.padding(top = 10.dp, bottom = 18.dp), style = MaterialTheme.typography.titleMedium)
-                        }
-                    }
-                ) {
+                NavigationRail(modifier = Modifier.width(120.dp)) {
                     Spacer(Modifier.weight(1f))
                     tabs.forEachIndexed { index, item ->
                         NavigationRailItem(
@@ -644,6 +636,7 @@ private fun MiniPlayer(openMusic: () -> Unit) {
 private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openAccount: () -> Unit) {
     val scope = rememberCoroutineScope()
     val television = isTelevision(LocalContext.current)
+    val initialContentFocus = remember { FocusRequester() }
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -716,10 +709,13 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         val keyboardController = LocalSoftwareKeyboardController.current
         val focusManager = LocalFocusManager.current
         LaunchedEffect(Unit) {
-            delay(150)
+            delay(80)
             focusManager.clearFocus(force = true)
             keyboardController?.hide()
+            if (!television) runCatching { initialContentFocus.requestFocus() }
         }
+        Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
+        if (television) Text("Home", Modifier.padding(start = 18.dp, top = 18.dp, bottom = 4.dp), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Row(Modifier.fillMaxWidth().widthIn(max = 1000.dp).align(Alignment.CenterHorizontally).padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search YouTube") }, shape = CircleShape, leadingIcon = {
                 IconButton(onClick = {
@@ -840,6 +836,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
 private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, onPlayer: (ExoPlayer) -> Unit, reopenPlayerRequest: Int, onPlayerMode: (Boolean) -> Unit) {
     val scope = rememberCoroutineScope()
     val television = isTelevision(LocalContext.current)
+    val initialContentFocus = remember { FocusRequester() }
     var query by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var homeTracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
@@ -876,10 +873,13 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
         val keyboardController = LocalSoftwareKeyboardController.current
         val focusManager = LocalFocusManager.current
         LaunchedEffect(Unit) {
-            delay(150)
+            delay(80)
             focusManager.clearFocus(force = true)
             keyboardController?.hide()
+            if (!television) runCatching { initialContentFocus.requestFocus() }
         }
+        Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
+        if (television) Text("YT Music", Modifier.padding(start = 18.dp, top = 18.dp, bottom = 4.dp), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Row(Modifier.fillMaxWidth().widthIn(max = 1000.dp).align(Alignment.CenterHorizontally).padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search music") }, shape = CircleShape, leadingIcon = {
                 IconButton(onClick = {
@@ -945,6 +945,8 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
         onBack()
     }
     var showLyrics by remember { mutableStateOf(false) }
+    var showMusicSettings by remember { mutableStateOf(false) }
+    var activeMusicCodec by remember(track.id) { mutableStateOf(preferredCodec) }
     
     var lyrics by remember { mutableStateOf<List<LyricLine>?>(null) }
     var lyricsError by remember { mutableStateOf<String?>(null) }
@@ -999,7 +1001,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             Row(Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = ::closePlayer, modifier = Modifier.tvCardFocus(CircleShape)) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
                 Text("Now playing", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
-                
+                IconButton(onClick = { showMusicSettings = true }, modifier = Modifier.tvCardFocus(CircleShape)) { Icon(Icons.Default.Settings, "Audio settings", tint = ComposeColor.White) }
             }
             if (tablet) {
                 Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
@@ -1059,6 +1061,26 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             }
         }
     }
+    if (showMusicSettings) AlertDialog(
+        onDismissRequest = { showMusicSettings = false },
+        title = { Text("Audio settings") },
+        text = {
+            Column {
+                AudioCodecChoice.entries.forEach { choice ->
+                    ListItem(
+                        headlineContent = { Text(choice.label) },
+                        leadingContent = { RadioButton(activeMusicCodec == choice, null) },
+                        modifier = Modifier.tvCardFocus().clickable {
+                            activeMusicCodec = choice
+                            AutoMusicService.play(activity, track, choice)
+                            showMusicSettings = false
+                        },
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { showMusicSettings = false }) { Text("Close") } },
+    )
 }
 
 @Composable
@@ -1309,6 +1331,23 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
         return
     }
     val television = isTelevision(LocalContext.current)
+    if (television) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(6.dp).tvCardFocus(RoundedCornerShape(18.dp)).clickable(onClick = click),
+            shape = RoundedCornerShape(18.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f),
+        ) {
+            Column {
+                AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
+                Column(Modifier.padding(12.dp)) {
+                    Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(4.dp))
+                    Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        return
+    }
     Column(Modifier.fillMaxWidth().padding(bottom = 18.dp).tvCardFocus().clickable(onClick = click)) {
         AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(if (television) 16f / 9f else item.thumbnailWidth.toFloat() / item.thumbnailHeight.coerceAtLeast(1)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
         Row(Modifier.padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.Top) {
@@ -1619,13 +1658,9 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
                 val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.shortsContinuation() } }
                     .onFailure { AppLog.failure("shorts UI continuation", it) }
                     .getOrDefault(emptyList())
-                val wasAtEnd = pager.currentPage == before - 1
                 if (more.isNotEmpty()) shorts = (shorts + more).distinctBy { it.id }
                 if (shorts.size > before) {
                     attempts = 0
-                    if (wasAtEnd) {
-                        pager.animateScrollToPage(before)
-                    }
                 } else {
                     attempts++
                     delay(750L * attempts)
@@ -1644,6 +1679,8 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
 @Composable
 private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, waitingForNext: Boolean = false, onOpenChannel: (String) -> Unit) {
     val context = LocalContext.current
+    val television = isTelevision(context)
+    val shortActionFocus = remember { FocusRequester() }
     val player = remember(item.id) { PlayerFactory.bufferedPlayer(context).apply { repeatMode = Player.REPEAT_MODE_ONE }.also(onPlayer) }
     var streams by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var selected by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
@@ -1667,6 +1704,13 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var showPlayPauseIndicator by remember { mutableStateOf(false) }
     var lastActionWasPlay by remember { mutableStateOf(false) }
     var indicatorKey by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(active, television) {
+        if (active && television) {
+            delay(250)
+            runCatching { shortActionFocus.requestFocus() }
+        }
+    }
 
     LaunchedEffect(item.id) {
         PlaybackLoadStatus.message.collect { status ->
@@ -1860,7 +1904,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             if (!hasStartedPlayback) shortLoadMessage?.let { message ->
                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
             }
-            Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Bottom) {
+            Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp).focusGroup(), verticalAlignment = Alignment.Bottom) {
                 Column(Modifier.weight(1f)) {
                     Row(
                         modifier = Modifier
@@ -1880,8 +1924,8 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     Spacer(Modifier.height(10.dp))
                     Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = { showDetails = true }, modifier = Modifier.tvCardFocus(CircleShape)) { Icon(Icons.Default.MoreVert, "Short details", tint = ComposeColor.White) }
+                Column(Modifier.focusGroup(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    IconButton(onClick = { showDetails = true }, modifier = Modifier.tvCardFocus(CircleShape).then(if (television) Modifier.focusRequester(shortActionFocus) else Modifier)) { Icon(Icons.Default.MoreVert, "Short details", tint = ComposeColor.White) }
                     IconButton(onClick = {
                         showComments = true; commentsLoading = true
                     }, modifier = Modifier.tvCardFocus(CircleShape)) { Icon(Icons.Default.Comment, "Comments", tint = ComposeColor.White) }

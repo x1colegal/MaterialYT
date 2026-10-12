@@ -8,6 +8,8 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.net.wifi.WifiManager
 import android.support.v4.media.MediaBrowserCompat
 import android.support.v4.media.MediaDescriptionCompat
 import android.support.v4.media.MediaMetadataCompat
@@ -17,9 +19,11 @@ import androidx.media.MediaBrowserServiceCompat
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.google.android.exoplayer2.DefaultLoadControl
+import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.Player
+import com.google.android.exoplayer2.audio.AudioAttributes
 import com.google.android.exoplayer2.source.ProgressiveMediaSource
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
 import kotlinx.coroutines.CoroutineScope
@@ -43,6 +47,20 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private var extractionRetryCount = 0
     private var playGeneration = 0
     private var preferredAudioCodec = AudioCodecChoice.MP4A
+    private lateinit var playbackWakeLock: PowerManager.WakeLock
+    private lateinit var playbackWifiLock: WifiManager.WifiLock
+
+    private fun acquirePlaybackLocks() {
+        if (!playbackWakeLock.isHeld) playbackWakeLock.acquire()
+        if (!playbackWifiLock.isHeld) playbackWifiLock.acquire()
+        AppLog.event("music playback locks acquired wake=${playbackWakeLock.isHeld} wifi=${playbackWifiLock.isHeld}")
+    }
+
+    private fun releasePlaybackLocks() {
+        if (playbackWifiLock.isHeld) playbackWifiLock.release()
+        if (playbackWakeLock.isHeld) playbackWakeLock.release()
+        AppLog.event("music playback locks released")
+    }
 
     companion object {
         const val CHANNEL_ID = "materialyt_playback"
@@ -54,6 +72,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val duration = androidx.compose.runtime.mutableLongStateOf(0L)
         private var instance: AutoMusicService? = null
         private const val ACTION_PLAY = "com.x1colegal.materialyt.PLAY"
+        private const val ACTION_KEEP_ALIVE = "com.x1colegal.materialyt.KEEP_ALIVE"
 
         fun play(context: Context, track: FeedItem, codec: AudioCodecChoice) {
             val intent = Intent(context, AutoMusicService::class.java).setAction(ACTION_PLAY)
@@ -75,22 +94,46 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             NotificationChannel(CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_LOW)
         )
         player = PlayerFactory.bufferedPlayer(this)
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                .build(),
+            true,
+        )
+        player.setHandleAudioBecomingNoisy(true)
+        player.setWakeMode(C.WAKE_MODE_NETWORK)
+        playbackWakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:music-playback")
+            .apply { setReferenceCounted(false) }
+        @Suppress("DEPRECATION")
+        playbackWifiLock = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager)
+            .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$packageName:music-network")
+            .apply { setReferenceCounted(false) }
         session = MediaSessionCompat(this, "MaterialYT Auto").apply {
             setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS)
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) {
+                    AppLog.event("Android Auto playFromMediaId id=$mediaId")
                     playMediaId(mediaId)
                 }
-                override fun onPrepareFromMediaId(mediaId: String?, extras: Bundle?) = playMediaId(mediaId)
+                override fun onPrepareFromMediaId(mediaId: String?, extras: Bundle?) {
+                    AppLog.event("Android Auto prepareFromMediaId id=$mediaId")
+                    playMediaId(mediaId)
+                }
                 override fun onPlayFromSearch(query: String?, extras: Bundle?) {
                     scope.launch {
                         val result = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicSearch(query.orEmpty()) } }.getOrDefault(emptyList())
                         result.firstOrNull()?.let(::play)
                     }
                 }
-                override fun onPlay() = player.play()
-                override fun onPause() = player.pause()
-                override fun onStop() { player.stop(); stopForeground(true); isActive = false }
+                override fun onPlay() {
+                    AppLog.event("Android Auto play state=${player.playbackState} mediaItems=${player.mediaItemCount}")
+                    if (currentTrack != null) acquirePlaybackLocks()
+                    player.play()
+                }
+                override fun onPause() { player.pause(); releasePlaybackLocks() }
+                override fun onStop() { player.stop(); releasePlaybackLocks(); stopForeground(true); isActive = false }
                 override fun onSeekTo(pos: Long) = player.seekTo(pos)
             })
             isActive = true
@@ -177,8 +220,16 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     private fun play(track: FeedItem, preferredCodec: AudioCodecChoice = AudioCodecChoice.MP4A) {
+        // Android Auto normally binds MediaBrowserService without starting it. A bound-only
+        // service can be suspended as soon as the screen turns off; playback launched from the
+        // app did not have this problem because ACTION_PLAY starts the foreground service first.
+        // Promote Auto-originated playback to the same started-service lifecycle.
+        val keepAlive = Intent(this, AutoMusicService::class.java).setAction(ACTION_KEEP_ALIVE)
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(keepAlive) else startService(keepAlive)
+        AppLog.event("music service promoted from browser binding to started foreground service")
         val generation = ++playGeneration
         scope.launch {
+            acquirePlaybackLocks()
             currentTrack = track
             preferredAudioCodec = preferredCodec
             audioCandidates = emptyList()
@@ -186,6 +237,11 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             webFallbackAttempted = false
             extractionRetryCount = 0
             nowPlaying.value = track
+            currentArtwork = null
+            publishMetadata()
+            // Become a foreground media service before artwork/extraction network work. This
+            // keeps Android Auto playback alive when the phone is locked or the UI never opens.
+            startForeground(NOTIFICATION_ID, notification())
             scope.launch(Dispatchers.IO) {
                 runCatching { YouTubeRepository.preparePlaybackTracking(track.id) }
                     .onFailure { AppLog.failure("prepare standard history tracking music=${track.id}", it) }
@@ -201,7 +257,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 }
             }.getOrNull()
             publishMetadata()
-            startForeground(NOTIFICATION_ID, notification())
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
             val audioStreams = extractAudioStreams(track)
             if (currentTrack?.id != track.id || generation != playGeneration) return@launch
             setAudioCandidates(audioStreams, preferredCodec)
@@ -358,6 +414,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             runCatching {
                 player.pause()
                 player.clearMediaItems()
+                releasePlaybackLocks()
                 session.setMetadata(null)
                 session.setPlaybackState(PlaybackStateCompat.Builder()
                     .setActions(PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH)
@@ -369,5 +426,5 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         }
     }
 
-    override fun onDestroy() { instance = null; nowPlaying.value = null; playing.value = false; scope.cancel(); player.release(); session.release(); super.onDestroy() }
+    override fun onDestroy() { instance = null; nowPlaying.value = null; playing.value = false; releasePlaybackLocks(); scope.cancel(); player.release(); session.release(); super.onDestroy() }
 }

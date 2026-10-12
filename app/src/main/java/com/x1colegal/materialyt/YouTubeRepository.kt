@@ -541,8 +541,14 @@ object YouTubeRepository {
             val data = if (browseId != null) post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", browseId), bootstrap.origin)
             else initialData(get(url))
-            val uniqueItems = parseItems(data).distinctBy { it.id }
-            AppLog.event("feed=$name success mode=${if (browseId == null) "html" else "browse"} items=${uniqueItems.size}")
+            var mode = if (browseId == null) "html" else "browse"
+            var uniqueItems = parseItems(data).distinctBy { it.id }
+            if (name == "history" && uniqueItems.isEmpty()) {
+                AppLog.event("feed=history browse returned no items; trying authenticated HTML")
+                uniqueItems = parseItems(initialData(get(url))).distinctBy { it.id }
+                mode = "html-fallback"
+            }
+            AppLog.event("feed=$name success mode=$mode items=${uniqueItems.size}")
             uniqueItems
         } catch (error: Throwable) {
             AppLog.failure("feed=$name", error)

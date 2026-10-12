@@ -1,153 +1,182 @@
 # MaterialYT
 
-[![Android 5.0+](https://img.shields.io/badge/Android-5.0%2B-3DDC84?logo=android&logoColor=white)](https://developer.android.com/)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.2-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/)
-[![Material 3](https://img.shields.io/badge/UI-Material_3-6750A4)](https://m3.material.io/)
-[![Latest release](https://img.shields.io/github/v/release/x1colegal/MaterialYT?display_name=tag&sort=semver)](https://github.com/x1colegal/MaterialYT/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <strong>A native Material 3 client for YouTube and YouTube Music on Android 5.0+</strong>
+</p>
 
-MaterialYT is a native YouTube and YouTube Music client for Android 5.0 and newer. It combines a responsive Material 3 interface, native SABR playback, an embedded NewPipe Extractor compatibility backend, authenticated YouTube sessions, OkHttp, and ExoPlayer without requiring a YouTube Data API key.
+<p align="center">
+  <a href="https://github.com/x1colegal/MaterialYT/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/x1colegal/MaterialYT?display_name=tag&sort=semver"></a>
+  <img alt="Android 5.0+" src="https://img.shields.io/badge/Android-5.0%2B-3DDC84?logo=android&logoColor=white">
+  <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.2-7F52FF?logo=kotlin&logoColor=white">
+  <img alt="Material 3" src="https://img.shields.io/badge/UI-Material%203-6750A4">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
+</p>
 
-Only Google sign-in is presented as a web page. Home, History, search, channels, playlists, Community Posts, comments, YouTube Music, lyrics, settings, and playback are rendered by the app's native Compose interface.
+MaterialYT combines YouTube, YouTube Music, Shorts, account-aware feeds, native playback, and Android Auto in one Jetpack Compose application. It uses YouTube's internal web responses, a native SABR/UMP transport, an embedded NewPipe Extractor compatibility backend, OkHttp, and ExoPlayer. No YouTube Data API key is required.
+
+The app renders its own native interface. Only Google sign-in is displayed through Android System WebView.
 
 > [!IMPORTANT]
-> MaterialYT is an independent project and is not affiliated with, endorsed by, or sponsored by Google, YouTube, or NewPipe. YouTube and YouTube Music are trademarks of Google LLC. YouTube frequently changes its private interfaces, so extraction features can require maintenance without notice.
+> MaterialYT is an independent project. It is not affiliated with, endorsed by, or sponsored by Google, YouTube, or NewPipe. YouTube and YouTube Music are trademarks of Google LLC. YouTube's private interfaces can change without notice and may temporarily break extraction or account features.
 
-## Features
+## Highlights
 
-### YouTube
+- Native Material 3 interface for Android 5.0 and newer
+- YouTube Home, History, search, channels, playlists, comments, and Community Posts
+- YouTube Music Home, search, foreground playback, synchronized lyrics, and Android Auto
+- Vertical Shorts player with continuation-based recommendations
+- Native SABR/UMP playback with independently selectable audio and video formats
+- Embedded NewPipe Extractor as an optional compatibility backend
+- Signed-in feeds and YouTube History reporting without a Data API key
+- Fullscreen, picture-in-picture, persistent miniplayers, and large buffering
+- Phone, tablet, Android Auto, and legacy Android support
 
-- Personalized Home and History feeds for signed-in accounts
-- Infinite Home, search, and channel video pagination where YouTube supplies continuations
-- Native search results for videos, channels, and playlists
-- Channel pages with Videos and Community Posts
-- Playlist pages with queue-aware previous and next controls
-- Signed-in account channel and playlist access
-- Native video comments, replies, and Community Post comments
-- Video details including description, views, likes, and publication date when exposed by YouTube
-- Watch-time reporting to the signed-in YouTube history
+## YouTube
 
-### YouTube Music
+- Personalized Home feed for signed-in accounts
+- History reading and watch-progress reporting
+- Resume partially watched History videos from YouTube's saved position
+- Restart completed History videos from `00:00`
+- Infinite Home and search pagination while YouTube provides continuations
+- Search results for videos, channels, and playlists
+- Channel pages with Videos, Shorts, and Community Posts
+- Playlist pages with playable queues and previous/next controls
+- Native comments and replies
+- Community Post content and comments
+- Video details with description, views, likes, and publication date when available
+- Account channel and playlist access
 
-- Music-oriented Home and search interfaces
+The regular YouTube player keeps playing in a miniplayer while the user changes tabs. History resume is intentionally limited to regular videos; YouTube Music and Shorts always start from their normal playback position.
+
+## YouTube Music
+
+- Music-focused Home and search screens
 - Persistent foreground playback service
-- Miniplayer with playback controls, animated scrolling metadata, close button, and swipe-to-dismiss
-- Android media notification and system Now Playing integration
-- Android Auto browsing, playback, queue controls, and metadata
-- Real artwork aspect ratios in lists
-- Seekable playback timeline with played and buffered progress
-- Timed lyrics when YouTube Music exposes synchronized lyric data
-- Music listening reported through the YouTube account history
-
-### Shorts
-
-- Native vertical Shorts feed with automatic continuation loading
-- End-of-feed loading shelf with automatic advance when the next Reel page arrives
-- Shorts tabs on channel pages
-- WEB + PoToken + SABR playback using the same current pipeline as regular videos and YouTube Music
-- Comments, channel navigation, playback settings, details, account history reporting, and audio-track selection
-
-### Playback
-
-- Fullscreen playback with immersive system bars
-- Android 8.0+ picture-in-picture with play and pause actions
-- Automatic PiP when leaving the app during video playback
-- PiP aspect ratio matched to the active video
-- Video miniplayer that keeps playback alive while browsing
-- Large forward buffer with visible buffered progress
-- Playback speed and manual quality selection
-- Resolution, frame rate, codec, and bitrate information
-- Preferred AVC, HEVC, VP9, or AV1 video codec
+- Played and buffered progress with seeking
+- Timed lyrics when synchronized data is available
+- Artwork-aware layouts and native metadata
 - Preferred MP4A or Opus audio codec
-- Original audio track selection by default, with manual alternate-track selection
-- Automatic, hardware, or software decoding preferences for video and audio
-
-### Appearance and devices
-
-- Material 3 interface written with Jetpack Compose
-- System, Light, Dark, and OLED Pure Black themes
-- Multiple strong Material color palettes
-- Black status bar in Light mode
-- Responsive phone and tablet layouts
-- Tablet grids, two-pane players, and navigation rail
-- Legacy launcher resources for Android 5–7 and adaptive icons for modern Android versions
-
-## Playback backends
-
-MaterialYT provides three explicit playback modes. SABR is the default and recommended option:
-
-| Mode | Behavior |
-| --- | --- |
-| **SABR (Recommended)** | Uses native VISIONOS playback with adaptive, independently selectable audio and video formats. |
-| **Force NewPipe** | Uses only the embedded NewPipe Extractor compatibility path. It may encounter `LOGIN_REQUIRED`, bot-verification responses, missing formats, or breakage when YouTube changes extractor-facing clients. |
-| **NewPipe + SABR fallback** | Tries NewPipe first, then switches to SABR when NewPipe extraction fails. |
-
-The SABR backend parses YouTube's UMP media stream, keeps audio and video selection independent, refreshes playback configuration when requested by the server, and uses disk-backed buffering. The embedded extractor remains available for compatibility and experimentation, but is not the recommended backend. Format availability still depends on the selected backend, the video, YouTube's current server behavior, account restrictions, region, and device decoder support.
-
-## Networking
-
-MaterialYT uses OkHttp for its native backend and media transport. The Settings screen provides:
-
-- **HTTP/2** with HTTP/1.1 fallback
-- **HTTP/1.1** only
-- **HTTP/1.0 compatibility**, implemented with HTTP/1.1 connection-close semantics because OkHttp does not emit HTTP/1.0 request lines
-
-Backend selection and HTTP protocol selection are separate settings. Changing the network protocol does not silently change the playback backend.
-
-## Google account integration
-
-The Account screen opens Google's HTTPS sign-in flow inside Android System WebView. After login, MaterialYT reuses the locally stored YouTube session cookies for authenticated internal requests.
-
-The signed-in session powers features such as:
-
-- Home recommendations
-- History reading and watch-time updates
-- YouTube Music personalization
-- Account channel and playlists
-- Community content and comments
-- Comment posting where YouTube grants permission
-
-MaterialYT does not collect the Google password in its native UI. Clearing the application's storage removes the local cookies, preferences, and account session. Google may reject embedded sign-in on particular accounts, WebView versions, or devices.
+- Original audio selected by default, with manual track selection
+- Android media notification and system Now Playing integration
+- Miniplayer with play/pause, close, swipe-to-dismiss, and scrolling metadata
+- Listening activity reported to the signed-in YouTube History
 
 ## Android Auto
 
-`AutoMusicService` exposes YouTube Music through Android's media browser APIs. Supported surfaces can display the current track, artwork, playback state, queue navigation, and transport controls.
+MaterialYT exposes YouTube Music through Android's media browser APIs. Android Auto can browse available music, start playback, display artwork and metadata, and control the active session.
 
-Android Auto availability depends on the Android Auto version, the phone, the vehicle or head unit, and whether externally distributed media applications are allowed by the platform configuration.
+The music service requests media audio focus, runs as a foreground playback service, and keeps CPU and network access available during preparation and playback. Playback started from Android Auto continues when the phone is locked without requiring the MaterialYT activity to be opened first.
 
-## Architecture
+Availability of sideloaded media apps depends on the Android Auto version, phone, vehicle or head unit, and platform developer settings.
+
+## Shorts
+
+- Native vertical player without ExoPlayer's standard controller UI
+- Continuation-based recommendation feed
+- Automatic advance when the next recommendation becomes available
+- Comments, channel navigation, playback settings, and video details
+- Audio-track selection and account History reporting
+- The same SABR and compatibility backend infrastructure used by regular playback
+
+Shorts relies on frequently changing internal Reel endpoints. Temporary feed or continuation breakage is possible when YouTube changes those responses.
+
+## Playback
+
+- Native WEB + PoToken + SABR/UMP playback by default
+- WEB, VISIONOS, ANDROID_VR, and WEB_REMIX client handling where required
+- Separate adaptive audio and video selection
+- AVC, HEVC, VP9, and AV1 video preferences
+- MP4A and Opus audio preferences
+- Resolution, frame rate, codec, and bitrate information
+- Manual quality and playback-speed controls
+- Automatic, hardware, or software decoding preferences
+- Decoder recreation at the current position after supported runtime decoder failures
+- Fullscreen immersive playback
+- Android 8.0+ picture-in-picture with play/pause actions
+- Automatic PiP when leaving an active regular video
+- Display-aspect-aware PiP windows
+- Disk-backed SABR reassembly and large forward buffering
+
+### Playback backends
+
+| Mode | Behavior |
+| --- | --- |
+| **SABR (Recommended)** | Uses the native WEB + PoToken + SABR path and its client fallbacks. This is the default. |
+| **SABR + NewPipe fallback** | Uses SABR first and tries NewPipe if SABR extraction fails. |
+| **Force NewPipe** | Uses only the embedded NewPipe Extractor path. |
+| **NewPipe + SABR fallback** | Tries NewPipe first and falls back to SABR. |
+
+NewPipe mode may receive `LOGIN_REQUIRED`, bot-verification responses, incomplete format lists, or extractor failures after server changes. Available formats also depend on the video, account, region, playback client, and device decoder support.
+
+## Account integration
+
+Google sign-in is completed on Google's HTTPS pages inside Android System WebView. MaterialYT then reuses the locally stored YouTube session cookies for authenticated internal requests.
+
+A signed-in session enables features such as:
+
+- Personalized Home and YouTube Music data
+- Reading and updating YouTube History
+- Account channel and playlists
+- Community content and comments
+- Additional metadata exposed only to the active account
+
+MaterialYT does not request or store the Google password in its native UI. Clearing app storage removes local cookies, preferences, and the account session. If the session expires, the app asks the user to refresh sign-in instead of silently treating the account as logged out.
+
+## Appearance and device support
+
+- Material 3 with Jetpack Compose
+- System, Light, Dark, and OLED Pure Black themes
+- Multiple high-contrast Material color palettes
+- Black status bar in Light mode
+- Responsive phone and tablet layouts
+- Tablet grids, navigation rail, and two-pane players
+- Legacy launcher resources for Android 5–7
+- Adaptive launcher icons on modern Android versions
+
+## Networking
+
+MaterialYT uses OkHttp for backend and media traffic. The Settings screen provides three protocol modes:
+
+- **HTTP/2** with HTTP/1.1 fallback
+- **HTTP/1.1** only
+- **HTTP/1.0 compatibility**, using HTTP/1.1 connection-close behavior because OkHttp does not emit HTTP/1.0 request lines
+
+Network protocol selection and playback backend selection are independent settings.
+
+## Technology
 
 | Area | Implementation |
 | --- | --- |
 | Language | Kotlin and Java |
-| UI | Jetpack Compose and Material 3 |
-| Default playback | Native VISIONOS player request with SABR/UMP media transport |
-| Compatibility extraction | Embedded NewPipe Extractor fork |
-| Authenticated data | Internal YouTube web responses using the local WebView cookie session |
-| Networking | OkHttp |
-| Playback | ExoPlayer with OkHttp media data sources |
+| Interface | Jetpack Compose and Material 3 |
+| Playback | ExoPlayer 2.19.1 |
+| Primary transport | Native SABR/UMP with disk-backed reassembly |
+| Compatibility extraction | Embedded, modified NewPipe Extractor module |
+| Networking | OkHttp 5 |
 | Images | Coil |
-| JavaScript challenges | yt-dlp EJS challenge solver assets with pinned SHA-256 hashes |
+| JavaScript challenges | yt-dlp EJS solver assets executed through J2V8 |
 | Car integration | AndroidX Media browser service |
-| Minimum Android version | Android 5.0 / API 21 |
-| Target SDK | Android API 36 |
+| Minimum SDK | API 21 / Android 5.0 |
+| Target SDK | API 36 |
 
-### Main source files
+### Source layout
 
 ```text
 app/src/main/java/com/x1colegal/materialyt/
-├── AutoMusicService.kt       # Music service, Android Auto, notification, and queue state
-├── EjsChallengeSolver.kt     # Signature and n-challenge JavaScript execution
-├── HttpBackend.kt            # NewPipe downloader and selectable OkHttp protocol mode
-├── MainActivity.kt           # Compose navigation, feeds, players, comments, and settings
+├── AutoMusicService.kt       # Music playback, notification, and Android Auto
+├── EjsChallengeSolver.kt     # Signature and n-challenge execution
+├── HttpBackend.kt            # OkHttp and selectable HTTP modes
+├── MainActivity.kt           # Compose UI, navigation, feeds, and players
 ├── MaterialYtApp.kt          # Application and extractor initialization
-├── NewPipePoTokenProvider.kt # Local BotGuard WebView and PoToken generation
-├── PlaybackBackend.kt        # Explicit SABR and NewPipe backend preferences
-├── SabrMediaFactory.kt       # ExoPlayer media source for separate SABR audio and video
-├── sabrmodern/               # SABR session, UMP parsing, requests, and buffering
-└── YouTubeRepository.kt      # Authenticated feeds, music, metadata, history, and comments
+├── NewPipePoTokenProvider.kt # BotGuard WebView and PoToken generation
+├── PlaybackBackend.kt        # Playback backend preferences
+├── PlayerFactory.kt          # ExoPlayer and buffering configuration
+├── SabrMediaFactory.kt       # SABR media sources for ExoPlayer
+├── YouTubeRepository.kt      # Feeds, account data, metadata, and tracking
+└── sabrmodern/               # UMP parsing, SABR sessions, and buffering
 
-newpipe-extractor/             # Embedded and modified NewPipe Extractor module
+newpipe-extractor/             # Embedded NewPipe Extractor fork
+sabr/                          # SABR protocol module
 ```
 
 ## Building
@@ -157,7 +186,7 @@ newpipe-extractor/             # Embedded and modified NewPipe Extractor module
 - JDK 17
 - Android SDK Platform 36
 - A configured Android SDK path
-- Internet access for the initial Gradle dependency and EJS asset download
+- Internet access for initial Gradle dependencies and pinned EJS assets
 
 ```bash
 git clone https://github.com/x1colegal/MaterialYT.git
@@ -166,44 +195,39 @@ printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
 ./gradlew --daemon :app:assembleRelease
 ```
 
-The release APK is generated under:
+The release APK is generated in `app/build/outputs/apk/release/`.
 
-```text
-app/build/outputs/apk/release/
-```
-
-Release builds currently use the configured debug signing key. Anyone distributing a fork should configure and protect their own release keystore.
+Release builds currently use the configured debug signing key. Fork maintainers should configure and protect their own release keystore before distributing builds.
 
 ## Known limitations
 
-- YouTube's internal APIs, player clients, continuation formats, BotGuard challenges, and stream requirements are undocumented and can change at any time.
-- Some videos may be unavailable on one playback client but available on another.
-- NewPipe compatibility mode may receive `LOGIN_REQUIRED`, bot-verification responses, incomplete format lists, or extraction failures after YouTube changes its private player behavior.
-- Comments, playlists, account pages, lyrics, audio tracks, likes, and other metadata appear only when YouTube returns them to the current session.
+- YouTube's player clients, internal APIs, continuations, BotGuard challenges, and SABR messages are undocumented and can change at any time.
+- Some content may work through one playback client or backend but not another.
+- Comments, lyrics, likes, audio tracks, playlists, and account metadata are shown only when YouTube exposes them to the current session.
 - PiP requires Android 8.0 or newer.
-- Codec and hardware-decoder support depend on the Android device.
-- Android Auto visibility for a sideloaded build depends on platform policy and developer settings.
+- Codec and hardware-decoder availability depends on the device.
+- Android Auto visibility for sideloaded builds depends on platform policy.
 - Casting, downloads, subscriptions, and SponsorBlock are not currently implemented.
 
 ## Contributing
 
-Issues and pull requests are welcome. Keep source code, user-facing app text, documentation, commit messages, changelogs, and release notes in English.
+Issues and pull requests are welcome. Keep source code, user-facing text, documentation, commits, changelogs, and release notes in English.
 
-Useful bug reports include:
+A useful bug report includes:
 
 - MaterialYT version
 - Android and System WebView versions
-- Selected playback backend and HTTP mode
-- Selected codec, quality, and decoder mode
-- Whether the account is signed in
-- A reproducible YouTube URL or video ID
-- Relevant log output with private account data removed
+- Selected playback backend and network mode
+- Selected quality, codecs, and decoder mode
+- Sign-in state
+- Reproducible video URL or ID
+- Relevant logs with private account information removed
 
 ## License
 
-MaterialYT's original source code is available under the [MIT License](LICENSE).
+MaterialYT's original source code is licensed under the [MIT License](LICENSE).
 
-The embedded [NewPipe Extractor](newpipe-extractor/) module is licensed under GPL-3.0-or-later. Combined binaries and redistributed builds must also comply with the licenses of NewPipe Extractor and all other included dependencies.
+The embedded [NewPipe Extractor](newpipe-extractor/) module is licensed under GPL-3.0-or-later. Distributed binaries and forks must comply with that license and the licenses of all included dependencies.
 
 ---
 

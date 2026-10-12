@@ -1044,6 +1044,16 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
             audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
                 .getOrNull()?.filter { it.audio }.orEmpty()
         }
+        if (audioStreams.isEmpty() && PlaybackBackendPreferences.useNewPipeWhenWebFails()) {
+            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
+                .onFailure { AppLog.failure("music NewPipe fallback video=${track.id}", it) }
+                .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
+                    val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() }
+                        ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
+                    val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
+                    PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
+                }.orEmpty()
+        }
         val audio = audioStreams.maxByOrNull { it.bitrate }
         if (audio != null) {
             val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders(audio.url)))
@@ -1477,6 +1487,10 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
     var error by remember { mutableStateOf<String?>(null) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
+    DisposableEffect(activity) {
+        activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose { activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    }
     if (channelUrl != null) {
         ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }
         return
@@ -1621,6 +1635,26 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
                 selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
             }.onFailure { if (streams.isEmpty()) error = it.message }
+        }
+        if (streams.isEmpty() && PlaybackBackendPreferences.useNewPipeWhenWebFails()) {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(item.id) } }.onSuccess {
+                shortInfo = it
+                audioTracks = it.audioStreams.filter { track -> track.content.startsWith("http") }.map { track ->
+                    val trackName = track.audioTrackName?.takeIf { n -> n.isNotBlank() }
+                        ?: track.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
+                    val original = track.audioTrackType?.name?.contains("ORIGINAL", true) == true || trackName.contains("original", true)
+                    PlayerChoice(track.content, track.codec.orEmpty(), 0, 0, track.bitrate, false, trackName, track.audioTrackId.orEmpty(), original)
+                }
+                audio = selectAudioStream(audioTracks, preferredAudioCodec)
+                streams = (it.videoOnlyStreams + it.videoStreams).filter { stream -> stream.content.startsWith("http") }
+                    .map { stream -> PlayerChoice(stream.content, stream.codec.orEmpty(), stream.height, stream.fps, stream.bitrate, stream.isVideoOnly) }
+                    .distinctBy { stream -> "${stream.height}-${stream.fps}-${stream.codec}" }.sortedByDescending { stream -> stream.height }
+                selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
+                AppLog.event("shorts NewPipe fallback video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
+            }.onFailure {
+                AppLog.failure("shorts NewPipe fallback video=${item.id}", it)
+                if (streams.isEmpty()) error = it.message
+            }
         }
     }
     LaunchedEffect(active, selected) {
@@ -2097,6 +2131,27 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 if (availableStreams.isEmpty()) error = e.message.orEmpty()
             }
         }
+        if (availableStreams.isEmpty() && PlaybackBackendPreferences.useNewPipeWhenWebFails()) {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(videoId) } }.onSuccess { stream ->
+                info = stream
+                audioStreams = stream.audioStreams.filter { it.content.startsWith("http") }.map {
+                    val name = it.audioTrackName?.takeIf(String::isNotBlank)
+                        ?: it.audioLocale?.displayName?.takeIf(String::isNotBlank).orEmpty()
+                    val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
+                    PlayerChoice(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, false, name, it.audioTrackId.orEmpty(), original)
+                }
+                selectedAudio = selectAudioStream(audioStreams, audioCodec)
+                availableStreams = (stream.videoOnlyStreams + stream.videoStreams)
+                    .filter { it.content.startsWith("http") }
+                    .map { PlayerChoice(it.content, it.codec.orEmpty(), it.height, it.fps, it.bitrate, it.isVideoOnly) }
+                    .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
+                AppLog.event("player NewPipe fallback video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
+            }.onFailure { e ->
+                AppLog.failure("player NewPipe fallback video=$videoId", e)
+                if (availableStreams.isEmpty()) error = e.message.orEmpty()
+            }
+        }
         runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelInfo(videoId) } }.onSuccess { channelInfo = it }
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(videoId) } }.onSuccess { videoMetadata = it }
@@ -2498,7 +2553,7 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
             playbackBackend = it
             PlaybackBackendPreferences.set(activity, it)
         } }
-        item { Text("SABR is the default and recommended backend. It uses native VISIONOS playback with adaptive audio and video. Force NewPipe is kept for compatibility, but YouTube may reject it with LOGIN_REQUIRED, bot verification, missing formats, or extractor breakage. NewPipe + SABR fallback tries NewPipe first and switches to SABR when extraction fails.", style = MaterialTheme.typography.bodySmall) }
+        item { Text("SABR is the default and recommended backend. It uses native VISIONOS playback with adaptive audio and video. SABR + NewPipe fallback only tries NewPipe if SABR fails. Force NewPipe is kept for compatibility, but YouTube may reject it with LOGIN_REQUIRED, bot verification, missing formats, or extractor breakage. NewPipe + SABR fallback uses the opposite order.", style = MaterialTheme.typography.bodySmall) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }
         item { Text("HTTP/1.0 compatibility disables connection reuse but uses an HTTP/1.1 request line because OkHttp intentionally cannot emit HTTP/1.0. The HTTP/2 mode advertises HTTP/2 with HTTP/1.1 fallback.", style = MaterialTheme.typography.bodySmall) }
     }

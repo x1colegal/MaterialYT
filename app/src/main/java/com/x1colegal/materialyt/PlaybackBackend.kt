@@ -5,6 +5,7 @@ import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExt
 
 enum class PlaybackBackend(val label: String) {
     WEB_ONLY("SABR (Recommended)"),
+    WEB_WITH_NEWPIPE_FALLBACK("SABR + NewPipe fallback"),
     NEWPIPE_ONLY("Force NewPipe"),
     NEWPIPE_WITH_WEB_FALLBACK("NewPipe + SABR fallback")
 }
@@ -34,5 +35,7 @@ object PlaybackBackendPreferences {
     }
 
     fun useNewPipe(): Boolean = backend != PlaybackBackend.WEB_ONLY
+        && backend != PlaybackBackend.WEB_WITH_NEWPIPE_FALLBACK
     fun useWebWhenNewPipeFails(): Boolean = backend != PlaybackBackend.NEWPIPE_ONLY
+    fun useNewPipeWhenWebFails(): Boolean = backend == PlaybackBackend.WEB_WITH_NEWPIPE_FALLBACK
 }

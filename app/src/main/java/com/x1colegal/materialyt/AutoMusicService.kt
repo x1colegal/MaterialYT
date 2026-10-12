@@ -237,6 +237,16 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
                 .getOrNull()?.filter { it.audio }.orEmpty()
         }
+        if (audioStreams.isEmpty() && PlaybackBackendPreferences.useNewPipeWhenWebFails()) {
+            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
+                .onFailure { AppLog.failure("music NewPipe fallback video=${track.id}", it) }
+                .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
+                    val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() }
+                        ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
+                    val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
+                    PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
+                }.orEmpty()
+        }
         return audioStreams
     }
 

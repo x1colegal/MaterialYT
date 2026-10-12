@@ -15,7 +15,7 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
-data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "")
+data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L)
 data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null)
 data class SabrFormat(
     val itag: Int,
@@ -1779,9 +1779,53 @@ object YouTubeRepository {
             val thumbHeight = if (isMusicItem || isChannel) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
             val channelThumbnail = findChannelThumbnail(renderer).orEmpty().ifBlank { if (isChannel) thumbnail else "" }
             val url = when { isChannel -> "https://www.youtube.com/channel/$id"; isPlaylist -> "https://www.youtube.com/playlist?list=$id"; else -> "https://www.youtube.com/watch?v=$id" }
-            output.putIfAbsent(id, FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel))
+            val exactResumeMs = findNumber(renderer, "resumePlaybackPositionMs")?.toLong()
+                ?: findNumber(renderer, "startTimeSeconds")?.times(1_000.0)?.toLong()
+            val resumePercent = (findNumber(renderer, "percentDurationWatched")
+                ?: findNumber(renderer, "startPercent") ?: 0.0).coerceIn(0.0, 100.0)
+            val durationText = text(renderer.opt("lengthText"))
+                ?: deepText(renderer, "lengthText")
+                ?: findDurationText(renderer)
+            val durationMs = parseDurationMs(durationText.orEmpty())
+            val rawResumePositionMs = exactResumeMs?.takeIf { it > 0L }
+                ?: if (resumePercent > 0.0 && durationMs > 0L) (durationMs * resumePercent / 100.0).toLong() else 0L
+            val resumePositionMs = if (
+                resumePercent >= 99.5 ||
+                (durationMs > 0L && rawResumePositionMs >= durationMs - 1_500L)
+            ) 0L else rawResumePositionMs
+            val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel, resumePositionMs = resumePositionMs)
+            val existing = output[id]
+            if (existing == null) output[id] = item
+            else if (resumePositionMs > existing.resumePositionMs) output[id] = existing.copy(resumePositionMs = resumePositionMs)
         }
         return output.values.toList()
+    }
+
+    private fun parseDurationMs(value: String): Long {
+        val parts = value.trim().split(':').mapNotNull(String::toLongOrNull)
+        if (parts.isEmpty() || parts.size > 3) return 0L
+        return parts.fold(0L) { total, part -> total * 60L + part } * 1_000L
+    }
+
+    private fun findNumber(value: Any?, key: String): Double? = when (value) {
+        is JSONObject -> {
+            value.opt(key).let { direct ->
+                when (direct) {
+                    is Number -> direct.toDouble()
+                    is String -> direct.toDoubleOrNull()
+                    else -> null
+                }
+            } ?: value.keys().asSequence().mapNotNull { findNumber(value.opt(it), key) }.firstOrNull()
+        }
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findNumber(value.opt(it), key) }.firstOrNull()
+        else -> null
+    }
+
+    private fun findDurationText(value: Any?): String? = when (value) {
+        is String -> value.trim().takeIf { it.matches(Regex("\\d{1,3}:\\d{2}(?::\\d{2})?")) }
+        is JSONObject -> value.keys().asSequence().mapNotNull { findDurationText(value.opt(it)) }.firstOrNull()
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findDurationText(value.opt(it)) }.firstOrNull()
+        else -> null
     }
 
     private fun findSectionItems(value: Any?, label: String): List<FeedItem> {

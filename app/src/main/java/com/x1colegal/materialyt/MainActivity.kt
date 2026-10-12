@@ -475,6 +475,7 @@ private fun AppScaffold(
     var authenticated by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     var expiredSessionWarning by remember { mutableStateOf(false) }
     var playerMode by remember { mutableStateOf(false) }
+    var activeVideoUrl by remember { mutableStateOf<String?>(null) }
     val hideNavigation = playerMode || activity.isFullscreen
     val tabs = buildList {
         add("Home" to Icons.Default.OndemandVideo)
@@ -512,15 +513,28 @@ private fun AppScaffold(
         val effectivePadding = if (activity.isFullscreen) PaddingValues(0.dp) else padding
         Box(Modifier.padding(effectivePadding).fillMaxSize()) {
             when (tabs.getOrNull(tab)?.first) {
-                "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }) { tab = tabs.indexOfFirst { it.first == "Account" } }
+                "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }, {
+                    activeVideoUrl = it
+                    playerMode = true
+                }) { tab = tabs.indexOfFirst { it.first == "Account" } }
                 "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer) { playerMode = it }
                 "YT Music" -> MusicScreen(activity, audioCodec, onPlayer, reopenMusicPlayer) { playerMode = it }
-                "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, loader = { YouTubeRepository.history() })
+                "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, {
+                    activeVideoUrl = it
+                    playerMode = true
+                }, loader = { YouTubeRepository.history() })
                 else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
+            }
+            activeVideoUrl?.let { videoUrl ->
+                VideoScreen(activity, videoUrl, codec, audioCodec, quality, onPlayer, onPlayerMode = { playerMode = it }) {
+                    activeVideoUrl = null
+                    playerMode = false
+                }
             }
         }
     }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    Box(Modifier.fillMaxSize()) {
     if (tablet) {
         Row(Modifier.fillMaxSize()) {
             if (!hideNavigation) NavigationRail {
@@ -534,6 +548,7 @@ private fun AppScaffold(
         Scaffold(bottomBar = {
             if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
         }, content = content)
+    }
     }
 }
 
@@ -594,7 +609,7 @@ private fun MiniPlayer(openMusic: () -> Unit) {
 }
 
 @Composable
-private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openAccount: () -> Unit) {
+private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, openAccount: () -> Unit) {
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
@@ -602,7 +617,6 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var results by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
     var homeFeed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
-    var selected by remember { mutableStateOf<String?>(null) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var selectedResult by remember { mutableStateOf<InfoItem?>(null) }
@@ -613,16 +627,6 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     fun scrollHomeToTop() = scope.launch {
         homeListState.scrollToItem(0)
         homeGridState.scrollToItem(0)
-    }
-    LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    // Render selected video on top of feed so miniplayer has feed content underneath
-    val videoOverlay: @Composable () -> Unit = {
-        if (selected != null) {
-            VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode, onBack = {
-                selected = null
-                onPlayerMode(false)
-            })
-        }
     }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
@@ -719,7 +723,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
-                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } } }
                     if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             } else {
@@ -732,27 +736,23 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     if (results.isNotEmpty()) item { Text("Channels and playlists", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
                     items(results) { item -> ResultRow(item) { selectedResult = item } }
                     if (feed.isNotEmpty() && results.isNotEmpty()) item { Text("Videos", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
-                    items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } }
+                    items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } }
                     if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             }
         }
         }
-        videoOverlay()
     }
 }
 
 @Composable
-private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, onBack: (() -> Unit)? = null, loader: () -> List<FeedItem>) {
+private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, onBack: (() -> Unit)? = null, loader: () -> List<FeedItem>) {
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
-    var selected by remember { mutableStateOf<String?>(null) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
-    LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    val videoOverlay: @Composable () -> Unit = { if (selected != null) VideoScreen(activity, selected!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode, onBack = { selected = null; onPlayerMode(false) }) }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
@@ -765,13 +765,12 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet) {
             LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp)) {
-                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url + if (item.resumePositionMs > 0) "&t=${item.resumePositionMs / 1000}" else "") } } } }
             }
         } else {
-            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> selected = item.url } } } }
+            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url + if (item.resumePositionMs > 0) "&t=${item.resumePositionMs / 1000}" else "") } } } }
         }
         }
-        videoOverlay()
     }
 }
 
@@ -1925,6 +1924,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
+    val requestedStartMs = Regex("[?&]t=(\\d+)").find(url)?.groupValues?.getOrNull(1)?.toLongOrNull()?.times(1_000L) ?: 0L
     var info by remember { mutableStateOf<StreamInfo?>(null) }
     var videoMetadata by remember { mutableStateOf<VideoDetails?>(null) }
     var channelInfo by remember { mutableStateOf<ChannelInfo?>(null) }
@@ -1951,6 +1951,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var speed by remember { mutableFloatStateOf(1f) }
     var playerGeneration by remember(videoId) { mutableIntStateOf(0) }
     var decoderRecoveryPosition by remember(videoId) { mutableStateOf<Long?>(null) }
+    var initialStartApplied by remember(videoId) { mutableStateOf(false) }
     if (channelUrl != null) { ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }; return }
     val player = remember(videoId, playerGeneration) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
     var isMinimized by remember { mutableStateOf(false) }
@@ -1983,8 +1984,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             MergingMediaSource(true, videoSource, audioSource)
             } else videoSource
         }
-        val position = player.currentPosition.coerceAtLeast(0L)
-        player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position); player.setPlaybackSpeed(speed); player.playWhenReady = true
+        val currentPosition = player.currentPosition.coerceAtLeast(0L)
+        val position = if (currentPosition > 0L) currentPosition else requestedStartMs.takeIf { !initialStartApplied } ?: 0L
+        player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position)
+        player.setPlaybackSpeed(speed); player.playWhenReady = true
         selectedStream = stream
     }
     val mediaSession = remember(player) { MediaSessionCompat(context, "MaterialYT Video") }
@@ -2038,6 +2041,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             override fun onRenderedFirstFrame() {
                 hasStartedPlayback = true
+                if (requestedStartMs > 0L) initialStartApplied = true
                 decoderRecoveryPosition = null
                 PlaybackLoadStatus.clear(videoId)
             }
@@ -2100,6 +2104,17 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         val stream = selectedStream ?: return@LaunchedEffect
         play(stream)
         player.seekTo(recoveryPosition)
+        // AndroidView can still point at the released decoder generation while the app is
+        // already in PiP. Wait until Compose has applied the new player, then force a fresh
+        // Surface/Player attachment so video rendering resumes without reopening the screen.
+        delay(50)
+        currentPlayerView?.let { view ->
+            view.player = null
+            view.player = player
+            view.requestLayout()
+            view.invalidate()
+            activity.visiblePlayerView(view)
+        }
     }
     LaunchedEffect(url, codec, audioCodec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
@@ -2545,7 +2560,7 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
     var playbackBackend by remember { mutableStateOf(PlaybackBackendPreferences.backend) }
     if (destination == "login") { LoginScreen({ destination = "account" }) { signedIn = true; onAuth(true); destination = "account" }; return }
     if (destination == "your_account") { OwnAccountScreen(activity, codec, audioCodec, quality, onPlayer) { destination = "account" }; return }
-    if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, {}, { destination = "account" }) { YouTubeRepository.library() }; return }
+    if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, {}, {}, onBack = { destination = "account" }) { YouTubeRepository.library() }; return }
     if (destination == "account") {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item { Text("Account", style = MaterialTheme.typography.headlineMedium) }

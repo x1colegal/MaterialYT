@@ -545,8 +545,10 @@ object YouTubeRepository {
             var uniqueItems = parseItems(data).distinctBy { it.id }
             if (name == "history" && uniqueItems.isEmpty()) {
                 AppLog.event("feed=history browse returned no items; trying authenticated HTML")
-                uniqueItems = parseItems(initialData(get(url))).distinctBy { it.id }
-                mode = "html-fallback"
+                uniqueItems = runCatching { parseItems(initialData(get(url))).distinctBy { it.id } }
+                    .onFailure { AppLog.failure("feed=history html fallback", it) }
+                    .getOrDefault(emptyList())
+                mode = if (uniqueItems.isEmpty()) "empty" else "html-fallback"
             }
             AppLog.event("feed=$name success mode=$mode items=${uniqueItems.size}")
             uniqueItems
@@ -1813,9 +1815,15 @@ object YouTubeRepository {
                 if (!blocked) {
                     val supported = setOf(
                         "videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "playlistVideoRenderer", "playlistRenderer", "gridPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
-                        "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "lockupViewModel"
+                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "lockupViewModel"
                     )
-                    keys.filter { it in supported }.mapNotNull { key -> value.optJSONObject(key)?.apply { put("_materialytRendererType", key) } }
+                    keys.mapNotNull { key ->
+                        val candidate = value.optJSONObject(key) ?: return@mapNotNull null
+                        val directVideo = candidate.optString("videoId").length == 11
+                        val videoContainer = (key.endsWith("Renderer") || key.endsWith("ViewModel")) && directVideo
+                        candidate.takeIf { key in supported || videoContainer }
+                            ?.apply { put("_materialytRendererType", key) }
+                    }
                         .filterNot { containsAdMarker(it) }
                         .forEach(consumer)
                 }

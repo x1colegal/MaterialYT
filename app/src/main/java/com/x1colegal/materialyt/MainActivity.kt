@@ -473,6 +473,7 @@ private fun AppScaffold(
     var tab by remember { mutableIntStateOf(0) }
     var reopenMusicPlayer by remember { mutableIntStateOf(0) }
     var authenticated by remember { mutableStateOf(YouTubeRepository.signedIn()) }
+    var expiredSessionWarning by remember { mutableStateOf(false) }
     var playerMode by remember { mutableStateOf(false) }
     val hideNavigation = playerMode || activity.isFullscreen
     val tabs = buildList {
@@ -481,6 +482,31 @@ private fun AppScaffold(
         add("YT Music" to Icons.Default.Album)
         if (authenticated) add("History" to Icons.Default.History)
         add("Account" to Icons.Default.AccountCircle)
+    }
+    LaunchedEffect(Unit) {
+        if (authenticated) {
+            expiredSessionWarning = withContext(Dispatchers.IO) { YouTubeRepository.accountSessionExpired() }
+        }
+    }
+    if (expiredSessionWarning) {
+        AlertDialog(
+            onDismissRequest = { expiredSessionWarning = false },
+            icon = { Icon(Icons.Default.Warning, null) },
+            title = { Text("Your sign-in has expired") },
+            text = {
+                Text("Home may still work with public recommendations, but History, playlists, comments, and other account features require you to sign in again.")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    expiredSessionWarning = false
+                    playerMode = false
+                    tab = tabs.indexOfFirst { it.first == "Account" }.coerceAtLeast(0)
+                }) { Text("Open Account") }
+            },
+            dismissButton = {
+                TextButton(onClick = { expiredSessionWarning = false }) { Text("Not now") }
+            }
+        )
     }
     val content: @Composable (PaddingValues) -> Unit = { padding ->
         val effectivePadding = if (activity.isFullscreen) PaddingValues(0.dp) else padding
@@ -2480,7 +2506,14 @@ private fun LoginScreen(onBack: () -> Unit, onSignedIn: () -> Unit) {
                 settings.userAgentString = settings.userAgentString.replace("; wv", "")
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                 webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) { loading = false; if (YouTubeRepository.signedIn()) onSignedIn() }
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        loading = false
+                        val host = runCatching { android.net.Uri.parse(url.orEmpty()).host.orEmpty() }.getOrDefault("")
+                        if (host == "youtube.com" || host.endsWith(".youtube.com")) {
+                            CookieManager.getInstance().flush()
+                            if (YouTubeRepository.signedIn()) onSignedIn()
+                        }
+                    }
                 }
                 webChromeClient = WebChromeClient()
                 loadUrl("https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fwww.youtube.com%2F")

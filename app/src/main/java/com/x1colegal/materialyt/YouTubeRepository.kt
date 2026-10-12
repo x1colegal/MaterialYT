@@ -80,6 +80,17 @@ object YouTubeRepository {
 
     fun signedIn(): Boolean = cookies("https://www.youtube.com").contains("SAPISID=") || cookies("https://www.youtube.com").contains("__Secure-3PAPISID=")
 
+    fun accountSessionExpired(): Boolean {
+        if (!signedIn()) return false
+        val origin = "https://www.youtube.com"
+        val response = runCatching {
+            val bootstrap = bootstrap(origin, "WEB")
+            post("$origin/youtubei/v1/browse?key=${bootstrap.key}",
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "FEhistory"), origin)
+        }.onFailure { AppLog.failure("startup account session check", it) }.getOrNull() ?: return false
+        return findObject(response, "signInEndpoint") != null
+    }
+
     @Volatile
     private var homeToken: String? = null
     @Volatile private var searchToken: String? = null
@@ -544,10 +555,24 @@ object YouTubeRepository {
             var mode = if (browseId == null) "html" else "browse"
             var uniqueItems = parseItems(data).distinctBy { it.id }
             if (name == "history" && uniqueItems.isEmpty()) {
+                if (findObject(data, "signInEndpoint") != null) {
+                    error("Your YouTube session expired. Open Account and select Refresh sign-in.")
+                }
                 AppLog.event("feed=history browse returned no items; trying authenticated HTML")
-                uniqueItems = runCatching { parseItems(initialData(get(url))).distinctBy { it.id } }
+                val historyHtml = get(url)
+                AppLog.event(
+                    "feed=history html length=${historyHtml.length} " +
+                        "var=${historyHtml.contains("var ytInitialData")} " +
+                        "windowSingle=${historyHtml.contains("window['ytInitialData']")} " +
+                        "windowDouble=${historyHtml.contains("window[\"ytInitialData\"]")} " +
+                        "jsonParse=${historyHtml.contains("ytInitialData'] = JSON.parse") || historyHtml.contains("ytInitialData\"] = JSON.parse")}"
+                )
+                uniqueItems = runCatching { parseItems(initialData(historyHtml)).distinctBy { it.id } }
                     .onFailure { AppLog.failure("feed=history html fallback", it) }
                     .getOrDefault(emptyList())
+                if (uniqueItems.isEmpty() && (historyHtml.contains("signInEndpoint") || historyHtml.contains("Sign in"))) {
+                    error("Your YouTube session expired. Open Account and select Refresh sign-in.")
+                }
                 mode = if (uniqueItems.isEmpty()) "empty" else "html-fallback"
             }
             AppLog.event("feed=$name success mode=$mode items=${uniqueItems.size}")
@@ -1937,10 +1962,14 @@ object YouTubeRepository {
     }
 
     private fun initialData(html: String): JSONObject {
-        val assignment = Regex("(?:var\\s+ytInitialData|window\\[\\\"ytInitialData\\\"])\\s*=\\s*")
+        val assignment = Regex("""(?:(?:var\s+)?ytInitialData|window\[\s*["']ytInitialData["']\s*])\s*=\s*""")
         assignment.findAll(html).forEach { match ->
             var start = match.range.last + 1
             while (start < html.length && html[start].isWhitespace()) start++
+            if (html.regionMatches(start, "JSON.parse", 0, "JSON.parse".length)) {
+                start = html.indexOf('(', start).takeIf { it >= 0 }?.plus(1) ?: return@forEach
+                while (start < html.length && html[start].isWhitespace()) start++
+            }
             if (start >= html.length) return@forEach
             val raw = when (html[start]) {
                 '{' -> extractObject(html, start)
@@ -1950,6 +1979,9 @@ object YouTubeRepository {
             raw?.let {
                 runCatching { JSONObject(it) }.getOrNull()?.let { parsed ->
                     if (parsed.has("contents") || parsed.has("continuationContents")) return parsed
+                    parsed.optJSONObject("response")?.let { response ->
+                        if (response.has("contents") || response.has("continuationContents")) return response
+                    }
                 }
             }
         }

@@ -5,6 +5,7 @@ import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.upstream.BaseDataSource
 import com.google.android.exoplayer2.upstream.DataSource
 import com.google.android.exoplayer2.upstream.DataSpec
+import com.x1colegal.materialyt.AppLog
 import com.x1colegal.materialyt.MaterialYtApp
 import okhttp3.OkHttpClient
 import java.io.File
@@ -13,13 +14,14 @@ import java.util.concurrent.ConcurrentHashMap
 
 internal class ModernSabrStream(
     val id: String,
-    val videoConfig: SabrVideoConfig?,
-    val audioConfig: SabrConfig?,
-    client: OkHttpClient,
+    private val videoConfig: SabrVideoConfig?,
+    private val audioConfig: SabrConfig?,
+    private val client: OkHttpClient,
 ) {
     val videoBuffer: SabrBuffer?
     val audioBuffer: SabrBuffer
-    private val session: Runnable
+    private var session: Runnable
+    private var requestedStartMs = 0L
 
     init {
         val dir = File(MaterialYtApp.instance.cacheDir, "sabr-modern").apply { mkdirs() }
@@ -35,16 +37,63 @@ internal class ModernSabrStream(
             audioBuffer = SabrBuffer(cfg.format.contentLength, File(dir, "$id-audio.part"))
             session = SabrSession(cfg, client, audioBuffer, paceAheadBytes = 8L * 1024 * 1024)
         }
-        Thread(session, "materialyt-sabr-$id").apply { isDaemon = true; start() }
+        startSession(session)
     }
 
     fun buffer(video: Boolean): SabrBuffer = if (video) requireNotNull(videoBuffer) else audioBuffer
     fun length(video: Boolean): Long = buffer(video).expectedLength
 
+    /** Re-aim SABR at a distant ExoPlayer seek instead of draining linearly from the old position. */
+    @Synchronized
+    fun requestPosition(video: Boolean, position: Long) {
+        val requestedBuffer = buffer(video)
+        if (position <= 0L || requestedBuffer.coveredAt(position)) return
+        val durationMs = videoConfig?.durationMs ?: audioConfig?.durationMs ?: 0L
+        val contentLength = requestedBuffer.expectedLength
+        if (durationMs <= 0L || contentLength <= 0L) {
+            requestedBuffer.raiseDemandTo(position)
+            return
+        }
+        val targetMs = position.coerceAtMost(contentLength) * durationMs / contentLength
+        // Opening the paired audio/video DataSources for one seek must create only one replacement.
+        if (kotlin.math.abs(targetMs - requestedStartMs) < 3_000L && requestedStartMs > 0L) {
+            requestedBuffer.raiseDemandTo(position)
+            return
+        }
+        val startMs = (targetMs - SabrSeekLogic.SEEK_MARGIN_MS).coerceAtLeast(0L)
+        when (val old = session) {
+            is SabrVideoSession -> old.cancel()
+            is SabrSession -> old.cancel()
+        }
+        val videoTarget = videoConfig?.let { positionForTime(startMs, it.durationMs, it.videoFormat.contentLength) }
+        val audioTarget = videoConfig?.let { positionForTime(startMs, it.durationMs, it.audioFormat.contentLength) }
+            ?: audioConfig?.let { positionForTime(startMs, it.durationMs, it.format.contentLength) }
+        videoTarget?.let { videoBuffer?.resetDemandFrom(it) }
+        audioTarget?.let(audioBuffer::resetDemandFrom)
+        session = if (videoConfig != null) {
+            SabrVideoSession(videoConfig, client, requireNotNull(videoBuffer), audioBuffer,
+                startTimeMs = startMs, paceAheadVideoBytes = 32L * 1024 * 1024,
+                paceAheadAudioBytes = 8L * 1024 * 1024, restartable = true)
+        } else {
+            SabrSession(requireNotNull(audioConfig), client, audioBuffer, startTimeMs = startMs,
+                paceAheadBytes = 8L * 1024 * 1024, restartable = true)
+        }
+        requestedStartMs = targetMs
+        AppLog.event("SABR seek restart id=$id targetMs=$targetMs startMs=$startMs video=$video")
+        startSession(session)
+    }
+
+    private fun positionForTime(timeMs: Long, durationMs: Long, length: Long): Long =
+        if (durationMs > 0L) (timeMs * length / durationMs).coerceIn(0L, length - 1L) else 0L
+
+    private fun startSession(value: Runnable) {
+        Thread(value, "materialyt-sabr-$id").apply { isDaemon = true; start() }
+    }
+
     fun destroy() {
-        when (session) {
-            is SabrVideoSession -> session.cancel()
-            is SabrSession -> session.cancel()
+        when (val active = session) {
+            is SabrVideoSession -> active.cancel()
+            is SabrSession -> active.cancel()
         }
         videoBuffer?.release(true)
         audioBuffer.release(true)
@@ -71,6 +120,7 @@ internal class ModernSabrDataSource(private val video: Boolean) : BaseDataSource
         val value = ModernSabrRegistry.get(id) ?: throw IOException("SABR stream expired: $id")
         stream = value
         position = dataSpec.position
+        value.requestPosition(video, position)
         remaining = value.length(video) - position
         transferStarted(dataSpec)
         started = true

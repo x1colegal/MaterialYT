@@ -284,6 +284,13 @@ object YouTubeRepository {
         return FeedItem(videoId, title, channel, thumbnail, 9, 16, channelThumbnail, "https://www.youtube.com/shorts/$videoId", channelUrl = channelUrl)
     }
     fun history(): List<FeedItem> = feed("history", "https://www.youtube.com/feed/history")
+
+    /** Looks up YouTube's saved watch position even when the video was opened outside History. */
+    fun historyResumePosition(videoId: String): Long = history()
+        .firstOrNull { it.id == videoId }
+        ?.resumePositionMs
+        ?.coerceAtLeast(0L)
+        ?: 0L
     fun ownChannelUrl(): String {
         val origin = "https://www.youtube.com"
         val youHtml = get("$origin/feed/you")

@@ -1925,6 +1925,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     val scope = rememberCoroutineScope()
     val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
     val requestedStartMs = Regex("[?&]t=(\\d+)").find(url)?.groupValues?.getOrNull(1)?.toLongOrNull()?.times(1_000L) ?: 0L
+    var resumeStartMs by remember(videoId, requestedStartMs) { mutableLongStateOf(requestedStartMs) }
     var info by remember { mutableStateOf<StreamInfo?>(null) }
     var videoMetadata by remember { mutableStateOf<VideoDetails?>(null) }
     var channelInfo by remember { mutableStateOf<ChannelInfo?>(null) }
@@ -1985,7 +1986,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             } else videoSource
         }
         val currentPosition = player.currentPosition.coerceAtLeast(0L)
-        val position = if (currentPosition > 0L) currentPosition else requestedStartMs.takeIf { !initialStartApplied } ?: 0L
+        val position = if (currentPosition > 0L) currentPosition else resumeStartMs.takeIf { !initialStartApplied } ?: 0L
         player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position)
         player.setPlaybackSpeed(speed); player.playWhenReady = true
         selectedStream = stream
@@ -2041,7 +2042,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             override fun onRenderedFirstFrame() {
                 hasStartedPlayback = true
-                if (requestedStartMs > 0L) initialStartApplied = true
+                if (resumeStartMs > 0L) initialStartApplied = true
                 decoderRecoveryPosition = null
                 PlaybackLoadStatus.clear(videoId)
             }
@@ -2118,6 +2119,12 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
     LaunchedEffect(url, codec, audioCodec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
+        resumeStartMs = if (requestedStartMs > 0L || !YouTubeRepository.signedIn()) requestedStartMs else {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.historyResumePosition(videoId) } }
+                .onFailure { AppLog.failure("history resume lookup video=$videoId", it) }
+                .getOrDefault(0L)
+                .also { position -> AppLog.event("history resume video=$videoId positionMs=$position") }
+        }
         // v1.2.8 behavior: NewPipe is the primary source because it exposes the complete
         // adaptive format set (AVC, VP9 and AV1). The authenticated player path remains a
         // fallback only; accepting its combined WEB format first collapses the UI to 360p.

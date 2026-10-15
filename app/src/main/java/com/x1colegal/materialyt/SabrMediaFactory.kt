@@ -16,6 +16,13 @@ import com.x1colegal.materialyt.sabrmodern.SabrVideoConfig
 
 /** Current SABR/UMP transport with positional, disk-backed A/V reassembly. */
 object SabrMediaFactory {
+    private fun streamId(info: SabrPlaybackInfo, video: SabrFormat, audio: SabrFormat) =
+        "${info.videoId}-${video.itag}-${audio.itag}"
+
+    fun hintSeek(info: SabrPlaybackInfo, video: SabrFormat, audio: SabrFormat, positionMs: Long) {
+        ModernSabrRegistry.hintPlaybackTime(streamId(info, video, audio), positionMs)
+    }
+
     fun create(info: SabrPlaybackInfo, video: SabrFormat, audio: SabrFormat, upstreamFactory: DataSource.Factory): MediaSource {
         require(!video.audio && audio.audio)
         require(video.contentLength > 0 && audio.contentLength > 0) { "SABR formats have no content length" }
@@ -23,7 +30,7 @@ object SabrMediaFactory {
             "SABR create video=${info.videoId} clientId=${info.clientId} videoItag=${video.itag} videoXtags=${video.xtags} " +
                 "audioItag=${audio.itag} audioTrackId=${audio.audioTrackId} audioXtags=${audio.xtags}"
         )
-        val id = "${info.videoId}-${video.itag}-${audio.itag}"
+        val id = streamId(info, video, audio)
         val config = SabrVideoConfig(
             info.serverAbrStreamingUrl, decode(info.videoPlaybackUstreamerConfig),
             video.wireFormat(), audio.wireFormat(), decode(info.streamingPoToken), clientInfo(info),

@@ -131,6 +131,11 @@ internal class SabrBuffer private constructor(
         if (e != null && e.value > position) e.value else position
     }
 
+    /** End of the closest covered interval at/before [position], or 0 when nothing precedes it. */
+    fun coverageEndBefore(position: Long): Long = synchronized(lock) {
+        intervals.floorEntry(position)?.value?.coerceAtMost(position) ?: 0L
+    }
+
     private fun coveredAtLocked(position: Long): Boolean {
         val e = intervals.floorEntry(position) ?: return false
         return e.value > position

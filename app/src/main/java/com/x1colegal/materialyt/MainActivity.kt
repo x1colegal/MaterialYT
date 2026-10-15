@@ -1987,6 +1987,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
         val currentPosition = player.currentPosition.coerceAtLeast(0L)
         val position = if (currentPosition > 0L) currentPosition else resumeStartMs.takeIf { !initialStartApplied } ?: 0L
+        if (position > 0L && sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
+            SabrMediaFactory.hintSeek(sabr, stream.sabrFormat, audio.sabrFormat, position)
+        }
         player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position)
         player.setPlaybackSpeed(speed); player.playWhenReady = true
         selectedStream = stream
@@ -2011,6 +2014,13 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         })
         mediaSession.isActive = true
         val listener = object : Player.Listener {
+            override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                if (reason != Player.DISCONTINUITY_REASON_SEEK) return
+                val sabr = sabrPlayback ?: return
+                val video = selectedStream?.sabrFormat ?: return
+                val audio = selectedAudio?.sabrFormat ?: return
+                SabrMediaFactory.hintSeek(sabr, video, audio, newPosition.positionMs)
+            }
             override fun onPlaybackStateChanged(state: Int) {
                 playbackState = state
                 if (state == Player.STATE_READY) PlaybackLoadStatus.clear(videoId)

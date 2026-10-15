@@ -1,6 +1,7 @@
 package com.x1colegal.materialyt.sabrmodern
 
 import android.net.Uri
+import android.os.SystemClock
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.upstream.BaseDataSource
 import com.google.android.exoplayer2.upstream.DataSource
@@ -22,6 +23,8 @@ internal class ModernSabrStream(
     val audioBuffer: SabrBuffer
     private var session: Runnable
     private var requestedStartMs = 0L
+    private var hintedPlaybackTimeMs: Long? = null
+    private var hintCreatedAtMs = 0L
 
     init {
         val dir = File(MaterialYtApp.instance.cacheDir, "sabr-modern").apply { mkdirs() }
@@ -43,11 +46,44 @@ internal class ModernSabrStream(
     fun buffer(video: Boolean): SabrBuffer = if (video) requireNotNull(videoBuffer) else audioBuffer
     fun length(video: Boolean): Long = buffer(video).expectedLength
 
+    /** Supply ExoPlayer's real media time so a byte-range open never has to guess through VBR. */
+    @Synchronized
+    fun hintPlaybackTime(positionMs: Long) {
+        hintedPlaybackTimeMs = positionMs.coerceAtLeast(0L)
+        hintCreatedAtMs = SystemClock.elapsedRealtime()
+        AppLog.event("SABR seek hint id=$id positionMs=$positionMs")
+    }
+
     /** Re-aim SABR at a distant ExoPlayer seek instead of draining linearly from the old position. */
     @Synchronized
     fun requestPosition(video: Boolean, position: Long) {
         val requestedBuffer = buffer(video)
         if (position <= 0L || requestedBuffer.coveredAt(position)) return
+        val now = SystemClock.elapsedRealtime()
+        val hintedTarget = hintedPlaybackTimeMs?.takeIf { now - hintCreatedAtMs <= SEEK_HINT_TTL_MS }
+
+        // A normal DataSource reopen at the current frontier is not a seek. Let the live drain fill
+        // the tiny gap instead of cancelling it and turning ordinary playback into restart churn.
+        val precedingEnd = requestedBuffer.coverageEndBefore(position)
+        if (precedingEnd > 0L && position - precedingEnd <= NEAR_FRONTIER_BYTES) {
+            requestedBuffer.raiseDemandTo(position)
+            return
+        }
+
+        // For merged A/V, both DataSources open for one player seek. They must share ONE real media
+        // time; deriving separate times from VBR byte offsets produced conflicting restarts.
+        if (hintedTarget != null) {
+            restartAt(hintedTarget, video, position, "player")
+            return
+        }
+
+        // Without a player hint, audio is the only safe estimator: its bitrate is approximately
+        // constant. A video-only byte ratio is invalid for VBR and must not cancel the A/V session.
+        if (videoConfig != null && video) {
+            requestedBuffer.raiseDemandTo(position)
+            AppLog.event("SABR seek waiting for audio reference id=$id position=$position")
+            return
+        }
         val durationMs = videoConfig?.durationMs ?: audioConfig?.durationMs ?: 0L
         val contentLength = requestedBuffer.expectedLength
         if (durationMs <= 0L || contentLength <= 0L) {
@@ -55,8 +91,15 @@ internal class ModernSabrStream(
             return
         }
         val targetMs = position.coerceAtMost(contentLength) * durationMs / contentLength
-        // Opening the paired audio/video DataSources for one seek must create only one replacement.
-        if (kotlin.math.abs(targetMs - requestedStartMs) < 3_000L && requestedStartMs > 0L) {
+        restartAt(targetMs, video, position, "audio-estimate")
+    }
+
+    @Synchronized
+    private fun restartAt(targetMs: Long, video: Boolean, position: Long, source: String) {
+        val requestedBuffer = buffer(video)
+        // The paired DataSource opening second observes the same explicit target and only raises its
+        // demand watermark; it never cancels the replacement created by the first opener.
+        if (kotlin.math.abs(targetMs - requestedStartMs) < 1_000L && requestedStartMs > 0L) {
             requestedBuffer.raiseDemandTo(position)
             return
         }
@@ -79,7 +122,7 @@ internal class ModernSabrStream(
                 paceAheadBytes = 8L * 1024 * 1024, restartable = true)
         }
         requestedStartMs = targetMs
-        AppLog.event("SABR seek restart id=$id targetMs=$targetMs startMs=$startMs video=$video")
+        AppLog.event("SABR seek restart id=$id targetMs=$targetMs startMs=$startMs video=$video source=$source")
         startSession(session)
     }
 
@@ -88,6 +131,11 @@ internal class ModernSabrStream(
 
     private fun startSession(value: Runnable) {
         Thread(value, "materialyt-sabr-$id").apply { isDaemon = true; start() }
+    }
+
+    companion object {
+        private const val SEEK_HINT_TTL_MS = 10_000L
+        private const val NEAR_FRONTIER_BYTES = 512L * 1024L
     }
 
     fun destroy() {
@@ -104,6 +152,7 @@ internal object ModernSabrRegistry {
     private val streams = ConcurrentHashMap<String, ModernSabrStream>()
     fun put(stream: ModernSabrStream) { streams.put(stream.id, stream)?.destroy() }
     fun get(id: String): ModernSabrStream? = streams[id]
+    fun hintPlaybackTime(id: String, positionMs: Long) { streams[id]?.hintPlaybackTime(positionMs) }
 }
 
 internal class ModernSabrDataSource(private val video: Boolean) : BaseDataSource(true) {

@@ -2216,10 +2216,24 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
     LaunchedEffect(url) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
-        var lastReported = 0L
+        // Unknown until playback actually starts. Initializing this to zero made a resumed video send
+        // an impossible first interval such as 0:00 -> 10:01, which YouTube silently ignored along
+        // with the rest of that tracking session.
+        var lastReported = -1L
+        var trackingPrepared = false
         while (true) {
-            delay(if (lastReported == 0L) 1_500 else 10_000)
+            delay(if (lastReported < 0L) 1_500 else 10_000)
             val current = player.currentPosition.coerceAtLeast(0L)
+            if (player.isPlaying && !trackingPrepared) {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.preparePlaybackTracking(videoId) } }
+                    .onFailure { AppLog.failure("playback tracking prepare video=$videoId", it) }
+                trackingPrepared = true
+            }
+            if (player.isPlaying && lastReported < 0L) {
+                // Start the watch interval at the actual playback point. A one-second lead gives the
+                // first beacon a real non-empty range without pretending the skipped head was watched.
+                lastReported = (current - 1_000L).coerceAtLeast(0L)
+            }
             if (player.isPlaying && current > lastReported) {
                 runCatching { withContext(Dispatchers.IO) { YouTubeRepository.reportPlayback(videoId, lastReported, current) } }
                 lastReported = current

@@ -1574,7 +1574,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var audio by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
     var audioTracks by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var sabrPlayback by remember(item.id) { mutableStateOf<SabrPlaybackInfo?>(null) }
-    var preferredAudioCodec by remember(item.id, audioCodec) { mutableStateOf(audioCodec) }
+    val preferredAudioCodec = audioCodec
     var shortInfo by remember(item.id) { mutableStateOf<StreamInfo?>(null) }
     var shortMetadata by remember(item.id) { mutableStateOf<VideoDetails?>(YouTubeRepository.videoDetails(item.id)) }
     var speed by remember { mutableFloatStateOf(1f) }
@@ -1899,16 +1899,6 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 val bitrate = if (stream.bitrate > 0) " • ${"%.1f".format(stream.bitrate / 1_000_000.0)} Mbps" else ""
                 ListItem(headlineContent = { Text("${stream.height}p • ${stream.fps} FPS • ${stream.codec.uppercase()}$bitrate") },
                     leadingContent = { RadioButton(selected == stream, null) }, modifier = Modifier.clickable { play(stream) })
-            }
-            Spacer(Modifier.height(16.dp)); Text("Audio codec", style = MaterialTheme.typography.titleMedium)
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(AudioCodecChoice.entries) { choice ->
-                    FilterChip(preferredAudioCodec == choice, {
-                        preferredAudioCodec = choice
-                        audio = selectAudioStream(audioTracks, choice)
-                        selected?.let(::play)
-                    }, { Text(choice.label) })
-                }
             }
             Spacer(Modifier.height(16.dp)); Text("Audio track", style = MaterialTheme.typography.titleMedium)
             visibleAudioChoices(audioTracks, audio).forEach { track ->

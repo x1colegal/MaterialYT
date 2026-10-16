@@ -2632,7 +2632,7 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
             playbackBackend = it
             PlaybackBackendPreferences.set(activity, it)
         } }
-        item { Text("SABR is the default and recommended backend. It uses native VISIONOS playback with adaptive audio and video. SABR + NewPipe fallback only tries NewPipe if SABR fails. Force NewPipe is kept for compatibility, but YouTube may reject it with LOGIN_REQUIRED, bot verification, missing formats, or extractor breakage. NewPipe + SABR fallback uses the opposite order.", style = MaterialTheme.typography.bodySmall) }
+        item { Text("SABR is the default and recommended backend. It uses WEB + PoToken + SABR playback with adaptive audio and video, plus internal client fallbacks when required. SABR + NewPipe fallback only tries NewPipe if SABR fails. Force NewPipe is kept for compatibility, but YouTube may reject it with LOGIN_REQUIRED, bot verification, missing formats, or extractor breakage. NewPipe + SABR fallback uses the opposite order.", style = MaterialTheme.typography.bodySmall) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }
         item { Text("HTTP/1.0 compatibility disables connection reuse but uses an HTTP/1.1 request line because OkHttp intentionally cannot emit HTTP/1.0. The HTTP/2 mode advertises HTTP/2 with HTTP/1.1 fallback.", style = MaterialTheme.typography.bodySmall) }
     }

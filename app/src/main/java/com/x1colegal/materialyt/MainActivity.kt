@@ -476,6 +476,7 @@ private fun AppScaffold(
     var expiredSessionWarning by remember { mutableStateOf(false) }
     var playerMode by remember { mutableStateOf(false) }
     var activeVideoUrl by remember { mutableStateOf<String?>(null) }
+    var activeChannelUrl by remember { mutableStateOf<String?>(null) }
     val hideNavigation = playerMode || activity.isFullscreen
     val tabs = buildList {
         add("Home" to Icons.Default.OndemandVideo)
@@ -517,18 +518,37 @@ private fun AppScaffold(
                     activeVideoUrl = it
                     playerMode = true
                 }) { tab = tabs.indexOfFirst { it.first == "Account" } }
-                "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer) { playerMode = it }
+                "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer, { videoUrl ->
+                    activeVideoUrl = videoUrl
+                    playerMode = true
+                }) { playerMode = it }
                 "YT Music" -> MusicScreen(activity, audioCodec, onPlayer, reopenMusicPlayer) { playerMode = it }
                 "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, {
                     activeVideoUrl = it
                     playerMode = true
                 }, loader = { YouTubeRepository.history() })
-                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
+                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer, { videoUrl ->
+                    activeVideoUrl = videoUrl
+                    playerMode = true
+                }) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
+            }
+            activeChannelUrl?.let { channelUrl ->
+                ChannelScreen(activity, channelUrl, codec, audioCodec, quality, onPlayer, { videoUrl ->
+                    activeVideoUrl = videoUrl
+                    playerMode = true
+                }) { activeChannelUrl = null }
             }
             activeVideoUrl?.let { videoUrl ->
-                VideoScreen(activity, videoUrl, codec, audioCodec, quality, onPlayer, onPlayerMode = { playerMode = it }) {
-                    activeVideoUrl = null
-                    playerMode = false
+                key(videoUrl) {
+                    VideoScreen(activity, videoUrl, codec, audioCodec, quality, onPlayer,
+                        onPlayerMode = { playerMode = it },
+                        onOpenChannel = { channelUrl ->
+                            activeChannelUrl = channelUrl
+                            playerMode = false
+                        }) {
+                        activeVideoUrl = null
+                        playerMode = false
+                    }
                 }
             }
         }
@@ -629,10 +649,10 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         homeGridState.scrollToItem(0)
     }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
-    if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
+    if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
     selectedResult?.let { item ->
         when (item.infoType) {
-            InfoItem.InfoType.CHANNEL -> ChannelScreen(activity, item.url, codec, audioCodec, quality, onPlayer) { selectedResult = null }
+            InfoItem.InfoType.CHANNEL -> ChannelScreen(activity, item.url, codec, audioCodec, quality, onPlayer, openVideo) { selectedResult = null }
             InfoItem.InfoType.PLAYLIST -> PlaylistScreen(activity, item.url, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedResult = null }
             else -> Unit
         }
@@ -754,7 +774,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
-    if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer) { selectedChannel = null }; return }
+    if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -1362,19 +1382,18 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
 }
 
 @Composable
-private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onBack: () -> Unit) {
+private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onBack: () -> Unit) {
     var channel by remember { mutableStateOf<org.schabi.newpipe.extractor.channel.ChannelInfo?>(null) }
     var channelItems by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
     var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
     var selectedTab by remember { mutableStateOf("videos") }
-    var selectedVideo by remember { mutableStateOf<String?>(null) }
     var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
     var tabHandler by remember { mutableStateOf<org.schabi.newpipe.extractor.linkhandler.ListLinkHandler?>(null) }
     var nextPage by remember { mutableStateOf<org.schabi.newpipe.extractor.Page?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    BackHandler { when { selectedShort != null -> selectedShort = null; selectedVideo != null -> selectedVideo = null; else -> onBack() } }
+    BackHandler { if (selectedShort != null) selectedShort = null else onBack() }
     LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url) } }
         .onSuccess { channel = it }.onFailure { error = it.message } }
     LaunchedEffect(channel, selectedTab) {
@@ -1456,14 +1475,13 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                                 9, 16, channel?.avatars?.lastOrNull()?.url.orEmpty(), "https://www.youtube.com/shorts/$id",
                                 channelUrl = url,
                             )
-                        } else selectedVideo = item.url
+                        } else openVideo(item.url)
                     }
                 } }
                 if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         }
     }
-    selectedVideo?.let { selected -> VideoScreen(activity, selected, codec, audioCodec, quality, onPlayer) { selectedVideo = null } }
     selectedShort?.let { selected ->
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
             ShortPlayer(activity, selected, true, codec, audioCodec, quality, onPlayer) { }
@@ -1507,7 +1525,7 @@ private fun CommunityCommentsButton(post: CommunityPost) {
 }
 
 @Composable
-private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit) {
+private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onPlayerMode: (Boolean) -> Unit) {
     var shorts by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
@@ -1517,7 +1535,7 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
         onDispose { activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
     if (channelUrl != null) {
-        ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }
+        ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer, openVideo) { channelUrl = null }
         return
     }
     LaunchedEffect(Unit) {
@@ -1910,7 +1928,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 }
 
 @Composable
-private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onBack: () -> Unit) {
+private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onOpenChannel: ((String) -> Unit)? = null, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
@@ -1938,12 +1956,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var showPlayerSettings by remember { mutableStateOf(false) }
     var showVideoDetails by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf(false) }
-    var channelUrl by remember { mutableStateOf<String?>(null) }
     var speed by remember { mutableFloatStateOf(1f) }
     var playerGeneration by remember(videoId) { mutableIntStateOf(0) }
     var decoderRecoveryPosition by remember(videoId) { mutableStateOf<Long?>(null) }
     var initialStartApplied by remember(videoId) { mutableStateOf(false) }
-    if (channelUrl != null) { ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer) { channelUrl = null }; return }
     val player = remember(videoId, playerGeneration) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
     var isMinimized by remember { mutableStateOf(false) }
     LaunchedEffect(isMinimized) { onPlayerMode?.invoke(!isMinimized) }
@@ -2417,7 +2433,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         )
                         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
                         HorizontalDivider()
-                        Row(Modifier.fillMaxWidth().clickable(enabled = !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) { channelUrl = info?.uploaderUrl ?: videoMetadata?.authorUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) {
+                            val target = info?.uploaderUrl ?: videoMetadata?.authorUrl
+                            if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) }
+                        }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
                             if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                             else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
@@ -2464,7 +2483,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     )
                     error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
                     HorizontalDivider()
-                    Row(Modifier.fillMaxWidth().clickable(enabled = !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) { channelUrl = info?.uploaderUrl ?: videoMetadata?.authorUrl }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) {
+                        val target = info?.uploaderUrl ?: videoMetadata?.authorUrl
+                        if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) }
+                    }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
                         if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                         else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
@@ -2559,7 +2581,7 @@ private fun LoginScreen(onBack: () -> Unit, onSignedIn: () -> Unit) {
 }
 
 @Composable
-private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onBack: () -> Unit) {
+private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onBack: () -> Unit) {
     var channelUrl by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
@@ -2567,7 +2589,7 @@ private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCo
             .onSuccess { channelUrl = it }
             .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
     }
-    channelUrl?.let { ChannelScreen(activity, it, codec, audioCodec, quality, onPlayer, onBack); return }
+    channelUrl?.let { ChannelScreen(activity, it, codec, audioCodec, quality, onPlayer, openVideo, onBack); return }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Your Account", style = MaterialTheme.typography.headlineMedium) }
         if (error == null) LinearProgressIndicator(Modifier.fillMaxWidth()) else Text(error.orEmpty(), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
@@ -2575,13 +2597,13 @@ private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCo
 }
 
 @Composable
-private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onAuth: (Boolean) -> Unit) {
+private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onAuth: (Boolean) -> Unit) {
     var destination by remember { mutableStateOf("account") }
     var signedIn by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     var playbackBackend by remember { mutableStateOf(PlaybackBackendPreferences.backend) }
     if (destination == "login") { LoginScreen({ destination = "account" }) { signedIn = true; onAuth(true); destination = "account" }; return }
-    if (destination == "your_account") { OwnAccountScreen(activity, codec, audioCodec, quality, onPlayer) { destination = "account" }; return }
-    if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, {}, {}, onBack = { destination = "account" }) { YouTubeRepository.library() }; return }
+    if (destination == "your_account") { OwnAccountScreen(activity, codec, audioCodec, quality, onPlayer, openVideo) { destination = "account" }; return }
+    if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, {}, openVideo, onBack = { destination = "account" }) { YouTubeRepository.library() }; return }
     if (destination == "account") {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item { Text("Account", style = MaterialTheme.typography.headlineMedium) }

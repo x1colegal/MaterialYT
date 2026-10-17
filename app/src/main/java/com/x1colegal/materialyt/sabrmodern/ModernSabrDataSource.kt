@@ -52,6 +52,10 @@ internal class ModernSabrStream(
         hintedPlaybackTimeMs = positionMs.coerceAtLeast(0L)
         hintCreatedAtMs = SystemClock.elapsedRealtime()
         AppLog.event("SABR seek hint id=$id positionMs=$positionMs")
+        if (positionMs > 0L && videoConfig != null && kotlin.math.abs(positionMs - requestedStartMs) >= SEEK_COALESCE_MS) {
+            val position = positionForTime(positionMs, videoConfig.durationMs, videoConfig.videoFormat.contentLength)
+            restartAt(positionMs, video = true, position = position, source = "hint")
+        }
     }
 
     /** Re-aim SABR at a distant ExoPlayer seek instead of draining linearly from the old position. */
@@ -99,7 +103,7 @@ internal class ModernSabrStream(
         val requestedBuffer = buffer(video)
         // The paired DataSource opening second observes the same explicit target and only raises its
         // demand watermark; it never cancels the replacement created by the first opener.
-        if (kotlin.math.abs(targetMs - requestedStartMs) < 1_000L && requestedStartMs > 0L) {
+        if (kotlin.math.abs(targetMs - requestedStartMs) < SEEK_COALESCE_MS && requestedStartMs > 0L) {
             requestedBuffer.raiseDemandTo(position)
             return
         }
@@ -135,6 +139,7 @@ internal class ModernSabrStream(
 
     companion object {
         private const val SEEK_HINT_TTL_MS = 10_000L
+        private const val SEEK_COALESCE_MS = 10_000L
         private const val NEAR_FRONTIER_BYTES = 512L * 1024L
     }
 

@@ -2,6 +2,24 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.5.6] - 2026-10-16
+
+### Big loading update
+- Significantly reduced loading time across the YouTube Home feed, History, and YouTube Music feeds by eliminating repeated recursive renderer scans.
+- Changed feed parsing to collect watch progress, resume position, watched percentage, and duration metadata in a single traversal.
+- Avoided expensive channel and playlist metadata searches for regular video entries.
+- Cancelled obsolete Home requests when another signed-in feed is opened, preventing overlapping background loads on slower devices.
+- Added detailed feed diagnostics for response headers, body transfer, response size, parsing, and total loading time.
+
+### Playback
+- Reduced the universal ExoPlayer buffer target to improve startup and recovery behavior while retaining substantial read-ahead buffering.
+- Applied faster playback start and rebuffer thresholds consistently across supported Android versions.
+- Re-aimed SABR immediately when resuming a video from History and coalesced near-identical audio/video seek requests to prevent redundant session restarts.
+
+### Improved
+- Preserved native ad filtering while removing redundant full-renderer ad scans.
+- Kept feed loading responsive on older Android devices without silently lowering the selected video quality.
+
 ## [1.4.47] - 2026-10-06
 
 ### Fixed

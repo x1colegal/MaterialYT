@@ -13,6 +13,11 @@ import org.schabi.newpipe.extractor.services.youtube.YoutubeJavaScriptPlayerMana
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CancellationException
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import android.os.SystemClock
+import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L)
@@ -64,6 +69,8 @@ object YouTubeRepository {
     private val visitorData = mutableMapOf<String, String>()
     private val standaloneWebVisitors = mutableMapOf<String, Pair<Long, String>>()
     private val bootstrapCache = mutableMapOf<String, Pair<Long, Bootstrap>>()
+    private val feedGeneration = AtomicLong(0L)
+    private val activeFeedCall = AtomicReference<Call?>(null)
     private val playerJavaScriptCache = mutableMapOf<String, String>()
     private val nChallengeCache = mutableMapOf<String, String>()
     private val videoDetailsCache = mutableMapOf<String, VideoDetails>()
@@ -105,14 +112,17 @@ object YouTubeRepository {
 
     fun home(): List<FeedItem> {
         AppLog.event("feed=home started")
+        val generation = beginFeedLoad("home")
         return try {
+            val started = SystemClock.elapsedRealtime()
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
             val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
-                JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "FEwhat_to_watch"), bootstrap.origin)
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "FEwhat_to_watch"), bootstrap.origin, generation)
+            val parseStarted = SystemClock.elapsedRealtime()
             homeToken = findContinuationToken(data)
             val uniqueItems = parseItems(data).distinctBy { it.id }
             synchronized(homeSeenIds) { homeSeenIds.clear(); homeSeenIds.addAll(uniqueItems.map { it.id }) }
-            AppLog.event("feed=home success items=${uniqueItems.size} hasToken=${homeToken != null}")
+            AppLog.event("feed=home success items=${uniqueItems.size} hasToken=${homeToken != null} parseMs=${SystemClock.elapsedRealtime() - parseStarted} totalMs=${SystemClock.elapsedRealtime() - started}")
             uniqueItems
         } catch (error: Throwable) {
             AppLog.failure("feed=home", error)
@@ -553,13 +563,16 @@ object YouTubeRepository {
 
     private fun feed(name: String, url: String): List<FeedItem> {
         AppLog.event("feed=$name started")
+        val generation = beginFeedLoad(name)
         return try {
+            val started = SystemClock.elapsedRealtime()
             val browseId = when (name) { "home" -> "FEwhat_to_watch"; "history" -> "FEhistory"; "playlists" -> "FEplaylist_aggregation"; else -> null }
             val bootstrap = bootstrap("https://www.youtube.com", "WEB")
             val data = if (browseId != null) post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
-                JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", browseId), bootstrap.origin)
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", browseId), bootstrap.origin, generation)
             else initialData(get(url))
             var mode = if (browseId == null) "html" else "browse"
+            val parseStarted = SystemClock.elapsedRealtime()
             var uniqueItems = parseItems(data).distinctBy { it.id }
             if (name == "history" && uniqueItems.isEmpty()) {
                 if (findObject(data, "signInEndpoint") != null) {
@@ -582,7 +595,7 @@ object YouTubeRepository {
                 }
                 mode = if (uniqueItems.isEmpty()) "empty" else "html-fallback"
             }
-            AppLog.event("feed=$name success mode=$mode items=${uniqueItems.size}")
+            AppLog.event("feed=$name success mode=$mode items=${uniqueItems.size} parseMs=${SystemClock.elapsedRealtime() - parseStarted} totalMs=${SystemClock.elapsedRealtime() - started}")
             uniqueItems
         } catch (error: Throwable) {
             AppLog.failure("feed=$name", error)
@@ -1641,6 +1654,13 @@ object YouTubeRepository {
 
     private data class Bootstrap(val key: String, val version: String, val origin: String)
 
+    private fun beginFeedLoad(name: String): Long {
+        val generation = feedGeneration.incrementAndGet()
+        activeFeedCall.getAndSet(null)?.cancel()
+        AppLog.event("feed=$name generation=$generation")
+        return generation
+    }
+
     private fun bootstrap(origin: String, clientName: String): Bootstrap {
         val baseOrigin = if (origin.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
         synchronized(bootstrapCache) {
@@ -1698,17 +1718,31 @@ object YouTubeRepository {
         return "$amount $unit${if (amount == "1") "" else "s"} ago"
     }
 
-    private fun post(url: String, body: JSONObject, origin: String): JSONObject {
+    private fun post(url: String, body: JSONObject, origin: String, requestGeneration: Long? = null): JSONObject {
         val request = Request.Builder().url(url).header("Content-Type", "application/json").apply {
             authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) }
             header("X-Youtube-Client-Name", if (origin.contains("music.")) "67" else "1")
             clientVersions[origin]?.let { header("X-Youtube-Client-Version", it) }
             visitorData[origin]?.let { header("X-Goog-Visitor-Id", it) }
         }.post(body.toString().toRequestBody(jsonType)).build()
-        return client.newCall(request).execute().use {
+        val call = client.newCall(request)
+        if (requestGeneration != null) {
+            if (requestGeneration != feedGeneration.get()) throw CancellationException("Superseded feed request")
+            activeFeedCall.getAndSet(call)?.cancel()
+        }
+        val started = SystemClock.elapsedRealtime()
+        return call.execute().use {
+            val headersMs = SystemClock.elapsedRealtime() - started
             val raw = it.body?.string().orEmpty()
+            val bodyMs = SystemClock.elapsedRealtime() - started
             if (!it.isSuccessful) { AppLog.event("authenticated POST host=${request.url.host} HTTP ${it.code} body=${raw.take(400)}"); error("YouTube returned HTTP ${it.code}") }
-            JSONObject(raw)
+            val parsed = JSONObject(raw)
+            if (requestGeneration != null) {
+                AppLog.event("feed HTTP host=${request.url.host} headersMs=$headersMs bodyMs=$bodyMs bytes=${raw.length}")
+                activeFeedCall.compareAndSet(call, null)
+                if (requestGeneration != feedGeneration.get()) throw CancellationException("Superseded feed response")
+            }
+            parsed
         }
     }
 
@@ -1747,9 +1781,11 @@ object YouTubeRepository {
             val playlistRenderer = rendererType.contains("playlist", true) || (rendererType == "lockupViewModel" && renderer.optString("contentId").startsWith("PL"))
             val channelRenderer = rendererType.contains("channel", true)
             val videoId = if (playlistRenderer || channelRenderer) "" else renderer.optString("videoId").ifBlank { findString(renderer, "videoId").orEmpty() }
-            val channelId = renderer.optString("channelId").ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("UC") }.orEmpty() }
-            val playlistId = renderer.optString("playlistId").ifBlank { findString(renderer, "playlistId").orEmpty() }
-                .ifBlank { renderer.optString("contentId").takeUnless { it.length == 11 }.orEmpty() }
+            val channelId = if (channelRenderer) renderer.optString("channelId")
+                .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("UC") }.orEmpty() } else ""
+            val playlistId = if (playlistRenderer) renderer.optString("playlistId")
+                .ifBlank { findString(renderer, "playlistId").orEmpty() }
+                .ifBlank { renderer.optString("contentId").takeUnless { it.length == 11 }.orEmpty() } else ""
             val isChannel = channelRenderer && channelId.startsWith("UC")
             val isPlaylist = playlistRenderer && playlistId.isNotBlank()
             val id = when { isChannel -> channelId; isPlaylist -> playlistId.removePrefix("VL"); else -> videoId }
@@ -1774,7 +1810,9 @@ object YouTubeRepository {
                 (if (leadingType) parts.getOrNull(1) else parts.firstOrNull())
                     ?.substringBefore(": ")?.trim().orEmpty().ifBlank { rawSubtitle }
             } else rawSubtitle).replace(Regex("(\\d+),(\\d+)"), "$1.$2")
-            if (containsAdMarker(renderer) || isAdString(title) || isAdString(subtitle)) return@walkFeedRenderers
+            // walkFeedRenderers already rejects ad subtrees before yielding a renderer. Repeating
+            // the recursive ad scan here doubled the work for every history entry.
+            if (isAdString(title) || isAdString(subtitle)) return@walkFeedRenderers
             val thumbnails = renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 ?: renderer.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
             val providedThumbnail = thumbnails?.optJSONObject((thumbnails.length() - 1).coerceAtLeast(0))?.optString("url").orEmpty()
@@ -1786,13 +1824,11 @@ object YouTubeRepository {
             val thumbHeight = if (isMusicItem || isChannel) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
             val channelThumbnail = findChannelThumbnail(renderer).orEmpty().ifBlank { if (isChannel) thumbnail else "" }
             val url = when { isChannel -> "https://www.youtube.com/channel/$id"; isPlaylist -> "https://www.youtube.com/playlist?list=$id"; else -> "https://www.youtube.com/watch?v=$id" }
-            val exactResumeMs = findNumber(renderer, "resumePlaybackPositionMs")?.toLong()
-                ?: findNumber(renderer, "startTimeSeconds")?.times(1_000.0)?.toLong()
-            val resumePercent = (findNumber(renderer, "percentDurationWatched")
-                ?: findNumber(renderer, "startPercent") ?: 0.0).coerceIn(0.0, 100.0)
-            val durationText = text(renderer.opt("lengthText"))
-                ?: deepText(renderer, "lengthText")
-                ?: findDurationText(renderer)
+            val resume = scanResumeMetadata(renderer)
+            val exactResumeMs = resume.resumePlaybackPositionMs?.toLong()
+                ?: resume.startTimeSeconds?.times(1_000.0)?.toLong()
+            val resumePercent = (resume.percentDurationWatched ?: resume.startPercent ?: 0.0).coerceIn(0.0, 100.0)
+            val durationText = text(renderer.opt("lengthText")) ?: resume.durationText
             val durationMs = parseDurationMs(durationText.orEmpty())
             val rawResumePositionMs = exactResumeMs?.takeIf { it > 0L }
                 ?: if (resumePercent > 0.0 && durationMs > 0L) (durationMs * resumePercent / 100.0).toLong() else 0L
@@ -1812,6 +1848,42 @@ object YouTubeRepository {
         val parts = value.trim().split(':').mapNotNull(String::toLongOrNull)
         if (parts.isEmpty() || parts.size > 3) return 0L
         return parts.fold(0L) { total, part -> total * 60L + part } * 1_000L
+    }
+
+    private data class ResumeMetadata(
+        var resumePlaybackPositionMs: Double? = null,
+        var startTimeSeconds: Double? = null,
+        var percentDurationWatched: Double? = null,
+        var startPercent: Double? = null,
+        var durationText: String? = null,
+    )
+
+    /** Collect all history-progress fields in one tree pass instead of recursively rescanning it. */
+    private fun scanResumeMetadata(root: Any?): ResumeMetadata {
+        val result = ResumeMetadata()
+        fun number(value: Any?): Double? = when (value) {
+            is Number -> value.toDouble()
+            is String -> value.toDoubleOrNull()
+            else -> null
+        }
+        fun walk(value: Any?) {
+            when (value) {
+                is JSONObject -> value.keys().forEach { key ->
+                    val child = value.opt(key)
+                    when (key) {
+                        "resumePlaybackPositionMs" -> if (result.resumePlaybackPositionMs == null) result.resumePlaybackPositionMs = number(child)
+                        "startTimeSeconds" -> if (result.startTimeSeconds == null) result.startTimeSeconds = number(child)
+                        "percentDurationWatched" -> if (result.percentDurationWatched == null) result.percentDurationWatched = number(child)
+                        "startPercent" -> if (result.startPercent == null) result.startPercent = number(child)
+                        "lengthText" -> if (result.durationText == null) result.durationText = text(child)
+                    }
+                    walk(child)
+                }
+                is JSONArray -> for (index in 0 until value.length()) walk(value.opt(index))
+            }
+        }
+        walk(root)
+        return result
     }
 
     private fun findNumber(value: Any?, key: String): Double? = when (value) {
@@ -1888,22 +1960,31 @@ object YouTubeRepository {
                 } || containsAdMarker(value.opt("adSlotRenderer")) ||
                      containsAdMarker(value.opt("inFeedAdLayoutRenderer")) ||
                      containsAdMarker(value.opt("adPlacementRenderer"))
+                val consumedKeys = HashSet<String>()
                 if (!blocked) {
                     val supported = setOf(
                         "videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "playlistVideoRenderer", "playlistRenderer", "gridPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
                         "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "lockupViewModel"
                     )
-                    keys.mapNotNull { key ->
-                        val candidate = value.optJSONObject(key) ?: return@mapNotNull null
+                    keys.forEach { key ->
+                        val candidate = value.optJSONObject(key) ?: return@forEach
                         val directVideo = candidate.optString("videoId").length == 11
                         val videoContainer = (key.endsWith("Renderer") || key.endsWith("ViewModel")) && directVideo
-                        candidate.takeIf { key in supported || videoContainer }
-                            ?.apply { put("_materialytRendererType", key) }
+                        if (key in supported || videoContainer) {
+                            consumedKeys += key
+                            candidate.put("_materialytRendererType", key)
+                            // Ad containers are already propagated through `blocked`, and the
+                            // parsed title/subtitle are checked before an item is emitted. A deep
+                            // scan of every full renderer here was the remaining dominant cost on
+                            // Android 7 history responses.
+                            consumer(candidate)
+                        }
                     }
-                        .filterNot { containsAdMarker(it) }
-                        .forEach(consumer)
                 }
-                keys.forEach { walkFeedRenderers(value.opt(it), blocked, consumer) }
+                // A recognized renderer is one complete feed item. Its metadata subtree contains
+                // many nested endpoints/text objects but never another independent feed result.
+                // Walking it again made history parsing effectively quadratic on old devices.
+                keys.filterNot(consumedKeys::contains).forEach { walkFeedRenderers(value.opt(it), blocked, consumer) }
             }
             is JSONArray -> for (index in 0 until value.length()) walkFeedRenderers(value.opt(index), blockedByAd, consumer)
         }

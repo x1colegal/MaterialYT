@@ -28,8 +28,13 @@ object PlayerFactory {
             })
         return ExoPlayer.Builder(context, renderers)
             .setLoadControl(DefaultLoadControl.Builder()
-                .setBufferDurationsMs(60_000, 180_000, 750, 1_500)
-                .setTargetBufferBytes(192 * 1024 * 1024)
+                .setBufferDurationsMs(
+                    12_000,
+                    60_000,
+                    400,
+                    800,
+                )
+                .setTargetBufferBytes(48 * 1024 * 1024)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build())
             .build()

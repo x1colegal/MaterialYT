@@ -1607,10 +1607,52 @@ object YouTubeRepository {
         val response = post("$origin/youtubei/v1/next?key=${bootstrap.key}",
             JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId), origin)
         val owner = findObject(response, "videoOwnerRenderer")?.optJSONObject("videoOwnerRenderer")
-        val name = owner?.let { text(it.opt("title")) }
-            ?: findString(response.optJSONObject("videoDetails"), "author")
+        val ownerName = owner?.let { text(it.opt("title")) }?.trim().orEmpty()
+        val metadataName = videoDetails(videoId)?.author?.trim().orEmpty()
+        val responseName = findString(response.optJSONObject("videoDetails"), "author")?.trim().orEmpty()
+        // Some NEXT layouts put the handle and subscriber label in the owner title, for
+        // example "@creator • 1.2M Subscribers". That is channel metadata, not its name.
+        val name = metadataName.takeIf(String::isNotBlank)
+            ?: responseName.takeIf(String::isNotBlank)
+            ?: ownerName.takeUnless(::isChannelMetadataLabel)
+            ?: ownerName.substringBefore("•").trim().takeIf(String::isNotBlank)
             ?: error("Channel data is unavailable")
-        return ChannelInfo(name, owner?.let(::findThumbnail).orEmpty())
+        return ChannelInfo(name, owner?.let(::findLargestAvatar).orEmpty())
+    }
+
+    private fun isChannelMetadataLabel(value: String): Boolean {
+        val normalized = value.lowercase()
+        return (value.startsWith("@") && '•' in value) ||
+            " subscriber" in normalized || " subscribers" in normalized
+    }
+
+    private fun findLargestAvatar(value: Any?): String? {
+        var bestUrl: String? = null
+        var bestPixels = -1L
+        fun visit(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    val url = node.optString("url")
+                    if (isYouTubeImageUrl(url)) {
+                        val declaredWidth = node.optLong("width").coerceAtLeast(0L)
+                        val declaredHeight = node.optLong("height").coerceAtLeast(0L)
+                        val urlSize = Regex("=s(\\d+)").find(url)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
+                        val pixels = maxOf(declaredWidth * declaredHeight, urlSize * urlSize)
+                        if (pixels > bestPixels) {
+                            bestPixels = pixels
+                            bestUrl = normalizeImageUrl(url)
+                        }
+                    }
+                    node.keys().forEach { visit(node.opt(it)) }
+                }
+                is JSONArray -> for (index in 0 until node.length()) visit(node.opt(index))
+            }
+        }
+        visit(value)
+        // Owner renderers occasionally expose only a 48 px avatar even though the same
+        // image endpoint supports larger sizes. 176 px stays small on the wire but is
+        // sharp for the 42 dp player avatar on high-density displays.
+        return bestUrl?.replace(Regex("=s\\d+(?=-|$)"), "=s176")
     }
 
     fun authenticatedHeaders(origin: String): Map<String, String> = buildMap {
@@ -2077,8 +2119,13 @@ object YouTubeRepository {
         }
     }
 
+    private fun isYouTubeImageUrl(url: String): Boolean =
+        url.contains("ytimg.com") || url.contains("ggpht.com") || url.contains("googleusercontent.com")
+
+    private fun normalizeImageUrl(url: String): String = if (url.startsWith("//")) "https:$url" else url
+
     private fun findThumbnail(value: Any?): String? = when (value) {
-        is JSONObject -> value.optString("url").takeIf { it.contains("ytimg.com") || it.contains("ggpht.com") }?.let { if (it.startsWith("//")) "https:$it" else it }
+        is JSONObject -> value.optString("url").takeIf(::isYouTubeImageUrl)?.let(::normalizeImageUrl)
             ?: value.keys().asSequence().mapNotNull { findThumbnail(value.opt(it)) }.firstOrNull()
         is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findThumbnail(value.opt(it)) }.firstOrNull()
         else -> null

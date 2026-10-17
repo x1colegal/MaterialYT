@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.5.7] - 2026-10-17
+
+### Fixed
+- Kept channel names consistent in the video player when YouTube returns a combined handle and subscriber label instead of the creator name.
+- Restored channel profile pictures served from YouTube's newer `yt3.googleusercontent.com` image host.
+- Selected the largest available channel avatar and requested a sharper variant when YouTube only exposes a low-resolution owner image.
+
 ## [1.5.6] - 2026-10-16
 
 ### Big loading update

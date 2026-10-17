@@ -2,6 +2,18 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.5.8] - 2026-10-17
+
+### Improved
+- Preserved the original line breaks in video descriptions.
+- Made web links, protocol-less social links, and YouTube channel paths such as `/@creator` clickable.
+- Made description timestamps and chapter timestamps seek the active video to the selected position.
+- Preserved YouTube's structured description targets so labelled Discord, social, membership, profile, and chapter links remain clickable.
+- Added a Copy link action to video details.
+- Registered MaterialYT as a handler for YouTube, YouTube Music, youtu.be, channel, playlist, Shorts, live, and embed links.
+- Unwrapped YouTube redirect links before routing so Discord, Instagram, Twitter, and other external destinations open normally.
+- Closed video details and suppressed automatic PiP when intentionally opening an external description link.
+
 ## [1.5.7] - 2026-10-17
 
 ### Fixed

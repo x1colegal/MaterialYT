@@ -54,7 +54,8 @@ data class SabrPlaybackInfo(
     val formats: List<SabrFormat>
 )
 data class ChannelInfo(val name: String, val thumbnail: String)
-data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "")
+data class DescriptionLinkTarget(val start: Int, val end: Int, val target: String)
+data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "", val descriptionLinks: List<DescriptionLinkTarget> = emptyList())
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "")
 data class CommunityComment(val id: String, val author: String, val text: String, val published: String, val likes: String)
@@ -1437,11 +1438,46 @@ object YouTubeRepository {
         val secondary = findObject(response, "videoSecondaryInfoRenderer")?.optJSONObject("videoSecondaryInfoRenderer")
         val likeText = findLikeText(primary).orEmpty()
         val published = text(primary?.opt("dateText")).orEmpty().ifBlank { current.publishedDate }
-        val description = secondary?.optJSONObject("attributedDescription")?.optString("content").orEmpty()
+        val attributedDescription = secondary?.optJSONObject("attributedDescription")
+        val description = attributedDescription?.optString("content").orEmpty()
             .ifBlank { text(secondary?.opt("description")).orEmpty() }
             .ifBlank { current.description }
-        return current.copy(likeText = likeText, publishedDate = published, description = description).also {
+        val descriptionLinks = attributedDescription?.let(::attributedDescriptionLinks).orEmpty()
+            .ifEmpty { current.descriptionLinks }
+        return current.copy(likeText = likeText, publishedDate = published, description = description,
+            descriptionLinks = descriptionLinks).also {
             synchronized(videoDetailsCache) { videoDetailsCache[videoId] = it }
+        }
+    }
+
+    private fun attributedDescriptionLinks(description: JSONObject): List<DescriptionLinkTarget> {
+        val content = description.optString("content")
+        val runs = description.optJSONArray("commandRuns") ?: return emptyList()
+        return (0 until runs.length()).mapNotNull { index ->
+            val run = runs.optJSONObject(index) ?: return@mapNotNull null
+            val start = run.optInt("startIndex", -1)
+            val length = run.optInt("length", -1)
+            if (start < 0 || length <= 0 || start + length > content.length) return@mapNotNull null
+            val command = run.optJSONObject("onTap")?.optJSONObject("innertubeCommand")
+                ?: run.optJSONObject("navigationEndpoint")
+                ?: return@mapNotNull null
+            val seekSeconds = command.optJSONObject("watchEndpoint")?.optLong("startTimeSeconds", -1L) ?: -1L
+            val urlEndpoint = command.optJSONObject("urlEndpoint")
+            val webUrl = urlEndpoint?.optString("url").orEmpty().ifBlank {
+                command.optJSONObject("commandMetadata")?.optJSONObject("webCommandMetadata")?.optString("url").orEmpty()
+            }
+            val browse = command.optJSONObject("browseEndpoint")
+            val browseUrl = browse?.optString("canonicalBaseUrl").orEmpty().ifBlank {
+                browse?.optString("browseId")?.takeIf { it.startsWith("UC") }
+                    ?.let { "/channel/$it" }.orEmpty()
+            }
+            val target = when {
+                seekSeconds >= 0L -> "seek:$seekSeconds"
+                webUrl.isNotBlank() -> if (webUrl.startsWith("/")) "https://www.youtube.com$webUrl" else webUrl
+                browseUrl.isNotBlank() -> if (browseUrl.startsWith("/")) "https://www.youtube.com$browseUrl" else browseUrl
+                else -> return@mapNotNull null
+            }
+            DescriptionLinkTarget(start, start + length, target)
         }
     }
 

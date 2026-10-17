@@ -95,6 +95,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.ClickableText
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.ui.unit.dp
@@ -201,6 +206,15 @@ private fun formatTime(milliseconds: Long): String {
     return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
 }
 
+private fun unwrapYouTubeRedirect(url: String): String {
+    val uri = runCatching { android.net.Uri.parse(url) }.getOrNull() ?: return url
+    val youtubeHost = uri.host.orEmpty().lowercase().let { it == "youtube.com" || it.endsWith(".youtube.com") }
+    if (!youtubeHost || uri.path != "/redirect") return url
+    return uri.getQueryParameter("q")?.takeIf(String::isNotBlank)
+        ?: uri.getQueryParameter("url")?.takeIf(String::isNotBlank)
+        ?: url
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 private fun Modifier.autoMarquee(): Modifier = basicMarquee(
     iterations = Int.MAX_VALUE,
@@ -220,10 +234,20 @@ class MainActivity : ComponentActivity() {
     fun registerCurrentPlayer(p: ExoPlayer) { player = p }
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
+    private var suppressNextAutoPip = false
     var isFullscreen by mutableStateOf(false)
         private set
     var pipMode by mutableStateOf(false)
         private set
+    var incomingYouTubeUrl by mutableStateOf<String?>(null)
+        private set
+    fun consumeIncomingYouTubeUrl() { incomingYouTubeUrl = null }
+    fun openExternalLink(uri: android.net.Uri) {
+        suppressNextAutoPip = true
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+            .onFailure { suppressNextAutoPip = false }
+        window.decorView.postDelayed({ suppressNextAutoPip = false }, 1_500L)
+    }
     private val pipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_PIP_TOGGLE) {
@@ -235,11 +259,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        incomingYouTubeUrl = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString
         CookieManager.getInstance().setAcceptCookie(true)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(pipReceiver, IntentFilter(ACTION_PIP_TOGGLE), RECEIVER_NOT_EXPORTED)
         else @Suppress("DEPRECATION") registerReceiver(pipReceiver, IntentFilter(ACTION_PIP_TOGGLE))
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 71)
         setContent { MaterialYtRoot(this) { player = it } }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == Intent.ACTION_VIEW) incomingYouTubeUrl = intent.dataString
     }
 
     private val artworkCache = mutableMapOf<String, android.graphics.Bitmap>()
@@ -378,6 +409,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
+        if (suppressNextAutoPip) {
+            suppressNextAutoPip = false
+            return
+        }
         if (Build.VERSION.SDK_INT >= 26 && videoPlayerActive && player?.isPlaying == true && !isInPictureInPictureMode) pip()
     }
 
@@ -477,6 +512,7 @@ private fun AppScaffold(
     var playerMode by remember { mutableStateOf(false) }
     var activeVideoUrl by remember { mutableStateOf<String?>(null) }
     var activeChannelUrl by remember { mutableStateOf<String?>(null) }
+    var activePlaylistUrl by remember { mutableStateOf<String?>(null) }
     val hideNavigation = playerMode || activity.isFullscreen
     val tabs = buildList {
         add("Home" to Icons.Default.OndemandVideo)
@@ -489,6 +525,48 @@ private fun AppScaffold(
         if (authenticated) {
             expiredSessionWarning = withContext(Dispatchers.IO) { YouTubeRepository.accountSessionExpired() }
         }
+    }
+    LaunchedEffect(activity.incomingYouTubeUrl) {
+        val originalIncoming = activity.incomingYouTubeUrl ?: return@LaunchedEffect
+        val incoming = unwrapYouTubeRedirect(originalIncoming)
+        val uri = runCatching { android.net.Uri.parse(incoming) }.getOrNull()
+        val host = uri?.host.orEmpty().lowercase()
+        val path = uri?.path.orEmpty()
+        val youtubeHost = host == "youtu.be" || host == "youtube.com" || host.endsWith(".youtube.com") || host.endsWith(".youtube-nocookie.com")
+        if (incoming != originalIncoming && !youtubeHost) {
+            uri?.let(activity::openExternalLink)
+            activity.consumeIncomingYouTubeUrl()
+            return@LaunchedEffect
+        }
+        when {
+            path.startsWith("/@") || path.startsWith("/channel/") || path.startsWith("/c/") || path.startsWith("/user/") -> {
+                activeVideoUrl = null
+                activePlaylistUrl = null
+                activeChannelUrl = incoming
+                playerMode = false
+            }
+            path == "/playlist" && !uri?.getQueryParameter("list").isNullOrBlank() -> {
+                activeVideoUrl = null
+                activeChannelUrl = null
+                activePlaylistUrl = incoming
+                playerMode = false
+            }
+            host == "youtu.be" || path == "/watch" || path.startsWith("/shorts/") || path.startsWith("/live/") || path.startsWith("/embed/") -> {
+                val id = when {
+                    host == "youtu.be" -> path.trim('/').substringBefore('/')
+                    path == "/watch" -> uri?.getQueryParameter("v").orEmpty()
+                    else -> path.trim('/').substringAfter('/').substringBefore('/')
+                }
+                if (id.isNotBlank()) {
+                    val start = uri?.getQueryParameter("t")?.takeIf { it.matches(Regex("\\d+")) }
+                    activeChannelUrl = null
+                    activePlaylistUrl = null
+                    activeVideoUrl = "https://www.youtube.com/watch?v=$id${start?.let { "&t=$it" }.orEmpty()}"
+                    playerMode = true
+                }
+            }
+        }
+        activity.consumeIncomingYouTubeUrl()
     }
     if (expiredSessionWarning) {
         AlertDialog(
@@ -537,6 +615,11 @@ private fun AppScaffold(
                     activeVideoUrl = videoUrl
                     playerMode = true
                 }) { activeChannelUrl = null }
+            }
+            activePlaylistUrl?.let { playlistUrl ->
+                PlaylistScreen(activity, playlistUrl, codec, audioCodec, quality, onPlayer, { playerMode = it }) {
+                    activePlaylistUrl = null
+                }
             }
             activeVideoUrl?.let { videoUrl ->
                 key(videoUrl) {
@@ -1193,6 +1276,68 @@ private fun formatCount(count: Long): String = when {
         val formatted = String.format(java.util.Locale.US, "%.1f", b)
         if (formatted.endsWith(".0")) "${count / 1_000_000_000L}B" else "${formatted}B"
     }
+}
+
+private fun descriptionText(raw: String): String {
+    if (!Regex("<[/!a-zA-Z][^>]*>").containsMatchIn(raw)) return raw
+    return if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString()
+    else @Suppress("DEPRECATION") Html.fromHtml(raw).toString()
+}
+
+private fun descriptionLinks(text: String, explicit: List<DescriptionLinkTarget>): List<DescriptionLinkTarget> {
+    val links = explicit.filter { it.start >= 0 && it.end > it.start && it.end <= text.length }.toMutableList()
+    fun overlaps(start: Int, end: Int) = links.any { start < it.end && end > it.start }
+
+    Regex("(?i)(?:https?://|www\\.)[^\\s<>]+|(?<![A-Za-z0-9_])/\\s?@[A-Za-z0-9._-]+|(?<![@A-Za-z0-9._-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?\\.)+[A-Za-z]{2,}(?:/[^\\s<>]*)?")
+        .findAll(text).forEach { match ->
+            if (overlaps(match.range.first, match.range.last + 1)) return@forEach
+            val visible = match.value.trimEnd('.', ',', ';', '!', '?', ')', ']')
+            if (visible.isEmpty()) return@forEach
+            val end = match.range.first + visible.length
+            val compact = visible.replace(Regex("^/\\s?@"), "/@")
+            val target = when {
+                compact.startsWith("/@") -> "https://www.youtube.com$compact"
+                compact.startsWith("www.", true) -> "https://$compact"
+                !compact.contains("://") -> "https://$compact"
+                else -> compact
+            }
+            links += DescriptionLinkTarget(match.range.first, end, target)
+        }
+
+    Regex("(?<![\\d:])(?:(\\d{1,2}):)?([0-5]?\\d):([0-5]\\d)(?![\\d:])")
+        .findAll(text).forEach { match ->
+            if (overlaps(match.range.first, match.range.last + 1)) return@forEach
+            val hours = match.groupValues[1].toLongOrNull() ?: 0L
+            val minutes = match.groupValues[2].toLongOrNull() ?: return@forEach
+            val seconds = match.groupValues[3].toLongOrNull() ?: return@forEach
+            links += DescriptionLinkTarget(match.range.first, match.range.last + 1,
+                "seek:${hours * 3600L + minutes * 60L + seconds}")
+        }
+    return links.sortedBy(DescriptionLinkTarget::start)
+}
+
+@Composable
+private fun InteractiveDescription(text: String, explicitLinks: List<DescriptionLinkTarget>, onSeek: (Long) -> Unit, onOpenUrl: (String) -> Unit) {
+    val linkColor = MaterialTheme.colorScheme.primary
+    val annotated = remember(text, explicitLinks, linkColor) {
+        buildAnnotatedString {
+            append(text)
+            descriptionLinks(text, explicitLinks).forEach { link ->
+                addStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline), link.start, link.end)
+                addStringAnnotation("descriptionLink", link.target, link.start, link.end)
+            }
+        }
+    }
+    @Suppress("DEPRECATION")
+    ClickableText(
+        text = annotated,
+        style = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+        onClick = { offset ->
+            annotated.getStringAnnotations("descriptionLink", offset, offset).firstOrNull()?.item?.let { target ->
+                target.removePrefix("seek:").toLongOrNull()?.let(onSeek) ?: onOpenUrl(target)
+            }
+        },
+    )
 }
 
 @Composable
@@ -2515,9 +2660,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.LONG)
                     .withLocale(java.util.Locale.getDefault()).format(date)
             } ?: info?.textualUploadDate?.takeIf { it.isNotBlank() } ?: videoMetadata?.publishedDate?.takeIf { it.isNotBlank() }
-            val rawDescription = info?.description?.content.orEmpty().ifBlank { videoMetadata?.description.orEmpty() }
-            val description = if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(rawDescription, Html.FROM_HTML_MODE_LEGACY).toString()
-                else @Suppress("DEPRECATION") Html.fromHtml(rawDescription).toString()
+            val rawDescription = videoMetadata?.description.orEmpty().ifBlank { info?.description?.content.orEmpty() }
+            val description = descriptionText(rawDescription)
             Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                     Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -2526,10 +2670,46 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 Spacer(Modifier.height(16.dp))
                 Text("Published", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(publishedDate ?: "Date unavailable", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = {
+                        val link = "https://youtu.be/$videoId"
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("YouTube video", link))
+                        android.widget.Toast.makeText(context, "Video link copied", android.widget.Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.Share, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Copy link")
+                }
                 HorizontalDivider(Modifier.padding(vertical = 16.dp))
                 Text("Description", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
-                Text(description.ifBlank { "No description was provided." }, style = MaterialTheme.typography.bodyMedium)
+                if (description.isBlank()) Text("No description was provided.", style = MaterialTheme.typography.bodyMedium)
+                else InteractiveDescription(
+                    text = description,
+                    explicitLinks = videoMetadata?.descriptionLinks.orEmpty(),
+                    onSeek = { seconds ->
+                        showVideoDetails = false
+                        player.seekTo(seconds * 1_000L)
+                    },
+                    onOpenUrl = { target ->
+                        showVideoDetails = false
+                        val resolvedTarget = unwrapYouTubeRedirect(target)
+                        val uri = android.net.Uri.parse(resolvedTarget)
+                        val channelPath = uri.host?.endsWith("youtube.com", true) == true &&
+                            (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
+                        if (channelPath && onOpenChannel != null) {
+                            showVideoDetails = false
+                            isMinimized = true
+                            onOpenChannel(resolvedTarget)
+                        } else {
+                            activity.openExternalLink(uri)
+                        }
+                    },
+                )
             }
         }
     )

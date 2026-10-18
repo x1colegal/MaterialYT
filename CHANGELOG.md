@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.5.9] - 2026-10-18
+
+### Fixed
+- Kept fullscreen video edge-to-edge while moving its bottom controls safely inside rounded screens without a transparent gap.
+
 ## [1.5.8] - 2026-10-17
 
 ### Improved

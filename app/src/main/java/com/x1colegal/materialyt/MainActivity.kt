@@ -2529,9 +2529,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     } else if (fullscreen) {
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
             AndroidView(
-                factory = { PlayerView(it).apply { this.player = player; useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE }); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this); hideController(); controllerVisible = false } } },
+                factory = { context -> PlayerView(context).apply { this.player = player; useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE }); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this); (findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_position)?.parent as? View)?.let { bottomControls -> val inset = (8f * context.resources.displayMetrics.density).roundToInt(); bottomControls.setPadding(bottomControls.paddingLeft, bottomControls.paddingTop, bottomControls.paddingRight, maxOf(bottomControls.paddingBottom, inset)) }; hideController(); controllerVisible = false } } },
                 update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
-                modifier = Modifier.fillMaxSize().padding(bottom = 8.dp)
+                modifier = Modifier.fillMaxSize()
             )
             if (!hasStartedPlayback) videoLoadMessage?.let { message ->
                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))

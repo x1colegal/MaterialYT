@@ -2027,15 +2027,48 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.LONG).withLocale(java.util.Locale.getDefault()).format(date)
             } ?: shortInfo?.textualUploadDate?.takeIf { it.isNotBlank() }
                 ?: shortMetadata?.publishedDate?.takeIf { it.isNotBlank() }
-            val raw = shortInfo?.description?.content.orEmpty().ifBlank { shortMetadata?.description.orEmpty() }
-            val description = if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString() else @Suppress("DEPRECATION") Html.fromHtml(raw).toString()
+            val raw = shortMetadata?.description.orEmpty().ifBlank { shortInfo?.description?.content.orEmpty() }
+            val description = descriptionText(raw)
             Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                     Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium) }
                     Column { Text(likes, style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
                 }
                 Spacer(Modifier.height(16.dp)); Text("Published", style = MaterialTheme.typography.labelMedium); Text(published ?: "Date unavailable", style = MaterialTheme.typography.titleMedium)
-                HorizontalDivider(Modifier.padding(vertical = 16.dp)); Text("Description", style = MaterialTheme.typography.titleMedium); Spacer(Modifier.height(8.dp)); Text(description.ifBlank { "No description was provided." })
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = {
+                        val link = "https://youtube.com/shorts/${item.id}"
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("YouTube Short", link))
+                        android.widget.Toast.makeText(context, "Short link copied", android.widget.Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.Share, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Copy link")
+                }
+                HorizontalDivider(Modifier.padding(vertical = 16.dp))
+                Text("Description", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                if (description.isBlank()) Text("No description was provided.")
+                else InteractiveDescription(
+                    text = description,
+                    explicitLinks = shortMetadata?.descriptionLinks.orEmpty(),
+                    onSeek = { seconds ->
+                        showDetails = false
+                        player.seekTo(seconds * 1_000L)
+                    },
+                    onOpenUrl = { target ->
+                        showDetails = false
+                        val resolvedTarget = unwrapYouTubeRedirect(target)
+                        val uri = android.net.Uri.parse(resolvedTarget)
+                        val channelPath = uri.host?.endsWith("youtube.com", true) == true &&
+                            (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
+                        if (channelPath) onOpenChannel(resolvedTarget) else activity.openExternalLink(uri)
+                    },
+                )
             }
         }
     )

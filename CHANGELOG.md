@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.5.11] - 2026-10-18
+
+### Improved
+- Added the full interactive video description experience to Shorts, including preserved line breaks, clickable links and timestamps, channel navigation, and link copying.
+
 ## [1.5.10] - 2026-10-18
 
 ### Fixed

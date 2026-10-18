@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.5.12] - 2026-10-18
+
+### Added
+- Added playback settings to the YT Music player with the same real Audio track selection experience used by videos and Shorts.
+
 ## [1.5.11] - 2026-10-18
 
 ### Improved

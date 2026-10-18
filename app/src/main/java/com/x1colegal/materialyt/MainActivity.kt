@@ -983,6 +983,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
 @Composable
 private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec: AudioCodecChoice, onBack: () -> Unit) {
     var showLyrics by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     
     var lyrics by remember { mutableStateOf<List<LyricLine>?>(null) }
     var lyricsError by remember { mutableStateOf<String?>(null) }
@@ -992,6 +993,8 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     val duration = AutoMusicService.duration.longValue
     val buffered = AutoMusicService.bufferedPosition.longValue
     val playing = AutoMusicService.playing.value
+    val audioTracks = AutoMusicService.availableAudioTracks.value
+    val selectedAudioTrack = AutoMusicService.selectedAudioTrack.value
     val musicLoadStatus by PlaybackLoadStatus.message.collectAsState()
     val musicLoadMessage = musicLoadStatus?.takeIf { it.mediaId == track.id }?.text
     BackHandler { onBack() }
@@ -1037,7 +1040,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             Row(Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
                 Text("Now playing", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
-                
+                IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
             }
             if (tablet) {
                 Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
@@ -1091,6 +1094,35 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             }
         }
     }
+    if (showSettings) AlertDialog(
+        onDismissRequest = { showSettings = false },
+        confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } },
+        title = { Text("Playback settings") },
+        text = {
+            Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState())) {
+                Text("Audio track", style = MaterialTheme.typography.titleMedium)
+                if (audioTracks.isEmpty()) {
+                    Text("Audio tracks are still loading.", Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else audioTracks.forEach { audio ->
+                    val selected = selectedAudioTrack?.let { current ->
+                        when {
+                            current.audioTrackId.isNotBlank() && audio.audioTrackId.isNotBlank() -> current.audioTrackId == audio.audioTrackId && current.codec.equals(audio.codec, true)
+                            current.sabrFormat != null && audio.sabrFormat != null -> current.sabrFormat.itag == audio.sabrFormat.itag
+                            else -> current.url == audio.url && current.codec.equals(audio.codec, true) && current.bitrate == audio.bitrate
+                        }
+                    } == true
+                    val label = audio.audioTrackName.ifBlank { if (audio.originalAudio) "Original audio" else "Default audio" }
+                    val bitrate = if (audio.bitrate > 0) "${audio.bitrate / 1000} kbps" else "Unknown bitrate"
+                    ListItem(
+                        headlineContent = { Text(label) },
+                        supportingContent = { Text("${audio.codec.uppercase()} • $bitrate") },
+                        leadingContent = { RadioButton(selected = selected, onClick = null) },
+                        modifier = Modifier.clickable { AutoMusicService.selectAudioTrack(audio) },
+                    )
+                }
+            }
+        },
+    )
 }
 
 @Composable

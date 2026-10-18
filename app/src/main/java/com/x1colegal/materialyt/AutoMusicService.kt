@@ -70,6 +70,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val position = androidx.compose.runtime.mutableLongStateOf(0L)
         val bufferedPosition = androidx.compose.runtime.mutableLongStateOf(0L)
         val duration = androidx.compose.runtime.mutableLongStateOf(0L)
+        val availableAudioTracks = androidx.compose.runtime.mutableStateOf<List<PlayableStream>>(emptyList())
+        val selectedAudioTrack = androidx.compose.runtime.mutableStateOf<PlayableStream?>(null)
         private var instance: AutoMusicService? = null
         private const val ACTION_PLAY = "com.x1colegal.materialyt.PLAY"
         private const val ACTION_KEEP_ALIVE = "com.x1colegal.materialyt.KEEP_ALIVE"
@@ -84,6 +86,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         fun pause() { instance?.player?.let { if (it.isPlaying) it.pause() } }
         fun toggle() { instance?.player?.let { if (it.isPlaying) it.pause() else it.play() } }
         fun seekTo(value: Long) { instance?.player?.seekTo(value) }
+        fun selectAudioTrack(stream: PlayableStream) { instance?.switchAudioTrack(stream) }
         fun close() { instance?.requestClosePlayback() }
     }
 
@@ -234,6 +237,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             preferredAudioCodec = preferredCodec
             audioCandidates = emptyList()
             audioCandidateIndex = -1
+            availableAudioTracks.value = emptyList()
+            selectedAudioTrack.value = null
             webFallbackAttempted = false
             extractionRetryCount = 0
             nowPlaying.value = track
@@ -260,6 +265,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
             val audioStreams = extractAudioStreams(track)
             if (currentTrack?.id != track.id || generation != playGeneration) return@launch
+            availableAudioTracks.value = audioStreams.distinctBy(::audioStreamKey)
             setAudioCandidates(audioStreams, preferredCodec)
             playNextAudioCandidate(track, generation)
         }
@@ -321,12 +327,13 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 val webStreams = withContext(Dispatchers.IO) {
                     runCatching { YouTubeRepository.playerStreams(track.id, music = true) }.getOrDefault(emptyList())
                 }.filter { it.audio }
-                val currentUrls = audioCandidates.mapTo(mutableSetOf()) { it.url }
-                val additional = webStreams.filterNot { it.url in currentUrls }.sortedWith(
+                val currentKeys = availableAudioTracks.value.mapTo(mutableSetOf(), ::audioStreamKey)
+                val additional = webStreams.filterNot { audioStreamKey(it) in currentKeys }.sortedWith(
                     compareByDescending<PlayableStream> { stream -> preferredAudioCodec.tokens.any { stream.codec.contains(it, true) } }
                         .thenByDescending { it.bitrate }
                 )
                 audioCandidates = audioCandidates + additional
+                availableAudioTracks.value = (availableAudioTracks.value + additional).distinctBy(::audioStreamKey)
                 if (additional.isNotEmpty()) return playNextAudioCandidate(track, generation)
             }
             if (extractionRetryCount < 1) {
@@ -335,6 +342,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 kotlinx.coroutines.delay(500)
                 val refreshed = extractAudioStreams(track)
                 if (currentTrack?.id != track.id || generation != playGeneration) return
+                availableAudioTracks.value = refreshed.distinctBy(::audioStreamKey)
                 setAudioCandidates(refreshed, preferredAudioCodec)
                 webFallbackAttempted = false
                 if (audioCandidates.isNotEmpty()) return playNextAudioCandidate(track, generation)
@@ -344,6 +352,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         }
         audioCandidateIndex = next
         val stream = audioCandidates[next]
+        selectedAudioTrack.value = stream
         AppLog.event("music trying stream candidate=${next + 1}/${audioCandidates.size} codec=${stream.codec} bitrate=${stream.bitrate} video=${track.id}")
         val source = if (stream.sabrPlayback != null && stream.sabrFormat != null) {
             SabrMediaFactory.createAudio(stream.sabrPlayback, stream.sabrFormat,
@@ -354,6 +363,31 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         player.prepare()
         player.playWhenReady = true
         session.isActive = true
+    }
+
+    private fun audioStreamKey(stream: PlayableStream): String = when {
+        stream.audioTrackId.isNotBlank() -> "id:${stream.audioTrackId}|${stream.codec.lowercase()}"
+        stream.sabrFormat != null -> "itag:${stream.sabrFormat.itag}"
+        stream.audioTrackName.isNotBlank() -> "name:${stream.audioTrackName.lowercase()}|${stream.codec.lowercase()}"
+        else -> "stream:${stream.url}|${stream.codec.lowercase()}|${stream.bitrate}"
+    }
+
+    private fun switchAudioTrack(stream: PlayableStream) {
+        val track = currentTrack ?: return
+        val generation = playGeneration
+        val resumePosition = player.currentPosition.coerceAtLeast(0L)
+        val resumePlayback = player.playWhenReady
+        val source = if (stream.sabrPlayback != null && stream.sabrFormat != null) {
+            SabrMediaFactory.createAudio(stream.sabrPlayback, stream.sabrFormat,
+                sabrDataSourceFactory(stream.sabrPlayback.serverAbrStreamingUrl))
+        } else ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
+            .createMediaSource(MediaItem.fromUri(stream.url))
+        audioCandidateIndex = audioCandidates.indexOfFirst { audioStreamKey(it) == audioStreamKey(stream) }
+        selectedAudioTrack.value = stream
+        player.setMediaSource(source, resumePosition)
+        player.prepare()
+        player.playWhenReady = resumePlayback
+        AppLog.event("music audio track selected codec=${stream.codec} bitrate=${stream.bitrate} video=${track.id} generation=$generation")
     }
 
     private fun publishMetadata() {
@@ -406,6 +440,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         playing.value = false
         currentTrack = null
         currentArtwork = null
+        availableAudioTracks.value = emptyList()
+        selectedAudioTrack.value = null
         position.longValue = 0L
         bufferedPosition.longValue = 0L
         duration.longValue = 0L
@@ -426,5 +462,5 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         }
     }
 
-    override fun onDestroy() { instance = null; nowPlaying.value = null; playing.value = false; releasePlaybackLocks(); scope.cancel(); player.release(); session.release(); super.onDestroy() }
+    override fun onDestroy() { instance = null; nowPlaying.value = null; playing.value = false; availableAudioTracks.value = emptyList(); selectedAudioTrack.value = null; releasePlaybackLocks(); scope.cancel(); player.release(); session.release(); super.onDestroy() }
 }

@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicReference
 import android.os.SystemClock
 import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import kotlin.math.roundToInt
 
 data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L)
 data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null)
@@ -1893,13 +1894,18 @@ object YouTubeRepository {
             if (isAdString(title) || isAdString(subtitle)) return@walkFeedRenderers
             val thumbnails = renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 ?: renderer.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
-            val providedThumbnail = thumbnails?.optJSONObject((thumbnails.length() - 1).coerceAtLeast(0))?.optString("url").orEmpty()
+            val selectedThumb = thumbnails?.let { candidates ->
+                (0 until candidates.length()).mapNotNull(candidates::optJSONObject).maxByOrNull { candidate ->
+                    candidate.optLong("width").coerceAtLeast(1L) * candidate.optLong("height").coerceAtLeast(1L)
+                }
+            }
+            val providedThumbnail = selectedThumb?.optString("url").orEmpty()
                 .ifBlank { findThumbnail(renderer).orEmpty() }.let { if (it.startsWith("//")) "https:$it" else it }
             val isMusicItem = renderer.has("flexColumns") || renderer.has("thumbnailRenderer") || renderer.has("subtitle")
-            val thumbnail = if ((isMusicItem || isPlaylist || isChannel) && providedThumbnail.isNotBlank()) providedThumbnail else "https://i.ytimg.com/vi/$id/maxresdefault.jpg"
-            val selectedThumb = thumbnails?.optJSONObject((thumbnails.length() - 1).coerceAtLeast(0))
             val thumbWidth = if (isMusicItem || isChannel) selectedThumb?.optInt("width")?.takeIf { it > 0 } ?: 1 else 16
             val thumbHeight = if (isMusicItem || isChannel) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
+            val rawThumbnail = if ((isMusicItem || isPlaylist || isChannel) && providedThumbnail.isNotBlank()) providedThumbnail else "https://i.ytimg.com/vi/$id/maxresdefault.jpg"
+            val thumbnail = if (isMusicItem) highResolutionArtworkUrl(rawThumbnail, thumbWidth, thumbHeight) else rawThumbnail
             val channelThumbnail = findChannelThumbnail(renderer).orEmpty().ifBlank { if (isChannel) thumbnail else "" }
             val url = when { isChannel -> "https://www.youtube.com/channel/$id"; isPlaylist -> "https://www.youtube.com/playlist?list=$id"; else -> "https://www.youtube.com/watch?v=$id" }
             val resume = scanResumeMetadata(renderer)
@@ -2159,6 +2165,22 @@ object YouTubeRepository {
         url.contains("ytimg.com") || url.contains("ggpht.com") || url.contains("googleusercontent.com")
 
     private fun normalizeImageUrl(url: String): String = if (url.startsWith("//")) "https:$url" else url
+
+    private fun highResolutionArtworkUrl(url: String, declaredWidth: Int, declaredHeight: Int): String {
+        val normalized = normalizeImageUrl(url)
+        if (!normalized.contains("ggpht.com") && !normalized.contains("googleusercontent.com")) return normalized
+        val dimensions = Regex("=w(\\d+)-h(\\d+)").find(normalized)
+        val sourceWidth = declaredWidth.takeIf { it > 1 } ?: dimensions?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+        val sourceHeight = declaredHeight.takeIf { it > 1 } ?: dimensions?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 1
+        val scale = 1200f / maxOf(sourceWidth, sourceHeight).coerceAtLeast(1)
+        val targetWidth = (sourceWidth * scale).roundToInt().coerceAtLeast(1)
+        val targetHeight = (sourceHeight * scale).roundToInt().coerceAtLeast(1)
+        return when {
+            dimensions != null -> normalized.replaceRange(dimensions.range, "=w$targetWidth-h$targetHeight")
+            Regex("=s\\d+(?=-|$)").containsMatchIn(normalized) -> normalized.replace(Regex("=s\\d+(?=-|$)"), "=s1200")
+            else -> normalized
+        }
+    }
 
     private fun findThumbnail(value: Any?): String? = when (value) {
         is JSONObject -> value.optString("url").takeIf(::isYouTubeImageUrl)?.let(::normalizeImageUrl)

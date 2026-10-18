@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [1.5.10] - 2026-10-18
+
+### Fixed
+- Restored sharp YT Music artwork by selecting the largest available thumbnail and requesting a high-resolution source while preserving its aspect ratio.
+
 ## [1.5.9] - 2026-10-18
 
 ### Fixed

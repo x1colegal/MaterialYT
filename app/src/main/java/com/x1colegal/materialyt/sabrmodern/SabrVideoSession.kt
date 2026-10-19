@@ -147,6 +147,7 @@ internal class SabrVideoSession(
         var dry = 0
         var attestationStalls = 0
         var emptySessionRefreshes = 0
+        var startupEmptyResponses = 0
         var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
@@ -256,6 +257,7 @@ internal class SabrVideoSession(
                 val refreshed = config.reloadPlayer.invoke(reloadToken)
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                startupEmptyResponses = 0
                 dry = 0
                 continue
             }
@@ -271,8 +273,40 @@ internal class SabrVideoSession(
                 cookie = null
                 ctxByType.clear()
                 ctxToSend.clear()
+                startupEmptyResponses = 0
+                backoffTimeMs = 0
                 dry = 0
                 continue
+            }
+            val startupResponseWithoutMedia = headers.isEmpty() &&
+                !video.initWritten && !audio.initWritten && video.lastSeq == 0 && audio.lastSeq == 0
+            if (startupResponseWithoutMedia) {
+                startupEmptyResponses++
+                AppLog.event(
+                    "SABR video startup empty response=$startupEmptyResponses refreshes=$emptySessionRefreshes " +
+                        "context=$gotContext snackbar=${snackbarPayload != null} backoff=$backoffTimeMs"
+                )
+                if (startupEmptyResponses >= STARTUP_EMPTY_LIMIT) {
+                    if (emptySessionRefreshes < MAX_STARTUP_REFRESHES && config.refreshPlayer != null) {
+                        emptySessionRefreshes++
+                        AppLog.event("SABR video startup stalled; refreshing player attempt=$emptySessionRefreshes")
+                        val refreshed = config.refreshPlayer.invoke()
+                        url = refreshed.first
+                        ustreamerConfig = refreshed.second
+                        cookie = null
+                        ctxByType.clear()
+                        ctxToSend.clear()
+                        startupEmptyResponses = 0
+                        backoffTimeMs = 0
+                        dry = 0
+                        continue
+                    }
+                    AppLog.event("SABR video startup stalled after $emptySessionRefreshes refreshes")
+                    failStream("startup context produced no media", stall = true)
+                    return
+                }
+            } else if (headers.isNotEmpty()) {
+                startupEmptyResponses = 0
             }
             if (iter == 1) AppLog.event("SABR video first response bytes=${bytes.size} parts=${parts.size} headers=${headers.size} redirect=${redirect != null} protection=$protStatus snackbar=${snackbarPayload ?: "none"} types=${parts.joinToString { "${it.type}:${it.payload.size}" }}")
 
@@ -373,5 +407,7 @@ internal class SabrVideoSession(
 
     companion object {
         private const val TAG = "SabrVideoSession"
+        private const val STARTUP_EMPTY_LIMIT = 2
+        private const val MAX_STARTUP_REFRESHES = 2
     }
 }

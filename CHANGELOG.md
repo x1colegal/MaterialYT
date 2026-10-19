@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.0] - 2026-10-19
+
+### Fixed
+- Recovered audio-only and video SABR sessions when YouTube repeatedly returns startup context without initialization or media segments, preventing endless buffering.
+
 ## [1.5.12] - 2026-10-18
 
 ### Added

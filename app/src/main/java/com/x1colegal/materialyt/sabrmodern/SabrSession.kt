@@ -156,6 +156,7 @@ internal class SabrSession(
         var dry = 0
         var attestationStalls = 0
         var emptySessionRefreshes = 0
+        var startupEmptyResponses = 0
         var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
@@ -260,6 +261,7 @@ internal class SabrSession(
                 val refreshed = config.reloadPlayer.invoke(reloadToken)
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                startupEmptyResponses = 0
                 dry = 0
                 continue
             }
@@ -275,8 +277,42 @@ internal class SabrSession(
                 cookie = null
                 ctxByType.clear()
                 ctxToSend.clear()
+                startupEmptyResponses = 0
+                backoffTimeMs = 0
                 dry = 0
                 continue
+            }
+            val startupResponseWithoutMedia = headers.isEmpty() && !initWritten && lastSeq == 0
+            if (startupResponseWithoutMedia) {
+                startupEmptyResponses++
+                AppLog.event(
+                    "SABR audio startup empty response=$startupEmptyResponses refreshes=$emptySessionRefreshes " +
+                        "context=$gotContext snackbar=${snackbarPayload != null} backoff=$backoffTimeMs"
+                )
+                // The first context-only response is normal: echo its SABR context on the next POST.
+                // A second empty response means that handshake made no progress. Resolve a fresh
+                // player session instead of allowing changing contexts to reset `dry` forever.
+                if (startupEmptyResponses >= STARTUP_EMPTY_LIMIT) {
+                    if (emptySessionRefreshes < MAX_STARTUP_REFRESHES && config.refreshPlayer != null) {
+                        emptySessionRefreshes++
+                        AppLog.event("SABR audio startup stalled; refreshing player attempt=$emptySessionRefreshes")
+                        val refreshed = config.refreshPlayer.invoke()
+                        url = refreshed.first
+                        ustreamerConfig = refreshed.second
+                        cookie = null
+                        ctxByType.clear()
+                        ctxToSend.clear()
+                        startupEmptyResponses = 0
+                        backoffTimeMs = 0
+                        dry = 0
+                        continue
+                    }
+                    AppLog.event("SABR audio startup stalled after $emptySessionRefreshes refreshes")
+                    failStream("startup context produced no media", stall = true)
+                    return
+                }
+            } else if (headers.isNotEmpty()) {
+                startupEmptyResponses = 0
             }
             if (iter == 1) AppLog.event("SABR audio first response bytes=${bytes.size} parts=${parts.size} headers=${headers.size} redirect=${redirect != null} protection=$protStatus types=${parts.joinToString { "${it.type}:${it.payload.size}" }}")
             if (iter == 1) Timber.tag(TAG).d("SABR first response: parts=${parts.size}, mediaHeaders=${headers.size}, endSeg=$endSeg, startTimeMs=$startTimeMs")
@@ -350,5 +386,7 @@ internal class SabrSession(
 
     companion object {
         private const val TAG = "SabrSession"
+        private const val STARTUP_EMPTY_LIMIT = 2
+        private const val MAX_STARTUP_REFRESHES = 2
     }
 }

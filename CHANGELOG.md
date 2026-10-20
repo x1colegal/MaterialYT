@@ -2,6 +2,14 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.1] - 2026-10-20
+
+### Added
+- Added dedicated comment reply screens with infinite pagination for comments and replies.
+- Added authenticated posting for new comments and replies.
+- Made the replies screen available on comments with no existing replies so the first reply can be posted.
+- Prevented the reply composer from stealing focus and opening the keyboard when the replies screen appears on tablets.
+
 ## [2.0] - 2026-10-19
 
 ### Fixed

@@ -60,6 +60,22 @@ data class VideoDetails(val title: String, val author: String, val authorUrl: St
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "")
 data class CommunityComment(val id: String, val author: String, val text: String, val published: String, val likes: String)
+data class VideoComment(
+    val id: String,
+    val author: String,
+    val text: String,
+    val published: String,
+    val likes: String,
+    val avatar: String = "",
+    val replyCount: Int = 0,
+    val repliesContinuation: String? = null,
+    val createReplyParams: String? = null,
+)
+data class VideoCommentPage(
+    val items: List<VideoComment>,
+    val continuation: String? = null,
+    val createCommentParams: String? = null,
+)
 
 object YouTubeRepository {
     const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
@@ -1723,6 +1739,138 @@ object YouTubeRepository {
             ?: error("Comments are disabled or this account cannot comment on this video")
         val body = JSONObject().put("context", context("WEB", bootstrap.version)).put("createCommentParams", params).put("commentText", text)
         post("https://www.youtube.com/youtubei/v1/comment/create_comment?key=${bootstrap.key}", body, bootstrap.origin)
+    }
+
+    /** Load the first authenticated comments page while retaining YouTube's write commands. */
+    fun videoComments(videoId: String): VideoCommentPage {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val first = post("$origin/youtubei/v1/next?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId), origin)
+        val createParams = findString(first, "createCommentParams")
+        val token = findCommentsSectionToken(first)
+            ?: return VideoCommentPage(emptyList(), createCommentParams = createParams)
+        val page = videoCommentsPage(token)
+        return page.copy(createCommentParams = page.createCommentParams ?: createParams)
+    }
+
+    /** Load another top-level comments page or another replies page. */
+    fun videoCommentsPage(continuation: String): VideoCommentPage {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val response = post("$origin/youtubei/v1/next?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", continuation), origin)
+        return parseVideoCommentPage(response)
+    }
+
+    fun postCommentWithParams(params: String, text: String) {
+        require(signedIn()) { "Sign in again to post comments" }
+        val clean = text.trim()
+        require(clean.isNotEmpty()) { "Comment cannot be empty" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        post("$origin/youtubei/v1/comment/create_comment?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version))
+                .put("createCommentParams", params).put("commentText", clean), origin)
+    }
+
+    fun postCommentReply(params: String, text: String) {
+        require(signedIn()) { "Sign in again to post replies" }
+        val clean = text.trim()
+        require(clean.isNotEmpty()) { "Reply cannot be empty" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        post("$origin/youtubei/v1/comment/create_comment_reply?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version))
+                .put("createReplyParams", params).put("commentText", clean), origin)
+    }
+
+    private fun findCommentsSectionToken(value: Any?): String? = when (value) {
+        is JSONObject -> {
+            val section = value.optJSONObject("itemSectionRenderer")
+            if (section?.optString("targetId") == "comments-section") {
+                findContinuationToken(section)
+            } else value.keys().asSequence().mapNotNull { findCommentsSectionToken(value.opt(it)) }.firstOrNull()
+        }
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findCommentsSectionToken(value.opt(it)) }.firstOrNull()
+        else -> null
+    }
+
+    private fun parseVideoCommentPage(response: JSONObject): VideoCommentPage {
+        val endpoints = response.optJSONArray("onResponseReceivedEndpoints")
+        var contents: JSONArray? = null
+        if (endpoints != null) for (index in endpoints.length() - 1 downTo 0) {
+            val endpoint = endpoints.optJSONObject(index) ?: continue
+            contents = endpoint.optJSONObject("reloadContinuationItemsCommand")?.optJSONArray("continuationItems")
+                ?: endpoint.optJSONObject("appendContinuationItemsAction")?.optJSONArray("continuationItems")
+            if (contents != null) break
+        }
+        contents ?: return VideoCommentPage(emptyList())
+
+        val mutations = mutableMapOf<String, JSONObject>()
+        val mutationArray = response.optJSONObject("frameworkUpdates")?.optJSONObject("entityBatchUpdate")?.optJSONArray("mutations")
+        if (mutationArray != null) for (index in 0 until mutationArray.length()) {
+            mutationArray.optJSONObject(index)?.let { mutation ->
+                mutation.optString("entityKey").takeIf(String::isNotBlank)?.let { mutations[it] = mutation.optJSONObject("payload") ?: JSONObject() }
+            }
+        }
+
+        val comments = ArrayList<VideoComment>()
+        var next: String? = null
+        for (index in 0 until contents.length()) {
+            val item = contents.optJSONObject(index) ?: continue
+            item.optJSONObject("continuationItemRenderer")?.let { next = findContinuationToken(it) ?: next }
+            parseVideoComment(item, mutations)?.let(comments::add)
+        }
+        return VideoCommentPage(comments.distinctBy { it.id }, next, findString(response, "createCommentParams"))
+    }
+
+    private fun parseVideoComment(item: JSONObject, mutations: Map<String, JSONObject>): VideoComment? {
+        val thread = item.optJSONObject("commentThreadRenderer")
+        val root = thread ?: item
+        val replies = thread?.optJSONObject("replies")?.optJSONObject("commentRepliesRenderer")
+        val legacy = root.optJSONObject("comment")?.optJSONObject("commentRenderer")
+            ?: root.optJSONObject("commentRenderer")
+        if (legacy != null) {
+            val id = legacy.optString("commentId")
+            if (id.isBlank()) return null
+            return VideoComment(
+                id = id,
+                author = text(legacy.opt("authorText")).orEmpty().ifBlank { "YouTube user" },
+                text = text(legacy.opt("contentText")).orEmpty(),
+                published = text(legacy.opt("publishedTimeText")).orEmpty(),
+                likes = text(legacy.opt("voteCount")).orEmpty(),
+                avatar = findThumbnail(legacy.opt("authorThumbnail")).orEmpty(),
+                replyCount = legacy.optInt("replyCount", 0),
+                repliesContinuation = replies?.let(::findContinuationToken),
+                createReplyParams = findString(root, "createReplyParams") ?: findString(legacy, "createReplyParams"),
+            )
+        }
+
+        val wrapper = root.optJSONObject("commentViewModel") ?: return null
+        val view = wrapper.optJSONObject("commentViewModel") ?: wrapper
+        val commentPayload = mutations[view.optString("commentKey")]?.optJSONObject("commentEntityPayload")
+        val properties = commentPayload?.optJSONObject("properties")
+        val author = commentPayload?.optJSONObject("author")
+        val toolbar = commentPayload?.optJSONObject("toolbar")
+        val toolbarSurface = mutations[view.optString("toolbarSurfaceKey")]
+            ?.optJSONObject("engagementToolbarSurfaceEntityPayload")
+        val id = properties?.optString("commentId").orEmpty().ifBlank { view.optString("commentId") }
+        if (id.isBlank()) return null
+        val replyCountText = toolbar?.optString("replyCount").orEmpty()
+        return VideoComment(
+            id = id,
+            author = author?.optString("displayName").orEmpty().ifBlank { "YouTube user" },
+            text = text(properties?.opt("content")).orEmpty(),
+            published = properties?.optString("publishedTime").orEmpty(),
+            likes = toolbar?.optString("likeCountNotliked").orEmpty(),
+            avatar = findThumbnail(commentPayload?.opt("avatar")).orEmpty().ifBlank { author?.optString("avatarThumbnailUrl").orEmpty() },
+            replyCount = replyCountText.filter(Char::isDigit).toIntOrNull() ?: 0,
+            repliesContinuation = replies?.let(::findContinuationToken),
+            createReplyParams = findString(toolbarSurface, "createReplyParams")
+                ?: findString(root, "createReplyParams")
+                ?: findString(commentPayload, "createReplyParams"),
+        )
     }
 
     private fun browse(origin: String, browseId: String, clientName: String): List<FeedItem> {

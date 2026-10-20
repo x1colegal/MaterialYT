@@ -1778,8 +1778,6 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var showComments by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showDetails by remember { mutableStateOf(false) }
-    var comments by remember(item.id) { mutableStateOf<List<CommentsInfoItem>>(emptyList()) }
-    var commentsLoading by remember { mutableStateOf(false) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
     var hasStartedPlayback by remember(item.id) { mutableStateOf(false) }
     var shortLoadMessage by remember(item.id) { mutableStateOf<String?>(null) }
@@ -2022,7 +2020,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     IconButton(onClick = { showDetails = true }) { Icon(Icons.Default.MoreVert, "Short details", tint = ComposeColor.White) }
                     IconButton(onClick = {
-                        showComments = true; commentsLoading = true
+                        showComments = true
                     }) { Icon(Icons.Default.Comment, "Comments", tint = ComposeColor.White) }
                     IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
                 }
@@ -2104,18 +2102,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             }
         }
     )
-    if (showComments) {
-        LaunchedEffect(item.id) {
-            runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(item.url)?.relatedItems ?: emptyList() } }
-                .onSuccess { comments = it }.onFailure { error = it.message }
-            commentsLoading = false
-        }
-        ModalBottomSheet(onDismissRequest = { showComments = false }) {
-            Text("Comments", Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.titleLarge)
-            if (commentsLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
-            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) { items(comments) { comment -> CommentNode(comment) } }
-        }
-    }
+    if (showComments) VideoCommentsSheet(item.id) { showComments = false }
     if (showSettings) AlertDialog(onDismissRequest = { showSettings = false }, confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } }, title = { Text("Playback settings") }, text = {
         Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState())) {
             Text("Speed", style = MaterialTheme.typography.titleMedium)
@@ -2147,9 +2134,12 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var info by remember { mutableStateOf<StreamInfo?>(null) }
     var videoMetadata by remember { mutableStateOf<VideoDetails?>(null) }
     var channelInfo by remember { mutableStateOf<ChannelInfo?>(null) }
-    var comments by remember { mutableStateOf<List<CommentsInfoItem>>(emptyList()) }
-    var commentText by remember { mutableStateOf("") }
-    var commentStatus by remember { mutableStateOf<String?>(null) }
+    var comments by remember(videoId) { mutableStateOf<List<VideoComment>>(emptyList()) }
+    var commentsContinuation by remember(videoId) { mutableStateOf<String?>(null) }
+    var createCommentParams by remember(videoId) { mutableStateOf<String?>(null) }
+    var commentsLoading by remember(videoId) { mutableStateOf(false) }
+    var commentsError by remember(videoId) { mutableStateOf<String?>(null) }
+    var commentsRefresh by remember(videoId) { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     var availableStreams by remember { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var audioStreams by remember { mutableStateOf<List<PlayerChoice>>(emptyList()) }
@@ -2426,9 +2416,39 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 if (availableStreams.isEmpty()) error = e.message.orEmpty()
             }
         }
-        runCatching { withContext(Dispatchers.IO) { CommentsInfo.getInfo(url)?.relatedItems ?: emptyList() } }.onSuccess { comments = it }
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelInfo(videoId) } }.onSuccess { channelInfo = it }
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(videoId) } }.onSuccess { videoMetadata = it }
+    }
+    LaunchedEffect(videoId, commentsRefresh) {
+        commentsLoading = true
+        commentsError = null
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoComments(videoId) } }
+            .onSuccess { page ->
+                comments = page.items
+                commentsContinuation = page.continuation
+                createCommentParams = page.createCommentParams
+            }
+            .onFailure { commentsError = it.message ?: "Could not load comments" }
+        commentsLoading = false
+    }
+    fun loadMoreComments() {
+        val token = commentsContinuation ?: return
+        if (commentsLoading) return
+        commentsLoading = true
+        commentsError = null
+        commentsContinuation = null
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoCommentsPage(token) } }
+                .onSuccess { page ->
+                    comments = (comments + page.items).distinctBy { it.id }
+                    commentsContinuation = page.continuation
+                }
+                .onFailure { failure ->
+                    commentsContinuation = token
+                    commentsError = failure.message ?: "Could not load more comments"
+                }
+            commentsLoading = false
+        }
     }
     LaunchedEffect(url) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
@@ -2661,8 +2681,15 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Column(Modifier.weight(0.85f).fillMaxHeight()) {
                         Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
                         HorizontalDivider()
+                        CommentComposer(createCommentParams, commentsLoading) { params, text ->
+                            withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
+                            commentsRefresh++
+                        }
                         LazyColumn(Modifier.fillMaxSize()) {
-                            items(comments) { comment -> CommentNode(comment) }
+                            items(comments, key = { it.id }) { comment -> VideoCommentNode(comment) }
+                            item {
+                                CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreComments)
+                            }
                         }
                     }
                 }
@@ -2708,8 +2735,15 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     }
                     HorizontalDivider()
                     Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
+                    CommentComposer(createCommentParams, commentsLoading) { params, text ->
+                        withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
+                        commentsRefresh++
+                    }
                 }
-                items(comments) { comment -> CommentNode(comment) }
+                items(comments, key = { it.id }) { comment -> VideoCommentNode(comment) }
+                item {
+                    CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreComments)
+                }
             }
         }
     }
@@ -2899,6 +2933,202 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
 private fun <T> ChoiceSection(title: String, values: Iterable<T>, selected: T, label: (T) -> String, select: (T) -> Unit) {
     Column { Text(title, style = MaterialTheme.typography.titleMedium); Spacer(Modifier.height(6.dp)); LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(values.toList()) { value -> FilterChip(selected == value, { select(value) }, { Text(label(value), maxLines = 1) }) } } }
 }
+
+@Composable
+private fun CommentComposer(
+    params: String?,
+    busy: Boolean,
+    placeholder: String = "Add a comment",
+    actionLabel: String = "Post",
+    onSubmit: suspend (String, String) -> Unit,
+) {
+    var value by remember(params) { mutableStateOf("") }
+    var sending by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    if (!YouTubeRepository.signedIn()) return
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = { value = it; status = null },
+            modifier = Modifier.weight(1f),
+            placeholder = { Text(if (params == null) "Replying is unavailable" else placeholder) },
+            enabled = params != null && !sending,
+            maxLines = 4,
+        )
+        Spacer(Modifier.width(8.dp))
+        Button(enabled = params != null && value.isNotBlank() && !sending && !busy, onClick = {
+            val command = params ?: return@Button
+            val submitted = value.trim()
+            sending = true
+            scope.launch {
+                runCatching { onSubmit(command, submitted) }
+                    .onSuccess { value = ""; status = "Posted" }
+                    .onFailure { status = it.message ?: "Could not post" }
+                sending = false
+            }
+        }) { if (sending) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text(actionLabel) }
+    }
+    status?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 2.dp), style = MaterialTheme.typography.bodySmall,
+        color = if (it == "Posted") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
+}
+
+@Composable
+private fun CommentPaginationFooter(loading: Boolean, continuation: String?, error: String?, loadMore: () -> Unit) {
+    if (continuation != null && error == null && !loading) LaunchedEffect(continuation) { loadMore() }
+    Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+        when {
+            loading -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+            error != null && continuation != null -> TextButton(onClick = loadMore) { Text("Retry loading comments") }
+            error != null -> Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VideoCommentsSheet(videoId: String, onDismiss: () -> Unit) {
+    var comments by remember(videoId) { mutableStateOf<List<VideoComment>>(emptyList()) }
+    var continuation by remember(videoId) { mutableStateOf<String?>(null) }
+    var createParams by remember(videoId) { mutableStateOf<String?>(null) }
+    var loading by remember(videoId) { mutableStateOf(false) }
+    var error by remember(videoId) { mutableStateOf<String?>(null) }
+    var refresh by remember(videoId) { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+
+    fun loadMore() {
+        val token = continuation ?: return
+        if (loading) return
+        loading = true
+        error = null
+        continuation = null
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoCommentsPage(token) } }
+                .onSuccess { page -> comments = (comments + page.items).distinctBy { it.id }; continuation = page.continuation }
+                .onFailure { failure -> continuation = token; error = failure.message ?: "Could not load more comments" }
+            loading = false
+        }
+    }
+
+    LaunchedEffect(videoId, refresh) {
+        loading = true
+        error = null
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoComments(videoId) } }
+            .onSuccess { page -> comments = page.items; continuation = page.continuation; createParams = page.createCommentParams }
+            .onFailure { error = it.message ?: "Could not load comments" }
+        loading = false
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close comments") }
+            Text("Comments", style = MaterialTheme.typography.titleLarge)
+        }
+        CommentComposer(createParams, loading) { params, text ->
+            withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
+            refresh++
+        }
+        LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
+            items(comments, key = { it.id }) { comment -> VideoCommentNode(comment) }
+            item { CommentPaginationFooter(loading, continuation, error, ::loadMore) }
+        }
+    }
+}
+
+@Composable
+private fun VideoCommentNode(comment: VideoComment) {
+    var showReplies by remember(comment.id) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(36.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+            else Surface(Modifier.size(36.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(8.dp)) }
+            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                Text(comment.author, style = MaterialTheme.typography.labelLarge)
+                if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(comment.text)
+        if (comment.likes.isNotBlank()) Text("${comment.likes} likes", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (comment.replyCount > 0 || comment.repliesContinuation != null || comment.createReplyParams != null) {
+            TextButton(onClick = { showReplies = true }) {
+                Text(if (comment.replyCount > 0) "View ${comment.replyCount} replies" else "View replies")
+            }
+        }
+    }
+
+    if (showReplies) CommentRepliesSheet(comment, onDismiss = { showReplies = false })
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CommentRepliesSheet(comment: VideoComment, onDismiss: () -> Unit) {
+    var replies by remember(comment.id) { mutableStateOf<List<VideoComment>>(emptyList()) }
+    var continuation by remember(comment.id) { mutableStateOf(comment.repliesContinuation) }
+    var loading by remember(comment.id) { mutableStateOf(false) }
+    var error by remember(comment.id) { mutableStateOf<String?>(null) }
+    var refresh by remember(comment.id) { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    val initialFocus = remember(comment.id) { FocusRequester() }
+
+    fun loadMore() {
+        val token = continuation ?: return
+        if (loading) return
+        loading = true
+        error = null
+        continuation = null
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoCommentsPage(token) } }
+                .onSuccess { page -> replies = (replies + page.items).distinctBy { it.id }; continuation = page.continuation }
+                .onFailure { failure -> continuation = token; error = failure.message ?: "Could not load replies" }
+            loading = false
+        }
+    }
+
+    LaunchedEffect(comment.id, refresh) {
+        replies = emptyList()
+        continuation = comment.repliesContinuation
+        if (continuation != null) loadMore()
+    }
+    LaunchedEffect(comment.id) {
+        delay(100)
+        initialFocus.requestFocus()
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onDismiss, modifier = Modifier.focusRequester(initialFocus)) { Icon(Icons.Default.ArrowBack, "Back to comments") }
+            Text("Replies", style = MaterialTheme.typography.titleLarge)
+        }
+        HorizontalDivider()
+        VideoCommentNodeSummary(comment)
+        CommentComposer(comment.createReplyParams, loading, "Add a reply", "Reply") { params, text ->
+            withContext(Dispatchers.IO) { YouTubeRepository.postCommentReply(params, text) }
+            refresh++
+        }
+        LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
+            items(replies, key = { it.id }) { reply -> VideoCommentNodeSummary(reply) }
+            item { CommentPaginationFooter(loading, continuation, error, ::loadMore) }
+        }
+    }
+}
+
+@Composable
+private fun VideoCommentNodeSummary(comment: VideoComment) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(34.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+            else Icon(Icons.Default.Person, null, Modifier.size(34.dp))
+            Column(Modifier.padding(start = 10.dp)) {
+                Text(comment.author, style = MaterialTheme.typography.labelLarge)
+                if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Text(comment.text, Modifier.padding(top = 6.dp))
+        if (comment.likes.isNotBlank()) Text("${comment.likes} likes", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 @Composable
 fun CommentNode(comment: CommentsInfoItem) {
     var showReplies by remember { mutableStateOf(false) }

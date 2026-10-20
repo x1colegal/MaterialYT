@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.2] - 2026-10-20
+
+### Added
+- Show newly posted comments and replies immediately with the data returned by YouTube.
+- Added edit and delete actions for owned comments and replies when YouTube exposes the required account actions.
+
+### Fixed
+- Fixed reply editing across current and legacy YouTube InnerTube command variants.
+- Keep the status bar visible and the navigation bar hidden in the YT Music player, with improved top-action placement.
+
 ## [2.1] - 2026-10-20
 
 ### Added

@@ -16,6 +16,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.io.ByteArrayOutputStream
+import java.net.URLEncoder
 import android.os.SystemClock
 import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -70,6 +72,12 @@ data class VideoComment(
     val replyCount: Int = 0,
     val repliesContinuation: String? = null,
     val createReplyParams: String? = null,
+    val isOwn: Boolean = false,
+    val authorChannelId: String = "",
+    val updateParams: String? = null,
+    val updateIsReply: Boolean = false,
+    val updateApiUrl: String? = null,
+    val deleteParams: String? = null,
 )
 data class VideoCommentPage(
     val items: List<VideoComment>,
@@ -88,6 +96,9 @@ object YouTubeRepository {
     private val standaloneWebVisitors = mutableMapOf<String, Pair<Long, String>>()
     private val bootstrapCache = mutableMapOf<String, Pair<Long, Bootstrap>>()
     private val feedGeneration = AtomicLong(0L)
+    private val sessionOwnedCommentIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val sessionOwnedCommentAuthors = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    @Volatile private var signedInCommentChannelId: String? = null
     private val activeFeedCall = AtomicReference<Call?>(null)
     private val playerJavaScriptCache = mutableMapOf<String, String>()
     private val nChallengeCache = mutableMapOf<String, String>()
@@ -1745,6 +1756,7 @@ object YouTubeRepository {
     fun videoComments(videoId: String): VideoCommentPage {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
+        ensureSignedInCommentChannelId(origin, bootstrap)
         val first = post("$origin/youtubei/v1/next?key=${bootstrap.key}",
             JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId), origin)
         val createParams = findString(first, "createCommentParams")
@@ -1758,31 +1770,148 @@ object YouTubeRepository {
     fun videoCommentsPage(continuation: String): VideoCommentPage {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
+        ensureSignedInCommentChannelId(origin, bootstrap)
         val response = post("$origin/youtubei/v1/next?key=${bootstrap.key}",
             JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", continuation), origin)
         return parseVideoCommentPage(response)
     }
 
-    fun postCommentWithParams(params: String, text: String) {
+    private fun ensureSignedInCommentChannelId(origin: String, bootstrap: Bootstrap) {
+        if (!signedIn() || signedInCommentChannelId != null) return
+        val accountMenu = runCatching {
+            post("$origin/youtubei/v1/account/account_menu?key=${bootstrap.key}",
+                JSONObject().put("context", context("WEB", bootstrap.version)), origin)
+        }.getOrNull()
+        signedInCommentChannelId = accountMenu?.let(::findOwnChannelId)
+            ?: accountMenu?.let(::findFirstChannelId)
+    }
+
+    fun postCommentWithParams(params: String, text: String): VideoComment {
         require(signedIn()) { "Sign in again to post comments" }
         val clean = text.trim()
         require(clean.isNotEmpty()) { "Comment cannot be empty" }
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
-        post("$origin/youtubei/v1/comment/create_comment?key=${bootstrap.key}",
+        val response = post("$origin/youtubei/v1/comment/create_comment?key=${bootstrap.key}",
             JSONObject().put("context", context("WEB", bootstrap.version))
                 .put("createCommentParams", params).put("commentText", clean), origin)
+        return createdComment(response, clean)
     }
 
-    fun postCommentReply(params: String, text: String) {
+    fun postCommentReply(params: String, text: String): VideoComment {
         require(signedIn()) { "Sign in again to post replies" }
         val clean = text.trim()
         require(clean.isNotEmpty()) { "Reply cannot be empty" }
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
-        post("$origin/youtubei/v1/comment/create_comment_reply?key=${bootstrap.key}",
+        val response = post("$origin/youtubei/v1/comment/create_comment_reply?key=${bootstrap.key}",
             JSONObject().put("context", context("WEB", bootstrap.version))
                 .put("createReplyParams", params).put("commentText", clean), origin)
+        return createdComment(response, clean)
+    }
+
+    fun updateComment(params: String, text: String, isReply: Boolean = false, apiUrl: String? = null): VideoComment {
+        require(signedIn()) { "Sign in again to edit comments" }
+        val clean = text.trim()
+        require(clean.isNotEmpty()) { "Comment cannot be empty" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val suppliedEndpoint = apiUrl?.substringAfter("/youtubei/v1/comment/")?.substringBefore('?')
+            ?.takeIf(String::isNotBlank)
+            ?: if (isReply) "update_comment_reply" else "update_comment"
+        val candidates = if (isReply) listOf(
+            suppliedEndpoint to "updateReplyParams",
+            "update_comment" to "updateReplyParams",
+            "update_comment_reply" to "updateCommentParams",
+            "update_comment" to "updateCommentParams",
+        ).distinct() else listOf(suppliedEndpoint to "updateCommentParams")
+        var lastFailure: Throwable? = null
+        var response: JSONObject? = null
+        for ((endpoint, paramsKey) in candidates) {
+            AppLog.event("comment edit request endpoint=$endpoint paramsKey=$paramsKey paramsLength=${params.length} apiUrlPresent=${!apiUrl.isNullOrBlank()}")
+            val attempt = runCatching {
+                post("$origin/youtubei/v1/comment/$endpoint?key=${bootstrap.key}",
+                    JSONObject().put("context", context("WEB", bootstrap.version))
+                        .put(paramsKey, params).put("commentText", clean), origin)
+            }
+            if (attempt.isSuccess) {
+                response = attempt.getOrThrow()
+                break
+            }
+            lastFailure = attempt.exceptionOrNull()
+            if (lastFailure?.message != "YouTube returned HTTP 400") throw (lastFailure ?: IllegalStateException("Reply edit failed"))
+        }
+        val editResponse = response ?: throw (lastFailure ?: IllegalStateException("YouTube rejected the reply edit"))
+        return createdComment(editResponse, clean)
+    }
+
+    fun deleteComment(videoId: String, comment: VideoComment) {
+        require(signedIn()) { "Sign in again to delete comments" }
+        require(comment.isOwn) { "You can only delete your own comments" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val action = comment.deleteParams ?: deleteCommentParams(videoId, comment.id)
+        val response = post("$origin/youtubei/v1/comment/perform_comment_action?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version))
+                .put("actions", JSONArray().put(action)), origin)
+        val remove = findNestedObjectValue(response, "removeCommentAction")
+        val result = remove?.optJSONObject("actionResult") ?: findNestedObjectValue(response, "actionResult")
+        val status = result?.optString("status").orEmpty()
+        if (status != "STATUS_SUCCEEDED") error(feedback(result) ?: status.ifBlank { "YouTube did not confirm deletion" })
+        remove?.optString("commentId")?.takeIf(String::isNotBlank)?.let {
+            check(it == comment.id) { "YouTube confirmed a different comment" }
+        }
+        sessionOwnedCommentIds.remove(comment.id)
+    }
+
+    private fun createdComment(response: JSONObject, fallbackText: String): VideoComment {
+        val result = findNestedObjectValue(response, "actionResult")
+        val status = result?.optString("status").orEmpty()
+        if (status.isNotBlank() && status != "STATUS_SUCCEEDED") error(feedback(result) ?: status)
+        val renderer = findObjectWithString(response, "commentRenderer", "commentId")
+        val parsed = renderer?.let { parseVideoComment(JSONObject().put("commentRenderer", it), emptyMap()) }
+        if (parsed != null) {
+            sessionOwnedCommentIds += parsed.id
+            parsed.author.commentAuthorKey()?.let(sessionOwnedCommentAuthors::add)
+            return parsed.copy(
+                isOwn = true,
+                updateParams = findString(response, "updateCommentParams"),
+                deleteParams = findString(response, "deleteCommentParams"),
+            )
+        }
+        // A successful write may omit its renderer. Showing the submitted text avoids
+        // inviting a duplicate retry; mutation actions stay hidden until a real id arrives.
+        if (status == "STATUS_SUCCEEDED") return VideoComment(
+            id = "local-${UUID.randomUUID()}", author = "You", text = fallbackText,
+            published = "Just now", likes = "", isOwn = false,
+        )
+        error("YouTube did not return the posted comment")
+    }
+
+    private fun feedback(result: JSONObject?): String? =
+        text(result?.opt("feedbackText"))?.takeIf(String::isNotBlank)
+
+    private fun findNestedObjectValue(value: Any?, key: String): JSONObject? = when (value) {
+        is JSONObject -> value.optJSONObject(key)
+            ?: value.keys().asSequence().mapNotNull { findNestedObjectValue(value.opt(it), key) }.firstOrNull()
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findNestedObjectValue(value.opt(it), key) }.firstOrNull()
+        else -> null
+    }
+
+    private fun findObjectWithString(value: Any?, key: String, required: String): JSONObject? = when (value) {
+        is JSONObject -> value.optJSONObject(key)?.takeIf { it.optString(required).isNotBlank() }
+            ?: value.keys().asSequence().mapNotNull { findObjectWithString(value.opt(it), key, required) }.firstOrNull()
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findObjectWithString(value.opt(it), key, required) }.firstOrNull()
+        else -> null
+    }
+
+    private fun deleteCommentParams(videoId: String, commentId: String): String {
+        val proto = ByteArrayOutputStream()
+        fun varint(value: Long) { var current = value; while (current and -128L != 0L) { proto.write(((current and 127L) or 128L).toInt()); current = current ushr 7 }; proto.write(current.toInt()) }
+        fun number(field: Int, value: Long) { varint((field shl 3).toLong()); varint(value) }
+        fun string(field: Int, value: String) { val bytes = value.toByteArray(Charsets.UTF_8); varint(((field shl 3) or 2).toLong()); varint(bytes.size.toLong()); proto.write(bytes) }
+        number(1, 6); number(2, 2); string(3, commentId); string(5, videoId)
+        return URLEncoder.encode(android.util.Base64.encodeToString(proto.toByteArray(), android.util.Base64.NO_WRAP), "UTF-8")
     }
 
     private fun findCommentsSectionToken(value: Any?): String? = when (value) {
@@ -1834,9 +1963,29 @@ object YouTubeRepository {
         if (legacy != null) {
             val id = legacy.optString("commentId")
             if (id.isBlank()) return null
+            val authorName = text(legacy.opt("authorText")).orEmpty().ifBlank { "YouTube user" }
+            val authorChannelId = findString(legacy.opt("authorEndpoint"), "browseId")
+                ?.takeIf { it.startsWith("UC") }
+                ?: findString(legacy, "authorExternalChannelId").orEmpty()
+            val updateReplyParams = findString(root, "updateReplyParams") ?: findString(legacy, "updateReplyParams")
+                ?: findMenuCommand(root, "Edit", "updateReplyParams")
+            val updateApiUrl = findMenuCommand(root, "Edit", "apiUrl")
+            val updateParams = findString(root, "updateCommentParams") ?: findString(legacy, "updateCommentParams")
+                ?: findMenuCommand(root, "Edit", "updateCommentParams") ?: updateReplyParams
+            val deleteParams = findString(root, "deleteCommentParams") ?: findString(legacy, "deleteCommentParams")
+                ?: findMenuCommand(root, "Delete", "action")
+            val ownsActions = updateParams != null || deleteParams != null
+            val authorKey = authorName.commentAuthorKey()
+            if (ownsActions) authorKey?.let(sessionOwnedCommentAuthors::add)
+            val isOwn = id in sessionOwnedCommentIds || ownsActions ||
+                (authorChannelId.isNotBlank() && authorChannelId == signedInCommentChannelId) ||
+                (authorKey != null && authorKey in sessionOwnedCommentAuthors)
+            if (isOwn && updateParams == null) {
+                AppLog.event("owned comment edit action missing renderer=legacy keys=${jsonKeySummary(root, legacy)}")
+            }
             return VideoComment(
                 id = id,
-                author = text(legacy.opt("authorText")).orEmpty().ifBlank { "YouTube user" },
+                author = authorName,
                 text = text(legacy.opt("contentText")).orEmpty(),
                 published = text(legacy.opt("publishedTimeText")).orEmpty(),
                 likes = text(legacy.opt("voteCount")).orEmpty(),
@@ -1844,6 +1993,12 @@ object YouTubeRepository {
                 replyCount = legacy.optInt("replyCount", 0),
                 repliesContinuation = replies?.let(::findContinuationToken),
                 createReplyParams = findString(root, "createReplyParams") ?: findString(legacy, "createReplyParams"),
+                isOwn = isOwn,
+                authorChannelId = authorChannelId,
+                updateParams = updateParams,
+                updateIsReply = updateReplyParams != null,
+                updateApiUrl = updateApiUrl,
+                deleteParams = deleteParams,
             )
         }
 
@@ -1855,12 +2010,50 @@ object YouTubeRepository {
         val toolbar = commentPayload?.optJSONObject("toolbar")
         val toolbarSurface = mutations[view.optString("toolbarSurfaceKey")]
             ?.optJSONObject("engagementToolbarSurfaceEntityPayload")
+        val commentSurface = mutations[view.optString("commentSurfaceKey")]
+            ?.optJSONObject("commentSurfaceEntityPayload")
+        val sharedPayload = mutations[view.optString("sharedKey")]
         val id = properties?.optString("commentId").orEmpty().ifBlank { view.optString("commentId") }
         if (id.isBlank()) return null
+        val authorName = author?.optString("displayName").orEmpty().ifBlank { "YouTube user" }
+        val authorChannelId = author?.optString("channelId").orEmpty()
+            .ifBlank { findString(author, "browseId").orEmpty() }
         val replyCountText = toolbar?.optString("replyCount").orEmpty()
+        val updateReplyParams = findString(root, "updateReplyParams")
+            ?: findString(commentPayload, "updateReplyParams")
+            ?: findString(toolbarSurface, "updateReplyParams")
+            ?: findString(commentSurface, "updateReplyParams")
+            ?: findString(sharedPayload, "updateReplyParams")
+            ?: findMenuCommand(root, "Edit", "updateReplyParams")
+        val updateApiUrl = findMenuCommand(root, "Edit", "apiUrl")
+        val updateParams = findString(root, "updateCommentParams")
+            ?: findString(commentPayload, "updateCommentParams")
+            ?: findString(toolbarSurface, "updateCommentParams")
+            ?: findString(commentSurface, "updateCommentParams")
+            ?: findString(sharedPayload, "updateCommentParams")
+            ?: findMenuCommand(root, "Edit", "updateCommentParams")
+            ?: updateReplyParams
+        val deleteParams = findString(root, "deleteCommentParams")
+            ?: findString(commentPayload, "deleteCommentParams")
+            ?: findString(toolbarSurface, "deleteCommentParams")
+            ?: findString(commentSurface, "deleteCommentParams")
+            ?: findString(sharedPayload, "deleteCommentParams")
+            ?: findMenuCommand(commentSurface, "Delete", "action")
+            ?: findMenuCommand(sharedPayload, "Delete", "action")
+            ?: findMenuCommand(root, "Delete", "action")
+        val ownsActions = updateParams != null || deleteParams != null
+        val authorKey = authorName.commentAuthorKey()
+        if (ownsActions) authorKey?.let(sessionOwnedCommentAuthors::add)
+        val isOwn = author?.optBoolean("isCurrentUser", false) == true ||
+            id in sessionOwnedCommentIds || ownsActions ||
+            (authorChannelId.isNotBlank() && authorChannelId == signedInCommentChannelId) ||
+            (authorKey != null && authorKey in sessionOwnedCommentAuthors)
+        if (isOwn && updateParams == null) {
+            AppLog.event("owned comment edit action missing renderer=modern keys=${jsonKeySummary(root, commentPayload, toolbarSurface, commentSurface, sharedPayload)}")
+        }
         return VideoComment(
             id = id,
-            author = author?.optString("displayName").orEmpty().ifBlank { "YouTube user" },
+            author = authorName,
             text = text(properties?.opt("content")).orEmpty(),
             published = properties?.optString("publishedTime").orEmpty(),
             likes = toolbar?.optString("likeCountNotliked").orEmpty(),
@@ -1870,7 +2063,43 @@ object YouTubeRepository {
             createReplyParams = findString(toolbarSurface, "createReplyParams")
                 ?: findString(root, "createReplyParams")
                 ?: findString(commentPayload, "createReplyParams"),
+            isOwn = isOwn,
+            authorChannelId = authorChannelId,
+            updateParams = updateParams,
+            updateIsReply = updateReplyParams != null,
+            updateApiUrl = updateApiUrl,
+            deleteParams = deleteParams,
         )
+    }
+
+    private fun String.commentAuthorKey(): String? = trim().lowercase()
+        .removePrefix("@").takeIf { it.isNotBlank() && it != "youtube user" && it != "you" }
+
+    private fun jsonKeySummary(vararg values: Any?): String {
+        val keys = linkedSetOf<String>()
+        fun visit(value: Any?, depth: Int) {
+            if (depth > 20 || keys.size >= 400) return
+            when (value) {
+                is JSONObject -> value.keys().forEach { key -> keys += key; visit(value.opt(key), depth + 1) }
+                is JSONArray -> for (index in 0 until minOf(value.length(), 8)) visit(value.opt(index), depth + 1)
+            }
+        }
+        values.forEach { visit(it, 0) }
+        return keys.joinToString(",")
+    }
+
+    private fun findMenuCommand(value: Any?, label: String, commandKey: String): String? = when (value) {
+        is JSONObject -> {
+            val renderer = value.optJSONObject("menuServiceItemRenderer")
+                ?: value.optJSONObject("menuNavigationItemRenderer")
+            val itemLabel = renderer?.optString("label").orEmpty()
+                .ifBlank { text(renderer?.opt("text")).orEmpty() }
+            if (renderer != null && itemLabel.equals(label, ignoreCase = true)) {
+                findString(renderer, commandKey)
+            } else value.keys().asSequence().mapNotNull { findMenuCommand(value.opt(it), label, commandKey) }.firstOrNull()
+        }
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findMenuCommand(value.opt(it), label, commandKey) }.firstOrNull()
+        else -> null
     }
 
     private fun browse(origin: String, browseId: String, clientName: String): List<FeedItem> {

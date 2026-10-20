@@ -428,6 +428,21 @@ class MainActivity : ComponentActivity() {
         window.decorView.systemUiVisibility = if (enabled) View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY else View.SYSTEM_UI_FLAG_VISIBLE
     }
 
+    fun musicPlayerSystemBars(enabled: Boolean) {
+        if (!enabled) {
+            immersive(false)
+            return
+        }
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        insetsController.show(WindowInsetsCompat.Type.statusBars())
+        insetsController.hide(WindowInsetsCompat.Type.navigationBars())
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+    }
+
     override fun onDestroy() { runCatching { unregisterReceiver(pipReceiver) }; player?.release(); super.onDestroy() }
 }
 
@@ -999,11 +1014,11 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     val musicLoadMessage = musicLoadStatus?.takeIf { it.mediaId == track.id }?.text
     BackHandler { onBack() }
     DisposableEffect(Unit) {
-        activity.immersive(true)
+        activity.musicPlayerSystemBars(true)
         activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
             activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            activity.immersive(false)
+            activity.musicPlayerSystemBars(false)
         }
     }
     LaunchedEffect(track.id, preferredCodec) {
@@ -1037,10 +1052,14 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
         )
         Box(Modifier.matchParentSize().background(ComposeColor.Black.copy(alpha = .64f)))
         Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
-                Text("Now playing", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
-                IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
+            Row(
+                Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding()
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack, modifier = Modifier.offset(y = (-12).dp)) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
+                Text("Now playing", Modifier.weight(1f).offset(y = (-12).dp), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                IconButton(onClick = { showSettings = true }, modifier = Modifier.offset(y = (-12).dp)) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
             }
             if (tablet) {
                 Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
@@ -2681,12 +2700,16 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Column(Modifier.weight(0.85f).fillMaxHeight()) {
                         Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
                         HorizontalDivider()
-                        CommentComposer(createCommentParams, commentsLoading) { params, text ->
+                        CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
+                            comments = (listOf(posted) + comments).distinctBy { it.id }
+                        }) { params, text ->
                             withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
-                            commentsRefresh++
                         }
                         LazyColumn(Modifier.fillMaxSize()) {
-                            items(comments, key = { it.id }) { comment -> VideoCommentNode(comment) }
+                            items(comments, key = { it.id }) { comment -> VideoCommentNode(videoId, comment) { changed ->
+                                comments = if (changed == null) comments.filterNot { it.id == comment.id }
+                                else comments.map { if (it.id == comment.id) changed else it }
+                            } }
                             item {
                                 CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreComments)
                             }
@@ -2735,12 +2758,16 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     }
                     HorizontalDivider()
                     Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
-                    CommentComposer(createCommentParams, commentsLoading) { params, text ->
+                    CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
+                        comments = (listOf(posted) + comments).distinctBy { it.id }
+                    }) { params, text ->
                         withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
-                        commentsRefresh++
                     }
                 }
-                items(comments, key = { it.id }) { comment -> VideoCommentNode(comment) }
+                items(comments, key = { it.id }) { comment -> VideoCommentNode(videoId, comment) { changed ->
+                    comments = if (changed == null) comments.filterNot { it.id == comment.id }
+                    else comments.map { if (it.id == comment.id) changed else it }
+                } }
                 item {
                     CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreComments)
                 }
@@ -2940,7 +2967,8 @@ private fun CommentComposer(
     busy: Boolean,
     placeholder: String = "Add a comment",
     actionLabel: String = "Post",
-    onSubmit: suspend (String, String) -> Unit,
+    onPosted: (VideoComment) -> Unit = {},
+    onSubmit: suspend (String, String) -> VideoComment,
 ) {
     var value by remember(params) { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
@@ -2963,14 +2991,14 @@ private fun CommentComposer(
             sending = true
             scope.launch {
                 runCatching { onSubmit(command, submitted) }
-                    .onSuccess { value = ""; status = "Posted" }
+                    .onSuccess { posted -> value = ""; status = null; onPosted(posted) }
                     .onFailure { status = it.message ?: "Could not post" }
                 sending = false
             }
         }) { if (sending) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text(actionLabel) }
     }
     status?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 2.dp), style = MaterialTheme.typography.bodySmall,
-        color = if (it == "Posted") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
+        color = MaterialTheme.colorScheme.error) }
 }
 
 @Composable
@@ -3024,19 +3052,23 @@ private fun VideoCommentsSheet(videoId: String, onDismiss: () -> Unit) {
             IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close comments") }
             Text("Comments", style = MaterialTheme.typography.titleLarge)
         }
-        CommentComposer(createParams, loading) { params, text ->
+        CommentComposer(createParams, loading, onPosted = { posted ->
+            comments = (listOf(posted) + comments).distinctBy { it.id }
+        }) { params, text ->
             withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
-            refresh++
         }
         LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
-            items(comments, key = { it.id }) { comment -> VideoCommentNode(comment) }
+            items(comments, key = { it.id }) { comment -> VideoCommentNode(videoId, comment) { changed ->
+                comments = if (changed == null) comments.filterNot { it.id == comment.id }
+                else comments.map { if (it.id == comment.id) changed else it }
+            } }
             item { CommentPaginationFooter(loading, continuation, error, ::loadMore) }
         }
     }
 }
 
 @Composable
-private fun VideoCommentNode(comment: VideoComment) {
+private fun VideoCommentNode(videoId: String, comment: VideoComment, onChanged: (VideoComment?) -> Unit) {
     var showReplies by remember(comment.id) { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3046,6 +3078,7 @@ private fun VideoCommentNode(comment: VideoComment) {
                 Text(comment.author, style = MaterialTheme.typography.labelLarge)
                 if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            CommentActions(videoId, comment, onChanged)
         }
         Spacer(Modifier.height(6.dp))
         Text(comment.text)
@@ -3057,12 +3090,12 @@ private fun VideoCommentNode(comment: VideoComment) {
         }
     }
 
-    if (showReplies) CommentRepliesSheet(comment, onDismiss = { showReplies = false })
+    if (showReplies) CommentRepliesSheet(videoId, comment, onDismiss = { showReplies = false })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CommentRepliesSheet(comment: VideoComment, onDismiss: () -> Unit) {
+private fun CommentRepliesSheet(videoId: String, comment: VideoComment, onDismiss: () -> Unit) {
     var replies by remember(comment.id) { mutableStateOf<List<VideoComment>>(emptyList()) }
     var continuation by remember(comment.id) { mutableStateOf(comment.repliesContinuation) }
     var loading by remember(comment.id) { mutableStateOf(false) }
@@ -3101,32 +3134,113 @@ private fun CommentRepliesSheet(comment: VideoComment, onDismiss: () -> Unit) {
             Text("Replies", style = MaterialTheme.typography.titleLarge)
         }
         HorizontalDivider()
-        VideoCommentNodeSummary(comment)
-        CommentComposer(comment.createReplyParams, loading, "Add a reply", "Reply") { params, text ->
+        VideoCommentNodeSummary(videoId, comment) { }
+        CommentComposer(comment.createReplyParams, loading, "Add a reply", "Reply", onPosted = { posted ->
+            replies = (listOf(posted) + replies).distinctBy { it.id }
+        }) { params, text ->
             withContext(Dispatchers.IO) { YouTubeRepository.postCommentReply(params, text) }
-            refresh++
         }
         LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
-            items(replies, key = { it.id }) { reply -> VideoCommentNodeSummary(reply) }
+            items(replies, key = { it.id }) { reply -> VideoCommentNodeSummary(videoId, reply) { changed ->
+                replies = if (changed == null) replies.filterNot { it.id == reply.id }
+                else replies.map { if (it.id == reply.id) changed else it }
+            } }
             item { CommentPaginationFooter(loading, continuation, error, ::loadMore) }
         }
     }
 }
 
 @Composable
-private fun VideoCommentNodeSummary(comment: VideoComment) {
+private fun VideoCommentNodeSummary(videoId: String, comment: VideoComment, onChanged: (VideoComment?) -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(34.dp).clip(CircleShape), contentScale = ContentScale.Crop)
             else Icon(Icons.Default.Person, null, Modifier.size(34.dp))
-            Column(Modifier.padding(start = 10.dp)) {
+            Column(Modifier.padding(start = 10.dp).weight(1f)) {
                 Text(comment.author, style = MaterialTheme.typography.labelLarge)
                 if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            CommentActions(videoId, comment, onChanged)
         }
         Text(comment.text, Modifier.padding(top = 6.dp))
         if (comment.likes.isNotBlank()) Text("${comment.likes} likes", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+}
+
+@Composable
+private fun CommentActions(videoId: String, comment: VideoComment, onChanged: (VideoComment?) -> Unit) {
+    if (!comment.isOwn || comment.id.startsWith("local-")) return
+    var menu by remember(comment.id) { mutableStateOf(false) }
+    var editing by remember(comment.id) { mutableStateOf(false) }
+    var confirmingDelete by remember(comment.id) { mutableStateOf(false) }
+    var editText by remember(comment.id, comment.text) { mutableStateOf(comment.text) }
+    var working by remember(comment.id) { mutableStateOf(false) }
+    var error by remember(comment.id) { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    Box {
+        IconButton(onClick = { menu = true }, enabled = !working) { Icon(Icons.Default.MoreVert, "Comment actions") }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            if (comment.updateParams != null) DropdownMenuItem(
+                text = { Text("Edit") },
+                leadingIcon = { Icon(Icons.Default.Edit, null) },
+                onClick = { menu = false; editText = comment.text; error = null; editing = true },
+            )
+            DropdownMenuItem(
+                text = { Text("Delete") },
+                leadingIcon = { Icon(Icons.Default.Delete, null) },
+                onClick = { menu = false; error = null; confirmingDelete = true },
+            )
+        }
+    }
+
+    if (editing) AlertDialog(
+        onDismissRequest = { if (!working) editing = false },
+        title = { Text("Edit comment") },
+        text = { Column {
+            OutlinedTextField(editText, { editText = it; error = null }, enabled = !working, minLines = 2, maxLines = 6)
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        } },
+        dismissButton = { TextButton(onClick = { editing = false }, enabled = !working) { Text("Cancel") } },
+        confirmButton = { Button(onClick = {
+            val params = comment.updateParams ?: return@Button
+            working = true
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) {
+                    YouTubeRepository.updateComment(params, editText, comment.updateIsReply, comment.updateApiUrl)
+                } }
+                    .onSuccess { returned ->
+                        onChanged(comment.copy(text = returned.text.ifBlank { editText.trim() }, published = returned.published.ifBlank { comment.published }))
+                        editing = false
+                    }
+                    .onFailure { error = it.message ?: "Could not edit comment" }
+                working = false
+            }
+        }, enabled = editText.isNotBlank() && editText.trim() != comment.text && !working) {
+            if (working) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Save")
+        } },
+    )
+
+    if (confirmingDelete) AlertDialog(
+        onDismissRequest = { if (!working) confirmingDelete = false },
+        title = { Text("Delete comment?") },
+        text = { Column {
+            Text("This permanently removes the comment from YouTube.")
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        } },
+        dismissButton = { TextButton(onClick = { confirmingDelete = false }, enabled = !working) { Text("Cancel") } },
+        confirmButton = { Button(onClick = {
+            working = true
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.deleteComment(videoId, comment) } }
+                    .onSuccess { confirmingDelete = false; onChanged(null) }
+                    .onFailure { error = it.message ?: "Could not delete comment" }
+                working = false
+            }
+        }, enabled = !working) {
+            if (working) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Delete")
+        } },
+    )
 }
 
 @Composable

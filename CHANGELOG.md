@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.3] - 2026-10-21
+
+### Fixed
+- Removed duplicated status-bar spacing from tablet feeds, tabs, and the YT Music player.
+
 ## [2.2] - 2026-10-20
 
 ### Added

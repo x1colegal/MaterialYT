@@ -603,6 +603,7 @@ private fun AppScaffold(
             }
         )
     }
+    val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     val content: @Composable (PaddingValues) -> Unit = { padding ->
         val effectivePadding = if (activity.isFullscreen) PaddingValues(0.dp) else padding
         Box(Modifier.padding(effectivePadding).fillMaxSize()) {
@@ -651,7 +652,6 @@ private fun AppScaffold(
             }
         }
     }
-    val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     Box(Modifier.fillMaxSize()) {
     if (tablet) {
         Row(Modifier.fillMaxSize()) {
@@ -660,7 +660,12 @@ private fun AppScaffold(
                 tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
                 Spacer(Modifier.weight(1f))
             }
-            Scaffold(Modifier.weight(1f), bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ } }, content = content)
+            Scaffold(
+                Modifier.weight(1f),
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ } },
+                content = content,
+            )
         }
     } else {
         Scaffold(bottomBar = {

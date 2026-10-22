@@ -24,6 +24,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlin.math.roundToInt
 
 data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L)
+data class CanonicalVideoMetadata(val title: String, val author: String)
 data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null)
 data class SabrFormat(
     val itag: Int,
@@ -113,7 +114,31 @@ object YouTubeRepository {
     private val playerJavaScriptCache = mutableMapOf<String, String>()
     private val nChallengeCache = mutableMapOf<String, String>()
     private val videoDetailsCache = mutableMapOf<String, VideoDetails>()
+    private val channelNameCache = mutableMapOf<String, String>()
+    private val canonicalMetadataCache = mutableMapOf<String, CanonicalVideoMetadata>()
     fun videoDetails(videoId: String): VideoDetails? = synchronized(videoDetailsCache) { videoDetailsCache[videoId] }
+    fun canonicalVideoMetadata(videoId: String): CanonicalVideoMetadata? {
+        if (videoId.length != 11) return null
+        synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId]?.let { return it } }
+        return runCatching {
+            // oEmbed exposes the canonical uploader/title instead of the localized browse-card
+            // strings returned according to the WEB client's hl setting.
+            val watchUrl = URLEncoder.encode("https://www.youtube.com/watch?v=$videoId", "UTF-8")
+            val request = Request.Builder()
+                .url("https://www.youtube.com/oembed?url=$watchUrl&format=json")
+                .header("User-Agent", UA)
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use null
+                val json = JSONObject(response.body?.string().orEmpty())
+                val metadata = CanonicalVideoMetadata(
+                    title = json.optString("title").trim(),
+                    author = json.optString("author_name").trim(),
+                ).takeIf { it.title.isNotBlank() || it.author.isNotBlank() }
+                metadata?.also { synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId] = it } }
+            }
+        }.onFailure { AppLog.failure("canonical metadata video=$videoId", it) }.getOrNull()
+    }
     fun seedVideoDetails(videoId: String, title: String, author: String, authorUrl: String = "", authorAvatar: String = "") {
         if (videoId.isBlank()) return
         synchronized(videoDetailsCache) {
@@ -580,6 +605,26 @@ object YouTubeRepository {
         return null
     }
     fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home")).also { activeMusicQuery = null }
+
+    fun searchSuggestions(query: String): List<String> {
+        val clean = query.trim()
+        if (clean.isBlank()) return emptyList()
+        val url = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${URLEncoder.encode(clean, "UTF-8")}"
+        val request = Request.Builder().url(url).header("User-Agent", UA).build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return emptyList()
+            val root = JSONArray(response.body?.string().orEmpty())
+            val values = root.optJSONArray(1) ?: return emptyList()
+            (0 until values.length()).mapNotNull { index ->
+                when (val value = values.opt(index)) {
+                    is String -> value.trim().takeIf(String::isNotBlank)
+                    is JSONArray -> value.optString(0).trim().takeIf(String::isNotBlank)
+                    else -> null
+                }
+            }.distinct().take(12)
+        }
+    }
+
     fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query)
         .put("params", "EgWKAQIIAWoMEA4QChADEAQQCRAF")).also { activeMusicQuery = query }
 
@@ -1485,16 +1530,35 @@ object YouTubeRepository {
         val current = videoDetails(videoId) ?: VideoDetails("Video", "")
         val primary = findObject(response, "videoPrimaryInfoRenderer")?.optJSONObject("videoPrimaryInfoRenderer")
         val secondary = findObject(response, "videoSecondaryInfoRenderer")?.optJSONObject("videoSecondaryInfoRenderer")
+        // NEXT is localized. A native player response keeps the uploader's primary title,
+        // description and channel name in videoDetails even when the UI language differs.
+        val responseDetails = runCatching { visionOsPlayer(videoId).optJSONObject("videoDetails") }
+            .getOrNull() ?: response.optJSONObject("videoDetails")
+        // player.videoDetails contains the primary metadata. The matching microformat/NEXT
+        // text may be translated for the account locale, so never let it replace these fields.
+        val responseTitle = responseDetails?.optString("title")?.trim().orEmpty()
+        val responseAuthor = responseDetails?.optString("author")?.trim().orEmpty()
+            .takeUnless(::isChannelMetadataLabel).orEmpty()
+        val responseChannelId = responseDetails?.optString("channelId").orEmpty()
         val likeText = findLikeText(primary).orEmpty()
         val published = text(primary?.opt("dateText")).orEmpty().ifBlank { current.publishedDate }
         val attributedDescription = secondary?.optJSONObject("attributedDescription")
         val description = attributedDescription?.optString("content").orEmpty()
             .ifBlank { text(secondary?.opt("description")).orEmpty() }
             .ifBlank { current.description }
+        val originalDescription = responseDetails?.optString("shortDescription").orEmpty()
         val descriptionLinks = attributedDescription?.let(::attributedDescriptionLinks).orEmpty()
             .ifEmpty { current.descriptionLinks }
-        return current.copy(likeText = likeText, publishedDate = published, description = description,
-            descriptionLinks = descriptionLinks).also {
+        return current.copy(
+            title = responseTitle.ifBlank { current.title },
+            author = responseAuthor.ifBlank { current.author },
+            authorUrl = responseChannelId.takeIf(String::isNotBlank)?.let { "$origin/channel/$it" }.orEmpty().ifBlank { current.authorUrl },
+            authorAvatar = secondary?.let(::findLargestAvatar).orEmpty().ifBlank { current.authorAvatar },
+            likeText = likeText,
+            publishedDate = published,
+            description = originalDescription.ifBlank { description },
+            descriptionLinks = descriptionLinks,
+        ).also {
             synchronized(videoDetailsCache) { videoDetailsCache[videoId] = it }
         }
     }
@@ -1855,12 +1919,29 @@ object YouTubeRepository {
         val ownerName = owner?.let { text(it.opt("title")) }?.trim().orEmpty()
         val metadataName = videoDetails(videoId)?.author?.trim().orEmpty()
         val responseName = findString(response.optJSONObject("videoDetails"), "author")?.trim().orEmpty()
+        val channelId = response.optJSONObject("videoDetails")?.optString("channelId").orEmpty()
+            .ifBlank { owner?.let { findString(it, "browseId") }.orEmpty() }
+            .takeIf { it.startsWith("UC") }.orEmpty()
         // Some NEXT layouts put the handle and subscriber label in the owner title, for
         // example "@creator • 1.2M Subscribers". That is channel metadata, not its name.
-        val name = metadataName.takeIf(String::isNotBlank)
-            ?: responseName.takeIf(String::isNotBlank)
-            ?: ownerName.takeUnless(::isChannelMetadataLabel)
-            ?: ownerName.substringBefore("•").trim().takeIf(String::isNotBlank)
+        // The player author is the channel's primary name. NEXT and channel browse can localize
+        // channel names, so they are fallbacks only.
+        val directName = metadataName.takeIf(String::isNotBlank)?.takeUnless(::isChannelMetadataLabel)
+            ?: responseName.takeIf(String::isNotBlank)?.takeUnless(::isChannelMetadataLabel)
+            ?: ownerName.takeIf(String::isNotBlank)?.takeUnless(::isChannelMetadataLabel)
+        val browsedName = if (directName == null && channelId.isNotBlank()) runCatching {
+            val channelResponse = post(
+                "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", channelId),
+                origin,
+            )
+            val metadata = findObject(channelResponse, "channelMetadataRenderer")
+                ?.optJSONObject("channelMetadataRenderer")
+            metadata?.optString("title")?.trim()?.takeIf(String::isNotBlank)
+                ?: findObject(channelResponse, "pageHeaderRenderer")
+                    ?.optJSONObject("pageHeaderRenderer")?.let { text(it.opt("pageTitle")) }?.trim()?.takeIf(String::isNotBlank)
+        }.getOrNull() else null
+        val name = directName ?: browsedName
             ?: error("Channel data is unavailable")
         return ChannelInfo(name, owner?.let(::findLargestAvatar).orEmpty())
     }
@@ -2439,16 +2520,22 @@ object YouTubeRepository {
             } else null
             val musicRenderer = rendererType.startsWith("music") || renderer.has("flexColumns")
             val musicArtist = if (musicRenderer) findMusicArtist(renderer, title) else null
-            val rawSubtitle = channelSubtitle ?: musicArtist ?: text(renderer.opt("shortBylineText")) ?: text(renderer.opt("ownerText")) ?: text(renderer.opt("longBylineText")) ?: text(renderer.opt("subtitle"))
+            // A byline may render as "@handle • 1.2M subscribers" when all runs are joined.
+            // The run carrying the UC browse endpoint is the actual channel name.
+            val linkedChannelName = findLinkedChannelName(renderer)
+            val rawSubtitle = channelSubtitle ?: musicArtist ?: linkedChannelName ?: text(renderer.opt("shortBylineText")) ?: text(renderer.opt("ownerText")) ?: text(renderer.opt("longBylineText")) ?: text(renderer.opt("subtitle"))
                 ?: columns.drop(1).firstOrNull()
                 ?: deepText(renderer, "shortBylineText") ?: deepText(renderer, "ownerText") ?: deepText(renderer, "longBylineText") ?: deepText(renderer, "subtitle")
                 ?: inferChannelName(renderer, title)?.takeIf { '<' !in it && '>' !in it } ?: "Unknown channel"
-            val subtitle = (if (musicRenderer) {
+            var subtitle = (if (musicRenderer) {
                 val parts = rawSubtitle.split(" • ").map(String::trim).filter(String::isNotBlank)
                 val leadingType = parts.firstOrNull()?.lowercase() in setOf("song", "video", "episode", "album", "playlist")
                 (if (leadingType) parts.getOrNull(1) else parts.firstOrNull())
                     ?.substringBefore(": ")?.trim().orEmpty().ifBlank { rawSubtitle }
             } else rawSubtitle).replace(Regex("(\\d+),(\\d+)"), "$1.$2")
+            if (!isChannel && !isPlaylist && isChannelMetadataLabel(subtitle) && authorChannelId.isNotBlank()) {
+                subtitle = resolveChannelName(authorChannelId, id).orEmpty().ifBlank { subtitle }
+            }
             // walkFeedRenderers already rejects ad subtrees before yielding a renderer. Repeating
             // the recursive ad scan here doubled the work for every history entry.
             if (isAdString(title) || isAdString(subtitle)) return@walkFeedRenderers
@@ -2708,6 +2795,54 @@ object YouTubeRepository {
             is JSONArray -> for (index in 0 until value.length()) findMusicArtist(value.opt(index), title)?.let { return it }
         }
         return null
+    }
+
+    private fun findLinkedChannelName(value: Any?): String? {
+        when (value) {
+            is JSONObject -> {
+                value.optJSONArray("runs")?.let { runs ->
+                    for (index in 0 until runs.length()) {
+                        val run = runs.optJSONObject(index) ?: continue
+                        val browseId = run.optJSONObject("navigationEndpoint")
+                            ?.optJSONObject("browseEndpoint")?.optString("browseId").orEmpty()
+                        val name = run.optString("text").trim()
+                        if (browseId.startsWith("UC") && name.isNotBlank() && !isChannelMetadataLabel(name)) return name
+                    }
+                }
+                value.keys().forEach { key -> findLinkedChannelName(value.opt(key))?.let { return it } }
+            }
+            is JSONArray -> for (index in 0 until value.length()) {
+                findLinkedChannelName(value.opt(index))?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun resolveChannelName(channelId: String, videoId: String): String? {
+        synchronized(channelNameCache) { channelNameCache[channelId]?.let { return it } }
+        val origin = "https://www.youtube.com"
+        return runCatching {
+            // videoDetails.author is the uploader's primary name. Channel browse titles honor
+            // hl and may therefore return an English/localized alias instead.
+            val primaryName = runCatching {
+                visionOsPlayer(videoId).optJSONObject("videoDetails")
+                    ?.optString("author")?.trim().orEmpty()
+                    .takeIf { it.isNotBlank() && !isChannelMetadataLabel(it) }
+            }.getOrNull()
+            val name = primaryName ?: run {
+                val bootstrap = bootstrap(origin, "WEB")
+                val response = post(
+                    "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+                    JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", channelId),
+                    origin,
+                )
+                val metadata = findObject(response, "channelMetadataRenderer")?.optJSONObject("channelMetadataRenderer")
+                metadata?.optString("title")?.trim().orEmpty()
+                    .ifBlank { findObject(response, "pageHeaderRenderer")?.optJSONObject("pageHeaderRenderer")?.let { text(it.opt("pageTitle")) }.orEmpty().trim() }
+                    .takeIf { it.isNotBlank() && !isChannelMetadataLabel(it) }
+            }
+            name?.also { synchronized(channelNameCache) { channelNameCache[channelId] = it } }
+        }.onFailure { AppLog.failure("primary channel name video=$videoId channel=$channelId", it) }.getOrNull()
     }
 
     private fun inferChannelName(renderer: JSONObject, title: String): String? {

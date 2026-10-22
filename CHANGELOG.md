@@ -2,6 +2,17 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.5] - 2026-10-22
+
+### Fixed
+- Resolve the official channel name when YouTube returns a combined `@handle • subscribers` metadata label.
+- Prefer primary uploader metadata instead of YouTube-translated video titles, descriptions, and channel names.
+- Format ISO publication timestamps as readable English dates throughout video and Shorts interfaces.
+
+### Changed
+- Replace embedded Home and YT Music search fields with dedicated search screens and live query suggestions.
+- Move search-result clearing and feed refresh actions into the main feed toolbar.
+
 ## [2.4] - 2026-10-22
 
 ### Overview

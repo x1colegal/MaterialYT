@@ -59,6 +59,16 @@ data class SabrPlaybackInfo(
 data class ChannelInfo(val name: String, val thumbnail: String)
 data class DescriptionLinkTarget(val start: Int, val end: Int, val target: String)
 data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "", val descriptionLinks: List<DescriptionLinkTarget> = emptyList())
+enum class VideoRating { NONE, LIKE, DISLIKE }
+data class VideoInteractionState(
+    val rating: VideoRating = VideoRating.NONE,
+    val subscribed: Boolean = false,
+    val channelId: String = "",
+    val likeText: String = "",
+    val related: List<FeedItem> = emptyList(),
+    val relatedContinuation: String? = null,
+)
+data class RelatedVideoPage(val items: List<FeedItem>, val continuation: String? = null)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "")
 data class CommunityComment(val id: String, val author: String, val text: String, val published: String, val likes: String)
@@ -104,6 +114,17 @@ object YouTubeRepository {
     private val nChallengeCache = mutableMapOf<String, String>()
     private val videoDetailsCache = mutableMapOf<String, VideoDetails>()
     fun videoDetails(videoId: String): VideoDetails? = synchronized(videoDetailsCache) { videoDetailsCache[videoId] }
+    fun seedVideoDetails(videoId: String, title: String, author: String, authorUrl: String = "", authorAvatar: String = "") {
+        if (videoId.isBlank()) return
+        synchronized(videoDetailsCache) {
+            videoDetailsCache[videoId] = (videoDetailsCache[videoId] ?: VideoDetails(title, author)).copy(
+                title = title,
+                author = author,
+                authorUrl = authorUrl,
+                authorAvatar = authorAvatar,
+            )
+        }
+    }
     private data class PlaybackTracking(
         val playbackUrl: String,
         val watchtimeUrl: String,
@@ -1478,6 +1499,166 @@ object YouTubeRepository {
         }
     }
 
+    fun videoInteractions(videoId: String): VideoInteractionState {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val response = post(
+            "$origin/youtubei/v1/next?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId),
+            origin,
+        )
+        val primary = findObject(response, "videoPrimaryInfoRenderer")?.optJSONObject("videoPrimaryInfoRenderer")
+        val owner = findObject(response, "videoOwnerRenderer")?.optJSONObject("videoOwnerRenderer")
+        val subscribeRenderer = findObject(response, "subscribeButtonRenderer")?.optJSONObject("subscribeButtonRenderer")
+        val channelId = response.optJSONObject("videoDetails")?.optString("channelId").orEmpty()
+            .ifBlank { owner?.let { findString(it, "browseId") }.orEmpty() }
+            .ifBlank { subscribeRenderer?.optString("channelId").orEmpty() }
+            .ifBlank { findString(response, "channelId").orEmpty() }
+            .takeIf { it.startsWith("UC") }.orEmpty()
+        val subscriptionState = findString(response, "subscriptionState").orEmpty()
+        val subscribed = when {
+            subscriptionState.isNotBlank() -> subscriptionState.contains("SUBSCRIBED", true) && !subscriptionState.contains("UNSUBSCRIBED", true)
+            findBoolean(response, "subscribed") != null -> findBoolean(response, "subscribed") == true
+            subscribeRenderer?.has("subscribed") == true -> subscribeRenderer.optBoolean("subscribed")
+            else -> containsString(response, "/subscription/unsubscribe")
+        }
+        val likeStatus = findString(primary, "likeStatus").orEmpty()
+        val toggleState = findString(primary, "toggleButtonStateId").orEmpty()
+        val rating = when (likeStatus.uppercase()) {
+            "LIKE" -> VideoRating.LIKE
+            "DISLIKE" -> VideoRating.DISLIKE
+            else -> when {
+                toggleState.contains("STATE_ID_TYPE_LIKED", true) -> VideoRating.LIKE
+                toggleState.contains("STATE_ID_TYPE_DISLIKED", true) -> VideoRating.DISLIKE
+                else -> findToggledRating(primary)
+            }
+        }
+        val related = parseItems(response)
+            .filter { !it.channel && !it.playlist && it.id != videoId }
+            .distinctBy { it.id }
+        val relatedContinuation = findRelatedContinuationToken(response)
+        // Never scan the entire /next response for this value: related-video renderers also
+        // contain Like accessibility labels and can replace the current video's count.
+        val likeText = findLikeText(primary).orEmpty().ifBlank { videoDetails(videoId)?.likeText.orEmpty() }
+        return VideoInteractionState(rating, subscribed, channelId, likeText, related, relatedContinuation)
+    }
+
+    fun relatedVideosPage(continuation: String): RelatedVideoPage {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val response = post(
+            "$origin/youtubei/v1/next?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", continuation),
+            origin,
+        )
+        return RelatedVideoPage(
+            parseItems(response).filter { !it.channel && !it.playlist }.distinctBy { it.id },
+            findRelatedContinuationToken(response) ?: findContinuationToken(response),
+        )
+    }
+
+    private fun findRelatedContinuationToken(response: JSONObject): String? {
+        val contents = response.optJSONObject("contents")
+        val desktop = contents?.optJSONObject("twoColumnWatchNextResults")
+            ?.optJSONObject("secondaryResults")?.optJSONObject("secondaryResults")
+            ?.optJSONArray("results")
+        if (desktop != null) return findContinuationToken(desktop)
+        val continuationItems = response.optJSONArray("onResponseReceivedEndpoints")
+        if (continuationItems != null) {
+            for (index in continuationItems.length() - 1 downTo 0) {
+                val endpoint = continuationItems.optJSONObject(index) ?: continue
+                val items = endpoint.optJSONObject("appendContinuationItemsAction")?.optJSONArray("continuationItems")
+                    ?: endpoint.optJSONObject("reloadContinuationItemsCommand")?.optJSONArray("continuationItems")
+                if (items != null) return findContinuationToken(items)
+            }
+        }
+        return null
+    }
+
+    fun rateVideo(videoId: String, rating: VideoRating) {
+        require(signedIn()) { "Sign in to rate videos" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val endpoint = when (rating) {
+            VideoRating.LIKE -> "like"
+            VideoRating.DISLIKE -> "dislike"
+            VideoRating.NONE -> "removelike"
+        }
+        post(
+            "$origin/youtubei/v1/like/$endpoint?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version))
+                .put("target", JSONObject().put("videoId", videoId)),
+            origin,
+        )
+        AppLog.event("rating updated video=$videoId rating=$rating")
+    }
+
+    fun setSubscription(channelId: String, subscribed: Boolean) {
+        require(signedIn()) { "Sign in to subscribe" }
+        require(channelId.isNotBlank()) { "Channel is still loading" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val endpoint = if (subscribed) "subscribe" else "unsubscribe"
+        post(
+            "$origin/youtubei/v1/subscription/$endpoint?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version))
+                .put("channelIds", JSONArray().put(channelId)),
+            origin,
+        )
+        AppLog.event("subscription updated channel=$channelId subscribed=$subscribed")
+    }
+
+    fun channelSubscriptionState(channelId: String): Boolean {
+        require(channelId.isNotBlank()) { "Channel is still loading" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val response = post(
+            "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", channelId),
+            origin,
+        )
+        val subscriptionState = findString(response, "subscriptionState").orEmpty()
+        val subscribeRenderer = findObject(response, "subscribeButtonRenderer")
+            ?.optJSONObject("subscribeButtonRenderer")
+        val subscriptionEntity = findObject(response, "subscriptionStateEntity")
+            ?.optJSONObject("subscriptionStateEntity")
+        return when {
+            subscriptionState.isNotBlank() -> subscriptionState.contains("SUBSCRIBED", true) &&
+                !subscriptionState.contains("UNSUBSCRIBED", true)
+            subscribeRenderer?.has("subscribed") == true -> subscribeRenderer.optBoolean("subscribed")
+            subscriptionEntity?.has("subscribed") == true -> subscriptionEntity.optBoolean("subscribed")
+            containsString(response, "/subscription/unsubscribe") -> true
+            containsString(response, "/subscription/subscribe") -> false
+            else -> error("YouTube did not expose this channel's subscription state")
+        }
+    }
+
+    private fun findToggledRating(value: Any?): VideoRating = when (value) {
+        is JSONObject -> {
+            val icon = value.optJSONObject("defaultIcon")?.optString("iconType")
+                .orEmpty().ifBlank { value.optJSONObject("icon")?.optString("iconType").orEmpty() }
+            if (value.optBoolean("isToggled", false) && icon == "LIKE") VideoRating.LIKE
+            else if (value.optBoolean("isToggled", false) && icon == "DISLIKE") VideoRating.DISLIKE
+            else value.keys().asSequence().map { findToggledRating(value.opt(it)) }.firstOrNull { it != VideoRating.NONE } ?: VideoRating.NONE
+        }
+        is JSONArray -> (0 until value.length()).asSequence().map { findToggledRating(value.opt(it)) }.firstOrNull { it != VideoRating.NONE } ?: VideoRating.NONE
+        else -> VideoRating.NONE
+    }
+
+    private fun findBoolean(value: Any?, key: String): Boolean? = when (value) {
+        is JSONObject -> if (value.has(key) && value.opt(key) is Boolean) value.optBoolean(key)
+            else value.keys().asSequence().mapNotNull { findBoolean(value.opt(it), key) }.firstOrNull()
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findBoolean(value.opt(it), key) }.firstOrNull()
+        else -> null
+    }
+
+    private fun containsString(value: Any?, needle: String): Boolean = when (value) {
+        is String -> value.contains(needle, true)
+        is JSONObject -> value.keys().asSequence().any { key -> key.contains(needle, true) || containsString(value.opt(key), needle) }
+        is JSONArray -> (0 until value.length()).any { containsString(value.opt(it), needle) }
+        else -> false
+    }
+
     private fun attributedDescriptionLinks(description: JSONObject): List<DescriptionLinkTarget> {
         val content = description.optString("content")
         val runs = description.optJSONArray("commandRuns") ?: return emptyList()
@@ -2239,6 +2420,8 @@ object YouTubeRepository {
             val videoId = if (playlistRenderer || channelRenderer) "" else renderer.optString("videoId").ifBlank { findString(renderer, "videoId").orEmpty() }
             val channelId = if (channelRenderer) renderer.optString("channelId")
                 .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("UC") }.orEmpty() } else ""
+            val authorChannelId = if (!channelRenderer) findString(renderer, "browseId")
+                ?.takeIf { it.startsWith("UC") }.orEmpty() else ""
             val playlistId = if (playlistRenderer) renderer.optString("playlistId")
                 .ifBlank { findString(renderer, "playlistId").orEmpty() }
                 .ifBlank { renderer.optString("contentId").takeUnless { it.length == 11 }.orEmpty() } else ""
@@ -2298,6 +2481,14 @@ object YouTubeRepository {
                 (durationMs > 0L && rawResumePositionMs >= durationMs - 1_500L)
             ) 0L else rawResumePositionMs
             val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel, resumePositionMs = resumePositionMs)
+            if (!isPlaylist && !isChannel) synchronized(videoDetailsCache) {
+                videoDetailsCache[id] = (videoDetailsCache[id] ?: VideoDetails(title, subtitle)).copy(
+                    title = title,
+                    author = subtitle,
+                    authorUrl = authorChannelId.takeIf { it.startsWith("UC") }?.let { "https://www.youtube.com/channel/$it" }.orEmpty(),
+                    authorAvatar = channelThumbnail,
+                )
+            }
             val existing = output[id]
             if (existing == null) output[id] = item
             else if (resumePositionMs > existing.resumePositionMs) output[id] = existing.copy(resumePositionMs = resumePositionMs)

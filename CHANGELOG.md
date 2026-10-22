@@ -2,6 +2,32 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.4] - 2026-10-22
+
+### Overview
+- This is a major update across nearly every part of MaterialYT, covering video and music players, Shorts, channels, playlists, comments, recommendations, account actions, responsive layouts, and metadata loading.
+
+### Added
+- Added authenticated Like and Dislike actions to videos and YT Music, and Like actions to Shorts.
+- Added authenticated channel subscription controls to the phone video screen.
+- Added a native related-video feed below comments.
+- Added full comments, replies, pagination, and posting to the phone YT Music player.
+- Added channel banners and authenticated Subscribe controls to channel pages.
+
+### Improved
+- Reworked the phone video screen around the classic YouTube watch layout with compact metadata and working action controls.
+- Refresh the displayed Like count from YouTube after rating changes.
+- Adapted channel and playlist pages for tablet displays.
+- Moved Shorts metadata and descriptions into the title-driven details view.
+- Reworked the tablet video player with watch information and actions below the video, Recommended beside it, and contextual details or comments in the side panel.
+- Decoupled video metadata from playback preparation so titles and channel information appear immediately while slow tablet playback is still loading.
+- Updated the tablet YT Music player with Like and Dislike actions plus switchable Lyrics and Comments panels.
+- Added infinite pagination to the Recommended feed on phone and tablet video players.
+
+### Fixed
+- Fixed the phone channel header layout and prevented unrelated response fields from overriding the real subscription state.
+- Copy video links directly on older Android versions whose legacy share panel has no copy action.
+
 ## [2.3] - 2026-10-21
 
 ### Fixed

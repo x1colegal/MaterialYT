@@ -150,6 +150,20 @@ enum class QualityChoice(val label: String, val height: Int) {
 }
 
 private data class PlayerChoice(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val videoOnly: Boolean, val audioTrackName: String = "", val audioTrackId: String = "", val originalAudio: Boolean = false, val sabrFormat: SabrFormat? = null)
+private enum class VideoPhonePanel { MAIN, DETAILS, COMMENTS }
+
+private fun shareVideoLink(context: Context, url: String) {
+    if (Build.VERSION.SDK_INT >= 29) {
+        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, url)
+        }, "Share video"))
+    } else {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("YouTube video", url))
+        android.widget.Toast.makeText(context, "Video link copied", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
 
 private val videoHttpClient by lazy {
     OkHttpClient.Builder()
@@ -641,6 +655,7 @@ private fun AppScaffold(
                 key(videoUrl) {
                     VideoScreen(activity, videoUrl, codec, audioCodec, quality, onPlayer,
                         onPlayerMode = { playerMode = it },
+                        onOpenVideo = { nextUrl -> activeVideoUrl = nextUrl; playerMode = true },
                         onOpenChannel = { channelUrl ->
                             activeChannelUrl = channelUrl
                             playerMode = false
@@ -1002,11 +1017,21 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
 
 @Composable
 private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec: AudioCodecChoice, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
     var showLyrics by remember { mutableStateOf(false) }
+    var showComments by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     
     var lyrics by remember { mutableStateOf<List<LyricLine>?>(null) }
     var lyricsError by remember { mutableStateOf<String?>(null) }
+    var interactions by remember(track.id) { mutableStateOf(VideoInteractionState()) }
+    var interactionBusy by remember(track.id) { mutableStateOf(false) }
+    var comments by remember(track.id) { mutableStateOf<List<VideoComment>>(emptyList()) }
+    var commentsContinuation by remember(track.id) { mutableStateOf<String?>(null) }
+    var createCommentParams by remember(track.id) { mutableStateOf<String?>(null) }
+    var commentsLoading by remember(track.id) { mutableStateOf(false) }
+    var commentsError by remember(track.id) { mutableStateOf<String?>(null) }
+    var commentsRefresh by remember(track.id) { mutableIntStateOf(0) }
     
     val lyricsState = rememberLazyListState()
     val position = AutoMusicService.position.longValue
@@ -1029,6 +1054,45 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     LaunchedEffect(track.id, preferredCodec) {
         if (AutoMusicService.nowPlaying.value?.id != track.id || (!AutoMusicService.playing.value && AutoMusicService.position.longValue == 0L)) {
             AutoMusicService.play(activity, track, preferredCodec)
+        }
+    }
+    LaunchedEffect(track.id) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoInteractions(track.id) } }
+            .onSuccess { interactions = it }
+            .onFailure { AppLog.failure("music interactions video=${track.id}", it) }
+    }
+    fun rate(target: VideoRating) {
+        if (interactionBusy) return
+        val next = if (interactions.rating == target) VideoRating.NONE else target
+        val previous = interactions
+        val updatedLikes = optimisticLikeText(previous.likeText, previous.rating, next)
+        interactionBusy = true
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.rateVideo(track.id, next) } }
+                .onSuccess { interactions = previous.copy(rating = next, likeText = updatedLikes) }
+                .onFailure { AppLog.failure("music rating video=${track.id}", it); android.widget.Toast.makeText(activity, it.message ?: "Could not update rating", android.widget.Toast.LENGTH_SHORT).show() }
+            interactionBusy = false
+        }
+    }
+    LaunchedEffect(track.id, showComments, commentsRefresh) {
+        if (!showComments || (commentsRefresh == 0 && comments.isNotEmpty()) || commentsLoading) return@LaunchedEffect
+        commentsLoading = true
+        if (commentsRefresh > 0) delay(350)
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoComments(track.id) } }
+            .onSuccess { page -> comments = page.items; commentsContinuation = page.continuation; createCommentParams = page.createCommentParams }
+            .onFailure { commentsError = it.message ?: "Could not load comments" }
+        commentsLoading = false
+    }
+    fun loadMoreMusicComments() {
+        val token = commentsContinuation ?: return
+        if (commentsLoading) return
+        commentsLoading = true
+        commentsContinuation = null
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoCommentsPage(token) } }
+                .onSuccess { page -> comments = (comments + page.items).distinctBy { it.id }; commentsContinuation = page.continuation }
+                .onFailure { commentsContinuation = token; commentsError = it.message ?: "Could not load more comments" }
+            commentsLoading = false
         }
     }
     if ((showLyrics || LocalConfiguration.current.smallestScreenWidthDp >= 600) && lyrics == null && lyricsError == null) LaunchedEffect(track.id) {
@@ -1074,6 +1138,10 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
                         Spacer(Modifier.height(18.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                            IconButton(onClick = { rate(VideoRating.LIKE) }, enabled = !interactionBusy) { Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White) }
+                            IconButton(onClick = { rate(VideoRating.DISLIKE) }, enabled = !interactionBusy) { Icon(Icons.Default.ThumbDown, "Dislike", tint = if (interactions.rating == VideoRating.DISLIKE) MaterialTheme.colorScheme.primary else ComposeColor.White) }
+                        }
                         Spacer(Modifier.height(14.dp))
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
@@ -1086,24 +1154,69 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                         IconButton(onClick = { AutoMusicService.toggle() }, Modifier.size(76.dp)) { Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White) }
                     }
                     Column(Modifier.weight(1f).fillMaxHeight().background(ComposeColor.Black.copy(alpha = .28f), RoundedCornerShape(20.dp)).padding(16.dp)) {
-                        Text("Lyrics", color = ComposeColor.White, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(bottom = 12.dp))
-                        LazyColumn(state = lyricsState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (showComments) "Comments" else "Lyrics", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                            TextButton(onClick = { showComments = false }) { Text("Lyrics", color = if (!showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
+                            TextButton(onClick = { showComments = true }) { Text("Comments", color = if (showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
+                            if (showComments) IconButton(onClick = { commentsRefresh++ }, enabled = !commentsLoading) { Icon(Icons.Default.Refresh, "Refresh comments", tint = ComposeColor.White) }
+                        }
+                        HorizontalDivider(color = ComposeColor.White.copy(alpha = .18f), modifier = Modifier.padding(bottom = 12.dp))
+                        if (showComments) {
+                            CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
+                                if (posted.id.startsWith("local-")) commentsRefresh++
+                                else comments = (listOf(posted) + comments).distinctBy { it.id }
+                            }) { params, text -> withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) } }
+                            LazyColumn(Modifier.fillMaxSize()) {
+                                items(comments, key = { it.id }) { comment -> VideoCommentNode(track.id, comment) { changed ->
+                                    comments = if (changed == null) comments.filterNot { it.id == comment.id }
+                                    else comments.map { if (it.id == comment.id) changed else it }
+                                } }
+                                item { CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreMusicComments) }
+                            }
+                        } else LazyColumn(state = lyricsState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             if (lines.isEmpty()) item { Text(lyricsError ?: if (lyrics == null) "Loading lyrics…" else "Lyrics unavailable", color = ComposeColor.White.copy(alpha = .7f), style = MaterialTheme.typography.bodyLarge) }
                             else items(lines.size) { index -> Text(lines[index].text, Modifier.clickable(enabled = lines[index].startMs >= 0) { AutoMusicService.seekTo(lines[index].startMs) }, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .48f), style = if (index == currentLine) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleMedium) }
                         }
                     }
                 }
             } else {
-                Crossfade(showLyrics, label = "music page", modifier = Modifier.weight(1f)) { lyricsPage ->
-                    if (lyricsPage) LazyColumn(state = lyricsState, contentPadding = PaddingValues(horizontal = 28.dp, vertical = 220.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                Crossfade(if (showComments) 2 else if (showLyrics) 1 else 0, label = "music page", modifier = Modifier.weight(1f)) { page ->
+                    if (page == 2) LazyColumn(contentPadding = PaddingValues(vertical = 12.dp)) {
+                        item {
+                            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Comments", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall)
+                                IconButton(onClick = { commentsRefresh++ }, enabled = !commentsLoading) { Icon(Icons.Default.Refresh, "Refresh comments", tint = ComposeColor.White) }
+                            }
+                            CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
+                                if (posted.id.startsWith("local-")) commentsRefresh++
+                                else comments = (listOf(posted) + comments).distinctBy { it.id }
+                            }) { params, text ->
+                                withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
+                            }
+                        }
+                        items(comments, key = { it.id }) { comment -> VideoCommentNode(track.id, comment) { changed -> comments = if (changed == null) comments.filterNot { it.id == comment.id } else comments.map { if (it.id == comment.id) changed else it } } }
+                        item { CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreMusicComments) }
+                    } else if (page == 1) LazyColumn(state = lyricsState, contentPadding = PaddingValues(horizontal = 28.dp, vertical = 220.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                         if (lines.isEmpty()) item { Text(lyricsError ?: "Loading lyrics…", color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall) }
                         else items(lines.size) { index -> Text(lines[index].text, Modifier.clickable(enabled = lines[index].startMs >= 0) { AutoMusicService.seekTo(lines[index].startMs) }, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .48f), style = if (index == currentLine) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge) }
-                    } else Column(Modifier.fillMaxSize().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    } else Column(
+                        Modifier.fillMaxSize().padding(horizontal = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
                         Box(Modifier.sizeIn(maxWidth = 320.dp, maxHeight = 320.dp).aspectRatio(1f).clip(RoundedCornerShape(20.dp))) {
                             AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
                         Spacer(Modifier.height(22.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                            IconButton(onClick = { rate(VideoRating.LIKE) }, enabled = !interactionBusy) {
+                                Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
+                            }
+                            IconButton(onClick = { rate(VideoRating.DISLIKE) }, enabled = !interactionBusy) {
+                                Icon(Icons.Default.ThumbDown, "Dislike", tint = if (interactions.rating == VideoRating.DISLIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
+                            }
+                        }
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
                             drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)
@@ -1111,10 +1224,15 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                             drawLine(ComposeColor.White, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (position / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
                         }
                         Row(Modifier.fillMaxWidth()) { Text(formatTime(position), color = ComposeColor.White.copy(alpha = .75f)); Spacer(Modifier.weight(1f)); Text(formatTime(duration), color = ComposeColor.White.copy(alpha = .75f)) }
-                        IconButton(onClick = { AutoMusicService.toggle() }, Modifier.size(82.dp)) { Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White) }
+                        IconButton(onClick = { AutoMusicService.toggle() }, Modifier.requiredSize(82.dp).offset(y = (-28).dp)) { Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White) }
+                        Spacer(Modifier.height(18.dp))
                     }
                 }
-                NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) { NavigationBarItem(!showLyrics, { showLyrics = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }); NavigationBarItem(showLyrics, { showLyrics = true }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }) }
+                NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) {
+                    NavigationBarItem(!showLyrics && !showComments, { showLyrics = false; showComments = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") })
+                    NavigationBarItem(showLyrics, { showLyrics = true; showComments = false }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") })
+                    NavigationBarItem(showComments, { showLyrics = false; showComments = true }, { Icon(Icons.Default.Comment, null) }, label = { Text("Comments") })
+                }
             }
         }
     }
@@ -1334,6 +1452,15 @@ private fun formatCount(count: Long): String = when {
     }
 }
 
+private fun optimisticLikeText(text: String, previous: VideoRating, next: VideoRating): String {
+    val delta = (if (next == VideoRating.LIKE) 1 else 0) - (if (previous == VideoRating.LIKE) 1 else 0)
+    if (delta == 0) return text
+    val trimmed = text.trim()
+    if (!Regex("^[0-9]{1,3}(?:,[0-9]{3})*$|^[0-9]+$").matches(trimmed)) return text
+    val count = trimmed.replace(",", "").toLongOrNull() ?: return text
+    return java.text.NumberFormat.getIntegerInstance(java.util.Locale.US).format((count + delta).coerceAtLeast(0L))
+}
+
 private fun descriptionText(raw: String): String {
     if (!Regex("<[/!a-zA-Z][^>]*>").containsMatchIn(raw)) return raw
     return if (Build.VERSION.SDK_INT >= 24) Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString()
@@ -1482,6 +1609,30 @@ private fun FeedRow(item: FeedItem, click: () -> Unit) {
 }
 
 @Composable
+private fun VideoActionButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    FilledTonalButton(
+        onClick = onClick,
+        enabled = enabled,
+        shape = CircleShape,
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+    ) {
+        Icon(icon, null, Modifier.size(20.dp))
+        Spacer(Modifier.width(7.dp))
+        Text(label, maxLines = 1)
+    }
+}
+
+@Composable
 private fun YouTubeHeader(title: String, music: Boolean = false) {
     Surface(tonalElevation = 2.dp) {
         Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1547,6 +1698,7 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
     var loading by remember { mutableStateOf(true) }
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     LaunchedEffect(url) {
         val id = (Regex("[?&]list=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')).removePrefix("VL")
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistVideos(id) } }
@@ -1560,7 +1712,36 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Playlist", style = MaterialTheme.typography.headlineMedium) }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
-        if (!loading) LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
+        if (!loading && tablet) Row(Modifier.weight(1f).fillMaxWidth()) {
+            Column(
+                Modifier.widthIn(min = 300.dp, max = 380.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                (playlist?.thumbnails?.lastOrNull()?.url ?: playlistItems.firstOrNull()?.thumbnail)?.let {
+                    AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
+                }
+                Text(playlist?.name ?: "YouTube playlist", style = MaterialTheme.typography.headlineMedium)
+                playlist?.uploaderName?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodyMedium)
+                if (playlistItems.isNotEmpty()) Button(onClick = { selectedIndex = 0 }, Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play all")
+                }
+            }
+            VerticalDivider(Modifier.fillMaxHeight())
+            LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+                items(playlistItems.size) { index ->
+                    val item = playlistItems[index]
+                    Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("${index + 1}", Modifier.width(38.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        AsyncImage(item.thumbnail, null, Modifier.width(180.dp).aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
+                        Column(Modifier.padding(start = 16.dp).weight(1f)) {
+                            Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                            Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        } else if (!loading) LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
             item { Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 (playlist?.thumbnails?.lastOrNull()?.url ?: playlistItems.firstOrNull()?.thumbnail)?.let { AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(24.dp)), contentScale = ContentScale.Crop) }
                 Text(playlist?.name ?: "YouTube playlist", style = MaterialTheme.typography.headlineMedium); playlist?.uploaderName?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -1593,10 +1774,18 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
     var nextPage by remember { mutableStateOf<org.schabi.newpipe.extractor.Page?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var subscribed by remember(url) { mutableStateOf<Boolean?>(null) }
+    var subscriptionBusy by remember(url) { mutableStateOf(false) }
+    val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     val scope = rememberCoroutineScope()
     BackHandler { if (selectedShort != null) selectedShort = null else onBack() }
     LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url) } }
-        .onSuccess { channel = it }.onFailure { error = it.message } }
+        .onSuccess {
+            channel = it
+            if (it.id.isNotBlank() && YouTubeRepository.signedIn()) runCatching {
+                withContext(Dispatchers.IO) { YouTubeRepository.channelSubscriptionState(it.id) }
+            }.onSuccess { state -> subscribed = state }
+        }.onFailure { error = it.message } }
     LaunchedEffect(channel, selectedTab) {
         val loaded = channel ?: return@LaunchedEffect
         error = null
@@ -1639,11 +1828,52 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         error?.let { message -> item { Text(message, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) } }
         channel?.let { data ->
             item {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(104.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
-                    Text(data.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-                    if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(data.description.orEmpty(), style = MaterialTheme.typography.bodyMedium)
+                Column(Modifier.fillMaxWidth()) {
+                    data.banners.lastOrNull()?.url?.let {
+                        AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(if (tablet) 6f else 4f), contentScale = ContentScale.Crop)
+                    }
+                    val subscriptionButton: @Composable () -> Unit = {
+                        val current = subscribed
+                        Button(
+                            onClick = {
+                                val previous = subscribed ?: return@Button
+                                if (subscriptionBusy) return@Button
+                                subscriptionBusy = true
+                                scope.launch {
+                                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.setSubscription(data.id, !previous) } }
+                                        .onSuccess { subscribed = !previous }
+                                        .onFailure { android.widget.Toast.makeText(activity, it.message ?: "Could not update subscription", android.widget.Toast.LENGTH_SHORT).show() }
+                                    subscriptionBusy = false
+                                }
+                            },
+                            enabled = !subscriptionBusy && current != null && data.id.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = if (current == true) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (current == true) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White),
+                            modifier = if (tablet) Modifier else Modifier.fillMaxWidth(),
+                        ) { Text(when { subscriptionBusy -> "Updating…"; current == null -> "Checking…"; current == true -> "Subscribed"; else -> "Subscribe" }) }
+                    }
+                    if (tablet) Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 40.dp, vertical = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(120.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
+                        Column(Modifier.padding(start = 20.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(data.name, style = MaterialTheme.typography.headlineMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(data.description.orEmpty(), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        }
+                        Spacer(Modifier.width(20.dp))
+                        subscriptionButton()
+                    } else Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(88.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
+                        Text(data.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(data.description.orEmpty(), Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        subscriptionButton()
+                    }
                 }
             }
             item {
@@ -1666,7 +1896,24 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                     }
                 }
             } else {
-                items(channelItems) { item -> ResultRow(item, showSubtitle = false) {
+                if (tablet) items(channelItems.chunked(2)) { rowItems ->
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        rowItems.forEach { item -> ChannelTabletItem(item, Modifier.weight(1f)) {
+                            if (item.infoType == InfoItem.InfoType.STREAM) {
+                                if (selectedTab == "shorts") {
+                                    val id = item.url.substringAfterLast('/').substringBefore('?').takeIf { it.length == 11 }
+                                        ?: Regex("[?&]v=([^&]+)").find(item.url)?.groupValues?.getOrNull(1)
+                                    if (id != null) selectedShort = FeedItem(id, item.name, channel?.name.orEmpty(), item.thumbnails.firstOrNull()?.url.orEmpty(), 9, 16, channel?.avatars?.lastOrNull()?.url.orEmpty(), "https://www.youtube.com/shorts/$id", channelUrl = url)
+                                } else {
+                                    val videoId = Regex("[?&]v=([^&]+)").find(item.url)?.groupValues?.getOrNull(1) ?: item.url.substringAfterLast('/')
+                                    YouTubeRepository.seedVideoDetails(videoId, item.name, channel?.name.orEmpty(), url, channel?.avatars?.lastOrNull()?.url.orEmpty())
+                                    openVideo(item.url)
+                                }
+                            }
+                        } }
+                        if (rowItems.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                } else items(channelItems) { item -> ResultRow(item, showSubtitle = false) {
                     if (item.infoType == InfoItem.InfoType.STREAM) {
                         if (selectedTab == "shorts") {
                             val id = item.url.substringAfterLast('/').substringBefore('?').takeIf { it.length == 11 }
@@ -1676,7 +1923,11 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                                 9, 16, channel?.avatars?.lastOrNull()?.url.orEmpty(), "https://www.youtube.com/shorts/$id",
                                 channelUrl = url,
                             )
-                        } else openVideo(item.url)
+                        } else {
+                            val videoId = Regex("[?&]v=([^&]+)").find(item.url)?.groupValues?.getOrNull(1) ?: item.url.substringAfterLast('/')
+                            YouTubeRepository.seedVideoDetails(videoId, item.name, channel?.name.orEmpty(), url, channel?.avatars?.lastOrNull()?.url.orEmpty())
+                            openVideo(item.url)
+                        }
                     }
                 } }
                 if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
@@ -1688,6 +1939,19 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
             ShortPlayer(activity, selected, true, codec, audioCodec, quality, onPlayer) { }
         }
     }
+    }
+}
+
+@Composable
+private fun ChannelTabletItem(item: InfoItem, modifier: Modifier = Modifier, click: () -> Unit) {
+    Column(modifier.clickable(onClick = click)) {
+        AsyncImage(
+            item.thumbnails.firstOrNull()?.url,
+            null,
+            Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(MaterialTheme.colorScheme.surfaceVariant),
+            contentScale = ContentScale.Crop,
+        )
+        Text(item.name, Modifier.padding(horizontal = 4.dp, vertical = 10.dp), style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1787,6 +2051,7 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
 @Composable
 private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, waitingForNext: Boolean = false, onOpenChannel: (String) -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val player = remember(item.id) { PlayerFactory.bufferedPlayer(context).apply { repeatMode = Player.REPEAT_MODE_ONE }.also(onPlayer) }
     var streams by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var selected by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
@@ -1801,13 +2066,39 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     
     var showComments by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
-    var showDetails by remember { mutableStateOf(false) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
     var hasStartedPlayback by remember(item.id) { mutableStateOf(false) }
     var shortLoadMessage by remember(item.id) { mutableStateOf<String?>(null) }
     var showPlayPauseIndicator by remember { mutableStateOf(false) }
     var lastActionWasPlay by remember { mutableStateOf(false) }
     var indicatorKey by remember { mutableIntStateOf(0) }
+    var interactions by remember(item.id) { mutableStateOf(VideoInteractionState()) }
+    var interactionBusy by remember(item.id) { mutableStateOf(false) }
+
+    LaunchedEffect(item.id) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoInteractions(item.id) } }
+            .onSuccess { interactions = it }
+            .onFailure { AppLog.failure("shorts interactions video=${item.id}", it) }
+    }
+    LaunchedEffect(item.id, expandedTitle) {
+        if (!expandedTitle) return@LaunchedEffect
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(item.id) } }
+            .onSuccess { shortMetadata = it }
+            .onFailure { AppLog.failure("shorts details video=${item.id}", it) }
+    }
+    fun toggleLike() {
+        if (interactionBusy) return
+        val next = if (interactions.rating == VideoRating.LIKE) VideoRating.NONE else VideoRating.LIKE
+        val previous = interactions
+        val updatedLikes = optimisticLikeText(previous.likeText, previous.rating, next)
+        interactionBusy = true
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.rateVideo(item.id, next) } }
+                .onSuccess { interactions = previous.copy(rating = next, likeText = updatedLikes) }
+                .onFailure { AppLog.failure("shorts rating video=${item.id}", it); android.widget.Toast.makeText(context, it.message ?: "Could not update like", android.widget.Toast.LENGTH_SHORT).show() }
+            interactionBusy = false
+        }
+    }
 
     LaunchedEffect(item.id) {
         PlaybackLoadStatus.message.collect { status ->
@@ -2042,16 +2333,50 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = { showDetails = true }) { Icon(Icons.Default.MoreVert, "Short details", tint = ComposeColor.White) }
+                    IconButton(onClick = { toggleLike() }, enabled = !interactionBusy) {
+                        Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
+                    }
+                    Text(interactions.likeText, color = ComposeColor.White, style = MaterialTheme.typography.labelSmall, maxLines = 1)
                     IconButton(onClick = {
                         showComments = true
                     }) { Icon(Icons.Default.Comment, "Comments", tint = ComposeColor.White) }
                     IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
                 }
             }
-            if (expandedTitle) Box(Modifier.fillMaxSize().background(ComposeColor.Black.copy(alpha = .9f)).clickable { expandedTitle = false }.padding(24.dp)) {
-                Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall,
-                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()))
+            if (expandedTitle) Surface(Modifier.fillMaxSize(), color = ComposeColor.Black.copy(alpha = .94f)) {
+                val views = shortInfo?.viewCount?.takeIf { it >= 0 } ?: shortMetadata?.viewCount ?: -1L
+                val likes = interactions.likeText.ifBlank { shortInfo?.likeCount?.takeIf { it >= 0 }?.let(::formatCount) ?: shortMetadata?.likeText.orEmpty().ifBlank { "—" } }
+                val published = shortInfo?.textualUploadDate?.takeIf { it.isNotBlank() } ?: shortMetadata?.publishedDate?.takeIf { it.isNotBlank() }
+                val description = descriptionText(shortMetadata?.description.orEmpty().ifBlank { shortInfo?.description?.content.orEmpty() })
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Details", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall)
+                        IconButton(onClick = { expandedTitle = false }) { Icon(Icons.Default.Close, "Close details", tint = ComposeColor.White) }
+                    }
+                    Text(shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                    Row(Modifier.padding(vertical = 18.dp), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                        Column { Text(if (views >= 0) formatCount(views) else "—", color = ComposeColor.White, style = MaterialTheme.typography.titleLarge); Text("Views", color = ComposeColor.LightGray) }
+                        Column { Text(likes, color = ComposeColor.White, style = MaterialTheme.typography.titleLarge); Text("Likes", color = ComposeColor.LightGray) }
+                        Column { Text(published ?: "—", color = ComposeColor.White, style = MaterialTheme.typography.titleMedium); Text("Published", color = ComposeColor.LightGray) }
+                    }
+                    OutlinedButton(onClick = {
+                        val link = "https://youtube.com/shorts/${item.id}"
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("YouTube Short", link))
+                        android.widget.Toast.makeText(context, "Short link copied", android.widget.Toast.LENGTH_SHORT).show()
+                    }) { Icon(Icons.Default.Share, null); Spacer(Modifier.width(8.dp)); Text("Copy link") }
+                    HorizontalDivider(Modifier.padding(vertical = 16.dp), color = ComposeColor.DarkGray)
+                    Text("Description", color = ComposeColor.White, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    if (description.isBlank()) Text("No description was provided.", color = ComposeColor.LightGray)
+                    else InteractiveDescription(description, shortMetadata?.descriptionLinks.orEmpty(), { seconds -> expandedTitle = false; player.seekTo(seconds * 1_000L) }, { target ->
+                        expandedTitle = false
+                        val resolved = unwrapYouTubeRedirect(target)
+                        val uri = android.net.Uri.parse(resolved)
+                        val channelPath = uri.host?.endsWith("youtube.com", true) == true && (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
+                        if (channelPath) onOpenChannel(resolved) else activity.openExternalLink(uri)
+                    })
+                }
             }
         }
         if (waitingForNext) Row(
@@ -2064,68 +2389,6 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             Text("Loading more Shorts…", color = ComposeColor.White, style = MaterialTheme.typography.labelLarge)
         }
     }
-    if (showDetails) AlertDialog(
-        onDismissRequest = { showDetails = false },
-        confirmButton = { TextButton(onClick = { showDetails = false }) { Text("Close") } },
-        title = { Text("Short details") },
-        text = {
-            LaunchedEffect(item.id) {
-                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(item.id) } }
-                    .onSuccess { shortMetadata = it }
-                    .onFailure { AppLog.failure("shorts details video=${item.id}", it) }
-            }
-            val views = shortInfo?.viewCount?.takeIf { it >= 0 } ?: shortMetadata?.viewCount ?: -1L
-            val likes = shortInfo?.likeCount?.takeIf { it >= 0 }?.let(::formatCount)
-                ?: shortMetadata?.likeText?.takeIf { it.isNotBlank() } ?: "—"
-            val published = shortInfo?.uploadDate?.localDateTime?.toLocalDate()?.let { date ->
-                java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.LONG).withLocale(java.util.Locale.getDefault()).format(date)
-            } ?: shortInfo?.textualUploadDate?.takeIf { it.isNotBlank() }
-                ?: shortMetadata?.publishedDate?.takeIf { it.isNotBlank() }
-            val raw = shortMetadata?.description.orEmpty().ifBlank { shortInfo?.description?.content.orEmpty() }
-            val description = descriptionText(raw)
-            Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
-                Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                    Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium) }
-                    Column { Text(likes, style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
-                }
-                Spacer(Modifier.height(16.dp)); Text("Published", style = MaterialTheme.typography.labelMedium); Text(published ?: "Date unavailable", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton(
-                    onClick = {
-                        val link = "https://youtube.com/shorts/${item.id}"
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("YouTube Short", link))
-                        android.widget.Toast.makeText(context, "Short link copied", android.widget.Toast.LENGTH_SHORT).show()
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Default.Share, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Copy link")
-                }
-                HorizontalDivider(Modifier.padding(vertical = 16.dp))
-                Text("Description", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                if (description.isBlank()) Text("No description was provided.")
-                else InteractiveDescription(
-                    text = description,
-                    explicitLinks = shortMetadata?.descriptionLinks.orEmpty(),
-                    onSeek = { seconds ->
-                        showDetails = false
-                        player.seekTo(seconds * 1_000L)
-                    },
-                    onOpenUrl = { target ->
-                        showDetails = false
-                        val resolvedTarget = unwrapYouTubeRedirect(target)
-                        val uri = android.net.Uri.parse(resolvedTarget)
-                        val channelPath = uri.host?.endsWith("youtube.com", true) == true &&
-                            (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
-                        if (channelPath) onOpenChannel(resolvedTarget) else activity.openExternalLink(uri)
-                    },
-                )
-            }
-        }
-    )
     if (showComments) VideoCommentsSheet(item.id) { showComments = false }
     if (showSettings) AlertDialog(onDismissRequest = { showSettings = false }, confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } }, title = { Text("Playback settings") }, text = {
         Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState())) {
@@ -2149,15 +2412,20 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 }
 
 @Composable
-private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onOpenChannel: ((String) -> Unit)? = null, onBack: () -> Unit) {
+private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onOpenChannel: ((String) -> Unit)? = null, onOpenVideo: ((String) -> Unit)? = null, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
     val requestedStartMs = Regex("[?&]t=(\\d+)").find(url)?.groupValues?.getOrNull(1)?.toLongOrNull()?.times(1_000L) ?: 0L
     var resumeStartMs by remember(videoId, requestedStartMs) { mutableLongStateOf(requestedStartMs) }
     var info by remember { mutableStateOf<StreamInfo?>(null) }
-    var videoMetadata by remember { mutableStateOf<VideoDetails?>(null) }
+    var videoMetadata by remember(videoId) { mutableStateOf(YouTubeRepository.videoDetails(videoId)) }
     var channelInfo by remember { mutableStateOf<ChannelInfo?>(null) }
+    var interactions by remember(videoId) { mutableStateOf(VideoInteractionState()) }
+    var interactionBusy by remember(videoId) { mutableStateOf(false) }
+    var subscriptionBusy by remember(videoId) { mutableStateOf(false) }
+    var relatedLoading by remember(videoId) { mutableStateOf(false) }
+    var relatedError by remember(videoId) { mutableStateOf<String?>(null) }
     var comments by remember(videoId) { mutableStateOf<List<VideoComment>>(emptyList()) }
     var commentsContinuation by remember(videoId) { mutableStateOf<String?>(null) }
     var createCommentParams by remember(videoId) { mutableStateOf<String?>(null) }
@@ -2179,6 +2447,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var playerDuration by remember { mutableLongStateOf(0L) }
     var showPlayerSettings by remember { mutableStateOf(false) }
     var showVideoDetails by remember { mutableStateOf(false) }
+    var phonePanel by remember(videoId) { mutableStateOf(VideoPhonePanel.MAIN) }
     var fullscreen by remember { mutableStateOf(false) }
     var speed by remember { mutableFloatStateOf(1f) }
     var playerGeneration by remember(videoId) { mutableIntStateOf(0) }
@@ -2320,6 +2589,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         if (fullscreen) {
             fullscreen = false
             activity.fullscreen(false)
+        } else if (phonePanel != VideoPhonePanel.MAIN) {
+            phonePanel = VideoPhonePanel.MAIN
         } else if (!isMinimized) {
             isMinimized = true
         } else {
@@ -2356,6 +2627,19 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             view.invalidate()
             activity.visiblePlayerView(view)
         }
+    }
+    // Metadata must not wait for the much heavier format/PoToken/player pipeline.
+    // Feed/search parsing usually seeds the cache synchronously; these independent requests
+    // enrich it while playback is still preparing on slower tablets.
+    LaunchedEffect(videoId) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(videoId) } }
+            .onSuccess { videoMetadata = it }
+            .onFailure { AppLog.failure("video metadata video=$videoId", it) }
+    }
+    LaunchedEffect(videoId) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelInfo(videoId) } }
+            .onSuccess { channelInfo = it }
+            .onFailure { AppLog.failure("video channel metadata video=$videoId", it) }
     }
     LaunchedEffect(url, codec, audioCodec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
@@ -2440,8 +2724,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 if (availableStreams.isEmpty()) error = e.message.orEmpty()
             }
         }
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelInfo(videoId) } }.onSuccess { channelInfo = it }
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(videoId) } }.onSuccess { videoMetadata = it }
     }
     LaunchedEffect(videoId, commentsRefresh) {
         commentsLoading = true
@@ -2473,6 +2755,57 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 }
             commentsLoading = false
         }
+    }
+    fun updateRating(target: VideoRating) {
+        if (interactionBusy) return
+        val next = if (interactions.rating == target) VideoRating.NONE else target
+        val previous = interactions
+        val updatedLikes = optimisticLikeText(previous.likeText, previous.rating, next)
+        interactionBusy = true
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.rateVideo(videoId, next) } }
+                .onSuccess { interactions = previous.copy(rating = next, likeText = updatedLikes) }
+                .onFailure { AppLog.failure("video rating video=$videoId", it); android.widget.Toast.makeText(context, it.message ?: "Could not update rating", android.widget.Toast.LENGTH_SHORT).show() }
+            interactionBusy = false
+        }
+    }
+    fun updateSubscription() {
+        if (subscriptionBusy) return
+        val next = !interactions.subscribed
+        val previous = interactions
+        interactions = interactions.copy(subscribed = next)
+        subscriptionBusy = true
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.setSubscription(previous.channelId, next) } }
+                .onFailure { interactions = previous; AppLog.failure("video subscription channel=${previous.channelId}", it); android.widget.Toast.makeText(context, it.message ?: "Could not update subscription", android.widget.Toast.LENGTH_SHORT).show() }
+            subscriptionBusy = false
+        }
+    }
+    fun loadMoreRelated() {
+        val token = interactions.relatedContinuation ?: return
+        if (relatedLoading) return
+        relatedLoading = true
+        relatedError = null
+        interactions = interactions.copy(relatedContinuation = null)
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.relatedVideosPage(token) } }
+                .onSuccess { page ->
+                    interactions = interactions.copy(
+                        related = (interactions.related + page.items).filter { it.id != videoId }.distinctBy { it.id },
+                        relatedContinuation = page.continuation,
+                    )
+                }
+                .onFailure {
+                    interactions = interactions.copy(relatedContinuation = token)
+                    relatedError = it.message ?: "Could not load more recommendations"
+                }
+            relatedLoading = false
+        }
+    }
+    LaunchedEffect(videoId) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoInteractions(videoId) } }
+            .onSuccess { interactions = it }
+            .onFailure { AppLog.failure("video interactions video=$videoId", it) }
     }
     LaunchedEffect(url) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
@@ -2675,17 +3008,26 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
                             if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
                         }
-                        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.Top) {
-                            Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.weight(1f).padding(top = 12.dp), style = MaterialTheme.typography.titleLarge)
-                            IconButton(onClick = { showVideoDetails = true }) { Icon(Icons.Default.MoreVert, "Video details") }
-                        }
                         Text(
-                            if (info == null && videoMetadata == null) "" else "${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views",
-                            Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                            info?.name ?: videoMetadata?.title ?: "Video",
+                            Modifier.fillMaxWidth().clickable { phonePanel = VideoPhonePanel.DETAILS }.padding(horizontal = 16.dp, vertical = 12.dp),
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        Text(
+                            if (info == null && videoMetadata == null) "" else listOfNotNull(
+                                "${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views",
+                                (info?.textualUploadDate ?: videoMetadata?.publishedDate)?.takeIf { it.isNotBlank() },
+                            ).joinToString(" • "),
+                            Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
+                        LazyRow(Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            item { VideoActionButton(Icons.Default.ThumbUp, interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "Like" } }, interactions.rating == VideoRating.LIKE, !interactionBusy) { updateRating(VideoRating.LIKE) } }
+                            item { VideoActionButton(Icons.Default.ThumbDown, "Dislike", interactions.rating == VideoRating.DISLIKE, !interactionBusy) { updateRating(VideoRating.DISLIKE) } }
+                            item { VideoActionButton(Icons.Default.Share, "Share") { shareVideoLink(context, "https://youtu.be/$videoId") } }
+                        }
                         HorizontalDivider()
                         Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) {
                             val target = info?.uploaderUrl ?: videoMetadata?.authorUrl
@@ -2699,24 +3041,92 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                 val subscribers = info?.uploaderSubscriberCount ?: -1
                                 if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
+                            Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
+                        }
+                        HorizontalDivider()
+                        Surface(Modifier.fillMaxWidth().padding(12.dp).clickable { phonePanel = VideoPhonePanel.COMMENTS }, shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                            Column(Modifier.padding(14.dp)) {
+                                Text("Comments", style = MaterialTheme.typography.titleMedium)
+                                comments.firstOrNull()?.let { comment ->
+                                    Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(34.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                                        else Surface(Modifier.size(34.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(7.dp)) }
+                                        Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                                            Text(comment.author, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(comment.text, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                                        }
+                                    }
+                                } ?: Text(if (commentsLoading) "Loading comments…" else "View comments", Modifier.padding(top = 8.dp))
+                            }
                         }
                     }
                     Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
-                    Column(Modifier.weight(0.85f).fillMaxHeight()) {
-                        Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
-                        HorizontalDivider()
-                        CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
-                            comments = (listOf(posted) + comments).distinctBy { it.id }
-                        }) { params, text ->
-                            withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
+                    when (phonePanel) {
+                        VideoPhonePanel.MAIN -> Column(Modifier.weight(0.85f).fillMaxHeight()) {
+                            Text("Recommended", Modifier.padding(horizontal = 16.dp, vertical = 18.dp), style = MaterialTheme.typography.titleLarge)
+                            HorizontalDivider()
+                            LazyColumn(Modifier.fillMaxSize()) {
+                                items(interactions.related, key = { "tablet-related-${it.id}" }) { related -> FeedRow(related) { onOpenVideo?.invoke(related.url) } }
+                                item {
+                                    if (interactions.relatedContinuation != null && !relatedLoading && relatedError == null) LaunchedEffect(interactions.relatedContinuation) { loadMoreRelated() }
+                                    Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                        when {
+                                            relatedLoading -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+                                            relatedError != null -> TextButton(onClick = { loadMoreRelated() }) { Text("Retry loading recommendations") }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        LazyColumn(Modifier.fillMaxSize()) {
-                            items(comments, key = { it.id }) { comment -> VideoCommentNode(videoId, comment) { changed ->
-                                comments = if (changed == null) comments.filterNot { it.id == comment.id }
-                                else comments.map { if (it.id == comment.id) changed else it }
-                            } }
-                            item {
-                                CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreComments)
+                        VideoPhonePanel.COMMENTS -> Column(Modifier.weight(0.85f).fillMaxHeight()) {
+                            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Comments", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                                IconButton(onClick = { commentsRefresh++ }, enabled = !commentsLoading) { Icon(Icons.Default.Refresh, "Refresh comments") }
+                                IconButton(onClick = { phonePanel = VideoPhonePanel.MAIN }) { Icon(Icons.Default.Close, "Close comments") }
+                            }
+                            HorizontalDivider()
+                            CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
+                                if (posted.id.startsWith("local-")) commentsRefresh++
+                                else comments = (listOf(posted) + comments).distinctBy { it.id }
+                            }) { params, text -> withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) } }
+                            LazyColumn(Modifier.fillMaxSize()) {
+                                items(comments, key = { it.id }) { comment -> VideoCommentNode(videoId, comment) { changed ->
+                                    comments = if (changed == null) comments.filterNot { it.id == comment.id }
+                                    else comments.map { if (it.id == comment.id) changed else it }
+                                } }
+                                item { CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreComments) }
+                            }
+                        }
+                        VideoPhonePanel.DETAILS -> Column(Modifier.weight(0.85f).fillMaxHeight()) {
+                            val views = info?.viewCount ?: videoMetadata?.viewCount ?: -1L
+                            val likes = info?.likeCount ?: -1L
+                            val likesText = if (likes >= 0) formatCount(likes) else interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "—" } }
+                            val published = info?.textualUploadDate?.takeIf { it.isNotBlank() } ?: videoMetadata?.publishedDate?.takeIf { it.isNotBlank() }
+                            val description = descriptionText(videoMetadata?.description.orEmpty().ifBlank { info?.description?.content.orEmpty() })
+                            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Description", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                                IconButton(onClick = { phonePanel = VideoPhonePanel.MAIN }) { Icon(Icons.Default.Close, "Close details") }
+                            }
+                            HorizontalDivider()
+                            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+                                Text(info?.name ?: videoMetadata?.title ?: "Video", style = MaterialTheme.typography.titleMedium)
+                                Row(Modifier.padding(vertical = 18.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                                    Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium) }
+                                    Column { Text(likesText, style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
+                                    Column { Text(published ?: "—", style = MaterialTheme.typography.titleMedium); Text("Published", style = MaterialTheme.typography.labelMedium) }
+                                }
+                                HorizontalDivider(Modifier.padding(bottom = 16.dp))
+                                if (description.isBlank()) Text("No description was provided.") else InteractiveDescription(
+                                    description, videoMetadata?.descriptionLinks.orEmpty(),
+                                    { seconds -> player.seekTo(seconds * 1_000L) },
+                                    { target ->
+                                        val resolved = unwrapYouTubeRedirect(target)
+                                        val uri = android.net.Uri.parse(resolved)
+                                        val channelPath = uri.host?.endsWith("youtube.com", true) == true && (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
+                                        if (channelPath && onOpenChannel != null) { phonePanel = VideoPhonePanel.MAIN; isMinimized = true; onOpenChannel(resolved) }
+                                        else activity.openExternalLink(uri)
+                                    },
+                                )
                             }
                         }
                     }
@@ -2725,56 +3135,117 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 item {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                         AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
-                        if (!hasStartedPlayback) videoLoadMessage?.let { message ->
-                            PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
-                        }
+                        if (!hasStartedPlayback) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
                     }
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
+                        IconButton(onClick = { if (phonePanel == VideoPhonePanel.MAIN) isMinimized = true else phonePanel = VideoPhonePanel.MAIN }) { Icon(Icons.Default.ArrowBack, "Back") }
                         Spacer(Modifier.weight(1f))
                         IconButton(onClick = { showPlayerSettings = true }) { Icon(Icons.Default.Settings, "Player settings") }
                         IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
                         if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
                     }
-                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.Top) {
-                        Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.weight(1f).padding(top = 12.dp), style = MaterialTheme.typography.titleLarge)
-                        IconButton(onClick = { showVideoDetails = true }) { Icon(Icons.Default.MoreVert, "Video details") }
-                    }
-                    Text(
-                        if (info == null && videoMetadata == null) "" else "${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views",
-                        Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
-                    HorizontalDivider()
-                    Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) {
-                        val target = info?.uploaderUrl ?: videoMetadata?.authorUrl
-                        if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) }
-                    }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
-                        if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                        else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
-                        Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                            Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: videoMetadata?.author?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium)
-                            val subscribers = info?.uploaderSubscriberCount ?: -1
-                            if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    when (phonePanel) {
+                        VideoPhonePanel.DETAILS -> {
+                            val views = info?.viewCount ?: videoMetadata?.viewCount ?: -1L
+                            val likes = info?.likeCount ?: -1L
+                            val likesText = if (likes >= 0) formatCount(likes) else interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "—" } }
+                            val published = info?.textualUploadDate?.takeIf { it.isNotBlank() } ?: videoMetadata?.publishedDate?.takeIf { it.isNotBlank() }
+                            val description = descriptionText(videoMetadata?.description.orEmpty().ifBlank { info?.description?.content.orEmpty() })
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Description", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                                IconButton(onClick = { phonePanel = VideoPhonePanel.MAIN }) { Icon(Icons.Default.Close, "Close details") }
+                            }
+                            Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleMedium)
+                            Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                                Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium) }
+                                Column { Text(likesText, style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
+                                Column { Text(published ?: "—", style = MaterialTheme.typography.titleMedium); Text("Published", style = MaterialTheme.typography.labelMedium) }
+                            }
+                            HorizontalDivider()
+                            if (description.isBlank()) Text("No description was provided.", Modifier.padding(16.dp))
+                            else Box(Modifier.padding(16.dp)) {
+                                InteractiveDescription(
+                                    description,
+                                    videoMetadata?.descriptionLinks.orEmpty(),
+                                    { seconds -> player.seekTo(seconds * 1_000L) },
+                                    { target ->
+                                        val resolved = unwrapYouTubeRedirect(target)
+                                        val uri = android.net.Uri.parse(resolved)
+                                        val channelPath = uri.host?.endsWith("youtube.com", true) == true &&
+                                            (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
+                                        if (channelPath && onOpenChannel != null) {
+                                            phonePanel = VideoPhonePanel.MAIN
+                                            isMinimized = true
+                                            onOpenChannel(resolved)
+                                        } else activity.openExternalLink(uri)
+                                    },
+                                )
+                            }
+                        }
+                        VideoPhonePanel.COMMENTS -> {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Comments", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                                IconButton(onClick = { commentsRefresh++ }, enabled = !commentsLoading) { Icon(Icons.Default.Refresh, "Refresh comments") }
+                                IconButton(onClick = { phonePanel = VideoPhonePanel.MAIN }) { Icon(Icons.Default.Close, "Close comments") }
+                            }
+                            CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
+                                if (posted.id.startsWith("local-")) commentsRefresh++
+                                else comments = (listOf(posted) + comments).distinctBy { it.id }
+                            }) { params, text ->
+                                withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
+                            }
+                        }
+                        VideoPhonePanel.MAIN -> {
+                            Text(info?.name ?: videoMetadata?.title ?: "Video", Modifier.fillMaxWidth().clickable { phonePanel = VideoPhonePanel.DETAILS }.padding(horizontal = 16.dp, vertical = 12.dp), style = MaterialTheme.typography.titleLarge)
+                            Text(if (info == null && videoMetadata == null) "" else listOfNotNull("${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views", (info?.textualUploadDate ?: videoMetadata?.publishedDate)?.takeIf { it.isNotBlank() }).joinToString(" • "), Modifier.padding(horizontal = 16.dp, vertical = 2.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
+                            LazyRow(Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                item { VideoActionButton(Icons.Default.ThumbUp, interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "Like" } }, interactions.rating == VideoRating.LIKE, !interactionBusy) { updateRating(VideoRating.LIKE) } }
+                                item { VideoActionButton(Icons.Default.ThumbDown, "Dislike", interactions.rating == VideoRating.DISLIKE, !interactionBusy) { updateRating(VideoRating.DISLIKE) } }
+                                item { VideoActionButton(Icons.Default.Share, "Share") { shareVideoLink(context, "https://youtu.be/$videoId") } }
+                            }
+                            HorizontalDivider()
+                            Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) { val target = info?.uploaderUrl ?: videoMetadata?.authorUrl; if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) } }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
+                                if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop) else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
+                                Column(Modifier.padding(horizontal = 12.dp).weight(1f)) { Text(channelInfo?.name?.takeUnless { it.equals("Unknown channel", true) } ?: info?.uploaderName?.takeUnless { it.equals("Unknown channel", true) } ?: videoMetadata?.author?.takeUnless { it.equals("Unknown channel", true) } ?: "Loading channel…", style = MaterialTheme.typography.titleMedium); val subscribers = info?.uploaderSubscriberCount ?: -1; if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
+                            }
+                            HorizontalDivider()
+                            Surface(Modifier.fillMaxWidth().padding(12.dp).clickable { phonePanel = VideoPhonePanel.COMMENTS }, shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                                Column(Modifier.padding(14.dp)) {
+                                    Text("Comments", style = MaterialTheme.typography.titleMedium)
+                                    comments.firstOrNull()?.let { comment ->
+                                        Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(34.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                                            else Surface(Modifier.size(34.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(7.dp)) }
+                                            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                                                Text(comment.author, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                Text(comment.text, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                                            }
+                                        }
+                                    } ?: Text(if (commentsLoading) "Loading comments…" else "View comments", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
                         }
                     }
-                    HorizontalDivider()
-                    Text("Comments", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
-                    CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
-                        comments = (listOf(posted) + comments).distinctBy { it.id }
-                    }) { params, text ->
-                        withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
-                    }
                 }
-                items(comments, key = { it.id }) { comment -> VideoCommentNode(videoId, comment) { changed ->
-                    comments = if (changed == null) comments.filterNot { it.id == comment.id }
-                    else comments.map { if (it.id == comment.id) changed else it }
-                } }
-                item {
-                    CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreComments)
+                if (phonePanel == VideoPhonePanel.COMMENTS) {
+                    items(comments, key = { it.id }) { comment -> VideoCommentNode(videoId, comment) { changed -> comments = if (changed == null) comments.filterNot { it.id == comment.id } else comments.map { if (it.id == comment.id) changed else it } } }
+                    item { CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreComments) }
+                }
+                if (phonePanel == VideoPhonePanel.MAIN && interactions.related.isNotEmpty()) {
+                    item { HorizontalDivider(); Text("Recommended", Modifier.padding(horizontal = 16.dp, vertical = 14.dp), style = MaterialTheme.typography.titleLarge) }
+                    items(interactions.related, key = { "related-${it.id}" }) { related -> FeedRow(related) { onOpenVideo?.invoke(related.url) } }
+                    item {
+                        if (interactions.relatedContinuation != null && !relatedLoading && relatedError == null) LaunchedEffect(interactions.relatedContinuation) { loadMoreRelated() }
+                        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                            when {
+                                relatedLoading -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+                                relatedError != null -> TextButton(onClick = { loadMoreRelated() }) { Text("Retry loading recommendations") }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3046,6 +3517,7 @@ private fun VideoCommentsSheet(videoId: String, onDismiss: () -> Unit) {
     LaunchedEffect(videoId, refresh) {
         loading = true
         error = null
+        if (refresh > 0) delay(350)
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoComments(videoId) } }
             .onSuccess { page -> comments = page.items; continuation = page.continuation; createParams = page.createCommentParams }
             .onFailure { error = it.message ?: "Could not load comments" }
@@ -3055,10 +3527,12 @@ private fun VideoCommentsSheet(videoId: String, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close comments") }
-            Text("Comments", style = MaterialTheme.typography.titleLarge)
+            Text("Comments", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+            IconButton(onClick = { refresh++ }, enabled = !loading) { Icon(Icons.Default.Refresh, "Refresh comments") }
         }
         CommentComposer(createParams, loading, onPosted = { posted ->
-            comments = (listOf(posted) + comments).distinctBy { it.id }
+            if (posted.id.startsWith("local-")) refresh++
+            else comments = (listOf(posted) + comments).distinctBy { it.id }
         }) { params, text ->
             withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
         }
@@ -3101,6 +3575,7 @@ private fun VideoCommentNode(videoId: String, comment: VideoComment, onChanged: 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CommentRepliesSheet(videoId: String, comment: VideoComment, onDismiss: () -> Unit) {
+    var parentComment by remember(comment.id) { mutableStateOf(comment) }
     var replies by remember(comment.id) { mutableStateOf<List<VideoComment>>(emptyList()) }
     var continuation by remember(comment.id) { mutableStateOf(comment.repliesContinuation) }
     var loading by remember(comment.id) { mutableStateOf(false) }
@@ -3125,7 +3600,20 @@ private fun CommentRepliesSheet(videoId: String, comment: VideoComment, onDismis
 
     LaunchedEffect(comment.id, refresh) {
         replies = emptyList()
-        continuation = comment.repliesContinuation
+        error = null
+        var refreshedParent = parentComment
+        if (refresh > 0) {
+            delay(500)
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoComments(videoId) } }
+                .onSuccess { page ->
+                    page.items.firstOrNull { it.id == comment.id }?.let { updated ->
+                        refreshedParent = updated
+                        parentComment = updated
+                    }
+                }
+                .onFailure { error = it.message ?: "Could not refresh replies" }
+        }
+        continuation = refreshedParent.repliesContinuation
         if (continuation != null) loadMore()
     }
     LaunchedEffect(comment.id) {
@@ -3136,12 +3624,14 @@ private fun CommentRepliesSheet(videoId: String, comment: VideoComment, onDismis
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onDismiss, modifier = Modifier.focusRequester(initialFocus)) { Icon(Icons.Default.ArrowBack, "Back to comments") }
-            Text("Replies", style = MaterialTheme.typography.titleLarge)
+            Text("Replies", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+            IconButton(onClick = { refresh++ }, enabled = !loading) { Icon(Icons.Default.Refresh, "Refresh replies") }
         }
         HorizontalDivider()
-        VideoCommentNodeSummary(videoId, comment) { }
-        CommentComposer(comment.createReplyParams, loading, "Add a reply", "Reply", onPosted = { posted ->
-            replies = (listOf(posted) + replies).distinctBy { it.id }
+        VideoCommentNodeSummary(videoId, parentComment) { }
+        CommentComposer(parentComment.createReplyParams, loading, "Add a reply", "Reply", onPosted = { posted ->
+            if (posted.id.startsWith("local-")) refresh++
+            else replies = (listOf(posted) + replies).distinctBy { it.id }
         }) { params, text ->
             withContext(Dispatchers.IO) { YouTubeRepository.postCommentReply(params, text) }
         }

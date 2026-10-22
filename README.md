@@ -24,13 +24,13 @@ The app renders its own native interface. Only Google sign-in is displayed throu
 
 - Native Material 3 interface for Android 5.0 and newer
 - YouTube Home, History, search, channels, playlists, comments, and Community Posts
-- YouTube Music Home, search, foreground playback, synchronized lyrics, and Android Auto
+- YouTube Music Home, search, foreground playback, synchronized lyrics, comments, and Android Auto
 - Vertical Shorts player with continuation-based recommendations
 - Native SABR/UMP playback with independently selectable audio and video formats
 - Embedded NewPipe Extractor as an optional compatibility backend
-- Signed-in feeds and YouTube History reporting without a Data API key
+- Signed-in feeds, account actions, and YouTube History reporting without a Data API key
 - Fullscreen, picture-in-picture, persistent miniplayers, and large buffering
-- Phone, tablet, Android Auto, and legacy Android support
+- Responsive phone and tablet layouts, Android Auto, and legacy Android support
 
 ## YouTube
 
@@ -39,12 +39,14 @@ The app renders its own native interface. Only Google sign-in is displayed throu
 - Resume partially watched History videos from YouTube's saved position
 - Restart completed History videos from `00:00`
 - Infinite Home and search pagination while YouTube provides continuations
+- Infinite Recommended pagination in phone and tablet video players
 - Search results for videos, channels, and playlists
-- Channel pages with Videos, Shorts, and Community Posts
-- Playlist pages with playable queues and previous/next controls
-- Native comments and replies
+- Channel pages with banners, authenticated Subscribe controls, Videos, Shorts, and Community Posts
+- Responsive playlist pages with playable queues and previous/next controls
+- Native comments and replies with pagination, posting, editing, and deletion when YouTube exposes the required commands
 - Community Post content and comments
 - Video details with description, views, likes, and publication date when available
+- Authenticated Like, Dislike, and Subscribe actions
 - Account channel and playlist access
 
 The regular YouTube player keeps playing in a miniplayer while the user changes tabs. History resume is intentionally limited to regular videos; YouTube Music and Shorts always start from their normal playback position.
@@ -56,6 +58,8 @@ The regular YouTube player keeps playing in a miniplayer while the user changes 
 - Played and buffered progress with seeking
 - Timed lyrics when synchronized data is available
 - Artwork-aware layouts and native metadata
+- Authenticated Like and Dislike actions
+- Native comments and replies with refresh, pagination, and posting
 - Preferred MP4A or Opus audio codec
 - Original audio selected by default, with manual track selection
 - Android media notification and system Now Playing integration
@@ -76,6 +80,7 @@ Availability of sideloaded media apps depends on the Android Auto version, phone
 - Continuation-based recommendation feed
 - Automatic advance when the next recommendation becomes available
 - Comments, channel navigation, playback settings, and video details
+- Authenticated Like actions
 - Audio-track selection and account History reporting
 - The same SABR and compatibility backend infrastructure used by regular playback
 
@@ -130,7 +135,7 @@ MaterialYT does not request or store the Google password in its native UI. Clear
 - Multiple high-contrast Material color palettes
 - Black status bar in Light mode
 - Responsive phone and tablet layouts
-- Tablet grids, navigation rail, and two-pane players
+- Tablet grids, navigation rail, responsive channel and playlist pages, and two-pane video and music players
 - Legacy launcher resources for Android 5–7
 - Adaptive launcher icons on modern Android versions
 
@@ -208,7 +213,7 @@ Release builds currently use the configured debug signing key. Fork maintainers 
 - PiP requires Android 8.0 or newer.
 - Codec and hardware-decoder availability depends on the device.
 - Android Auto visibility for sideloaded builds depends on platform policy.
-- Casting, downloads, subscriptions, and SponsorBlock are not currently implemented.
+- Casting, downloads, and SponsorBlock are not currently implemented.
 
 ## Contributing
 

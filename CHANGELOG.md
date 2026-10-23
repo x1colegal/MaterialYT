@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.8] - 2026-10-23
+
+### Changed
+- Retrieve canonical video and channel metadata through authenticated WEB Innertube player responses instead of oEmbed.
+
 ## [2.7] - 2026-10-22
 
 ### Changed

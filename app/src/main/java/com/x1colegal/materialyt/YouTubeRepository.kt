@@ -121,23 +121,21 @@ object YouTubeRepository {
         if (videoId.length != 11) return null
         synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId]?.let { return it } }
         return runCatching {
-            // oEmbed exposes the canonical uploader/title instead of the localized browse-card
-            // strings returned according to the WEB client's hl setting.
-            val watchUrl = URLEncoder.encode("https://www.youtube.com/watch?v=$videoId", "UTF-8")
-            val request = Request.Builder()
-                .url("https://www.youtube.com/oembed?url=$watchUrl&format=json")
-                .header("User-Agent", UA)
-                .build()
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@use null
-                val json = JSONObject(response.body?.string().orEmpty())
-                val metadata = CanonicalVideoMetadata(
-                    title = json.optString("title").trim(),
-                    author = json.optString("author_name").trim(),
-                ).takeIf { it.title.isNotBlank() || it.author.isNotBlank() }
-                metadata?.also { synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId] = it } }
-            }
-        }.onFailure { AppLog.failure("canonical metadata video=$videoId", it) }.getOrNull()
+            val origin = "https://www.youtube.com"
+            val bootstrap = bootstrap(origin, "WEB")
+            val details = post(
+                "$origin/youtubei/v1/player?key=${bootstrap.key}&prettyPrint=false",
+                JSONObject().put("context", context("WEB", bootstrap.version))
+                    .put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true),
+                origin,
+            ).optJSONObject("videoDetails")
+            details?.let {
+                CanonicalVideoMetadata(
+                    title = it.optString("title").trim(),
+                    author = it.optString("author").trim(),
+                ).takeIf { metadata -> metadata.title.isNotBlank() || metadata.author.isNotBlank() }
+            }?.also { synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId] = it } }
+        }.onFailure { AppLog.failure("canonical WEB Innertube metadata video=$videoId", it) }.getOrNull()
     }
     fun seedVideoDetails(videoId: String, title: String, author: String, authorUrl: String = "", authorAvatar: String = "") {
         if (videoId.isBlank()) return

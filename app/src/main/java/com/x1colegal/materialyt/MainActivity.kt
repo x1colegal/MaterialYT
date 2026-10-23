@@ -673,7 +673,7 @@ private fun AppScaffold(
     }
     Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
     if (tablet) {
-        Row(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             if (!hideNavigation) NavigationRail {
                 Spacer(Modifier.weight(1f))
                 tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
@@ -691,7 +691,7 @@ private fun AppScaffold(
             if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
         }, content = content)
     }
-    if (!activity.isFullscreen && !activity.pipMode) {
+    if (!tablet && !activity.isFullscreen && !activity.pipMode) {
         Spacer(
             Modifier.align(Alignment.TopCenter).fillMaxWidth()
                 .height(ComposeWindowInsets.statusBars.asPaddingValues().calculateTopPadding())

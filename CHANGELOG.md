@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.10] - 2026-10-23
+
+### Fixed
+- Keep tablet player content and the miniplayer inside the visible viewport instead of measuring behind the system-bar areas.
+
 ## [2.9] - 2026-10-23
 
 ### Fixed

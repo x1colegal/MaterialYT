@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.7] - 2026-10-22
+
+### Changed
+- Move YT Music like and dislike actions into the player header to preserve space for playback controls.
+
 ## [2.6] - 2026-10-22
 
 ### Fixed

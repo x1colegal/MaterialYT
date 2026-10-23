@@ -1216,6 +1216,12 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             ) {
                 IconButton(onClick = onBack, modifier = Modifier.offset(y = (-12).dp)) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
                 Text("Now playing", Modifier.weight(1f).offset(y = (-12).dp), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                IconButton(onClick = { rate(VideoRating.LIKE) }, enabled = !interactionBusy, modifier = Modifier.offset(y = (-12).dp)) {
+                    Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
+                }
+                IconButton(onClick = { rate(VideoRating.DISLIKE) }, enabled = !interactionBusy, modifier = Modifier.offset(y = (-12).dp)) {
+                    Icon(Icons.Default.ThumbDown, "Dislike", tint = if (interactions.rating == VideoRating.DISLIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
+                }
                 IconButton(onClick = { showSettings = true }, modifier = Modifier.offset(y = (-12).dp)) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
             }
             if (tablet) {
@@ -1226,10 +1232,6 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
                         Spacer(Modifier.height(18.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-                        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                            IconButton(onClick = { rate(VideoRating.LIKE) }, enabled = !interactionBusy) { Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White) }
-                            IconButton(onClick = { rate(VideoRating.DISLIKE) }, enabled = !interactionBusy) { Icon(Icons.Default.ThumbDown, "Dislike", tint = if (interactions.rating == VideoRating.DISLIKE) MaterialTheme.colorScheme.primary else ComposeColor.White) }
-                        }
                         Spacer(Modifier.height(14.dp))
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
@@ -1297,14 +1299,6 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
                         Spacer(Modifier.height(22.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-                        Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                            IconButton(onClick = { rate(VideoRating.LIKE) }, enabled = !interactionBusy) {
-                                Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
-                            }
-                            IconButton(onClick = { rate(VideoRating.DISLIKE) }, enabled = !interactionBusy) {
-                                Icon(Icons.Default.ThumbDown, "Dislike", tint = if (interactions.rating == VideoRating.DISLIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
-                            }
-                        }
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
                             drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)
@@ -1312,8 +1306,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                             drawLine(ComposeColor.White, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (position / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
                         }
                         Row(Modifier.fillMaxWidth()) { Text(formatTime(position), color = ComposeColor.White.copy(alpha = .75f)); Spacer(Modifier.weight(1f)); Text(formatTime(duration), color = ComposeColor.White.copy(alpha = .75f)) }
-                        IconButton(onClick = { AutoMusicService.toggle() }, Modifier.requiredSize(82.dp).offset(y = (-28).dp)) { Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White) }
-                        Spacer(Modifier.height(18.dp))
+                        IconButton(onClick = { AutoMusicService.toggle() }, Modifier.size(82.dp)) { Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White) }
                     }
                 }
                 NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) {

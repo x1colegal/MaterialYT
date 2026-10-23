@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.9] - 2026-10-23
+
+### Fixed
+- Seed the video player metadata cache from WEB Innertube feed lookups to prevent localized titles and channel names from flashing before canonical metadata appears.
+
 ## [2.8] - 2026-10-23
 
 ### Changed

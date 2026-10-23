@@ -134,7 +134,16 @@ object YouTubeRepository {
                     title = it.optString("title").trim(),
                     author = it.optString("author").trim(),
                 ).takeIf { metadata -> metadata.title.isNotBlank() || metadata.author.isNotBlank() }
-            }?.also { synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId] = it } }
+            }?.also { metadata ->
+                synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId] = metadata }
+                synchronized(videoDetailsCache) {
+                    val current = videoDetailsCache[videoId] ?: VideoDetails("", "")
+                    videoDetailsCache[videoId] = current.copy(
+                        title = metadata.title.ifBlank { current.title },
+                        author = metadata.author.ifBlank { current.author },
+                    )
+                }
+            }
         }.onFailure { AppLog.failure("canonical WEB Innertube metadata video=$videoId", it) }.getOrNull()
     }
     fun seedVideoDetails(videoId: String, title: String, author: String, authorUrl: String = "", authorAvatar: String = "") {

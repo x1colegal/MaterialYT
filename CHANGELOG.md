@@ -2,6 +2,15 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.6] - 2026-10-22
+
+### Fixed
+- Keep the status bar truly black with light icons in light theme across feeds and YT Music.
+- Keep YT Music player navigation labels and icons readable in light theme.
+
+### Changed
+- Increase the MaterialYT header logo size.
+
 ## [2.5] - 2026-10-22
 
 ### Fixed

@@ -62,6 +62,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.WindowInsets as ComposeWindowInsets
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -518,6 +519,7 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
     SideEffect {
         activity.window.statusBarColor = Color.BLACK
         activity.window.navigationBarColor = if (theme == ThemeMode.OLED) Color.BLACK else scheme.surface.value.toInt()
+        WindowCompat.getInsetsController(activity.window, activity.window.decorView).isAppearanceLightStatusBars = false
     }
     MaterialTheme(colorScheme = scheme) {
         AppScaffold(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme = { theme = it; prefs.edit().putString("theme", it.name).apply() },
@@ -669,7 +671,7 @@ private fun AppScaffold(
             }
         }
     }
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
     if (tablet) {
         Row(Modifier.fillMaxSize()) {
             if (!hideNavigation) NavigationRail {
@@ -679,7 +681,7 @@ private fun AppScaffold(
             }
             Scaffold(
                 Modifier.weight(1f),
-                contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                contentWindowInsets = ComposeWindowInsets(0, 0, 0, 0),
                 bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ } },
                 content = content,
             )
@@ -688,6 +690,13 @@ private fun AppScaffold(
         Scaffold(bottomBar = {
             if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
         }, content = content)
+    }
+    if (!activity.isFullscreen && !activity.pipMode) {
+        Spacer(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                .height(ComposeWindowInsets.statusBars.asPaddingValues().calculateTopPadding())
+                .background(ComposeColor.Black)
+        )
     }
     }
 }
@@ -898,7 +907,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         }
         Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
         Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Image(painterResource(R.drawable.ic_launcher_foreground), "MaterialYT", Modifier.size(42.dp))
+            Image(painterResource(R.drawable.ic_launcher_foreground), "MaterialYT", Modifier.size(56.dp))
             Spacer(Modifier.weight(1f))
             if (query.isNotBlank()) IconButton(onClick = {
                 scrollHomeToTop(); query = ""; results = emptyList(); error = null; feed = homeFeed
@@ -1043,7 +1052,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
         }
         Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
         Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Image(painterResource(R.drawable.ic_launcher_foreground), "MaterialYT", Modifier.size(42.dp))
+            Image(painterResource(R.drawable.ic_launcher_foreground), "MaterialYT", Modifier.size(56.dp))
             Spacer(Modifier.weight(1f))
             if (query.isNotBlank()) IconButton(onClick = {
                 scrollMusicToTop(); query = ""; error = null; tracks = homeTracks
@@ -1308,9 +1317,16 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                     }
                 }
                 NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) {
-                    NavigationBarItem(!showLyrics && !showComments, { showLyrics = false; showComments = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") })
-                    NavigationBarItem(showLyrics, { showLyrics = true; showComments = false }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") })
-                    NavigationBarItem(showComments, { showLyrics = false; showComments = true }, { Icon(Icons.Default.Comment, null) }, label = { Text("Comments") })
+                    val musicNavigationColors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = ComposeColor.White,
+                        selectedTextColor = ComposeColor.White,
+                        indicatorColor = ComposeColor.White.copy(alpha = .18f),
+                        unselectedIconColor = ComposeColor.White.copy(alpha = .68f),
+                        unselectedTextColor = ComposeColor.White.copy(alpha = .68f),
+                    )
+                    NavigationBarItem(!showLyrics && !showComments, { showLyrics = false; showComments = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }, colors = musicNavigationColors)
+                    NavigationBarItem(showLyrics, { showLyrics = true; showComments = false }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }, colors = musicNavigationColors)
+                    NavigationBarItem(showComments, { showLyrics = false; showComments = true }, { Icon(Icons.Default.Comment, null) }, label = { Text("Comments") }, colors = musicNavigationColors)
                 }
             }
         }

@@ -197,7 +197,7 @@ object YouTubeRepository {
         val generation = beginFeedLoad("home")
         return try {
             val started = SystemClock.elapsedRealtime()
-            val bootstrap = bootstrap("https://www.youtube.com", "WEB")
+            val bootstrap = bootstrap("https://www.youtube.com", "WEB", generation)
             val data = post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "FEwhat_to_watch"), bootstrap.origin, generation)
             val parseStarted = SystemClock.elapsedRealtime()
@@ -669,7 +669,7 @@ object YouTubeRepository {
         return try {
             val started = SystemClock.elapsedRealtime()
             val browseId = when (name) { "home" -> "FEwhat_to_watch"; "history" -> "FEhistory"; "playlists" -> "FEplaylist_aggregation"; else -> null }
-            val bootstrap = bootstrap("https://www.youtube.com", "WEB")
+            val bootstrap = bootstrap("https://www.youtube.com", "WEB", generation)
             val data = if (browseId != null) post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", browseId), bootstrap.origin, generation)
             else initialData(get(url))
@@ -2425,12 +2425,12 @@ object YouTubeRepository {
         return generation
     }
 
-    private fun bootstrap(origin: String, clientName: String): Bootstrap {
+    private fun bootstrap(origin: String, clientName: String, requestGeneration: Long? = null): Bootstrap {
         val baseOrigin = if (origin.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
         synchronized(bootstrapCache) {
             bootstrapCache["$baseOrigin:$clientName"]?.takeIf { System.currentTimeMillis() - it.first < 30 * 60_000L }?.second?.let { return it }
         }
-        val html = get(baseOrigin)
+        val html = get(baseOrigin, requestGeneration = requestGeneration)
         val key = Regex("\"INNERTUBE_API_KEY\":\"([^\"]+)").find(html)?.groupValues?.get(1)
             ?: error("Unable to discover YouTube's internal API key")
         val version = Regex("\"INNERTUBE_CLIENT_VERSION\":\"([^\"]+)").find(html)?.groupValues?.get(1)
@@ -2446,12 +2446,28 @@ object YouTubeRepository {
             .put("hl", "en").put("gl", "US").apply { visitorData[origin]?.let { put("visitorData", it) } })
     }
 
-    private fun get(url: String, userAgent: String = UA): String {
+    private fun get(url: String, userAgent: String = UA, requestGeneration: Long? = null): String {
         val origin = if (url.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
         val request = Request.Builder().url(url).header("User-Agent", userAgent).header("Accept-Language", "en-US,en;q=0.9").apply {
             cookies(origin).takeIf { it.isNotBlank() }?.let { header("Cookie", it) }
         }.build()
-        return client.newCall(request).execute().use { if (!it.isSuccessful) error("YouTube returned HTTP ${it.code}"); it.body?.string().orEmpty() }
+        val call = client.newCall(request)
+        if (requestGeneration != null) {
+            if (requestGeneration != feedGeneration.get()) throw CancellationException("Superseded feed bootstrap")
+            activeFeedCall.getAndSet(call)?.cancel()
+        }
+        return try {
+            call.execute().use {
+                if (!it.isSuccessful) error("YouTube returned HTTP ${it.code}")
+                val raw = it.body?.string().orEmpty()
+                if (requestGeneration != null && requestGeneration != feedGeneration.get()) {
+                    throw CancellationException("Superseded feed bootstrap")
+                }
+                raw
+            }
+        } finally {
+            if (requestGeneration != null) activeFeedCall.compareAndSet(call, null)
+        }
     }
 
     private fun englishCountLabel(value: String, label: String, fallback: String): String {

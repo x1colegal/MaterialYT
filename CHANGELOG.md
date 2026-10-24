@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.0] - 2026-10-24
+
+### Added
+- Add separate recent-search histories to YouTube and YT Music search screens, including per-item removal and Clear all.
+
+### Fixed
+- Keep fast cross-screen feed cancellation without exposing a persistent `Canceled` error; returning to a canceled screen now starts its load again.
+- Cancel superseded feed bootstrap requests as soon as the user changes screens instead of letting old homepage requests continue consuming the connection.
+- Keep non-16:9 picture-in-picture letterboxing opaque so stale video frames cannot appear behind the PiP surface.
+
 ## [2.12] - 2026-10-24
 
 ### Fixed

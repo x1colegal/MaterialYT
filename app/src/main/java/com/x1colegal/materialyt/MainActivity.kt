@@ -504,6 +504,12 @@ private fun colorScheme(seed: ComposeColor, dark: Boolean, oled: Boolean): Color
     )
 }
 
+private fun Throwable.isExpectedCancellation(): Boolean =
+    this is kotlinx.coroutines.CancellationException ||
+        message.equals("Canceled", ignoreCase = true) ||
+        message?.contains("Superseded feed", ignoreCase = true) == true ||
+        cause?.takeIf { it !== this }?.isExpectedCancellation() == true
+
 @Composable
 private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit) {
     val registerPlayer: (ExoPlayer) -> Unit = { p ->
@@ -775,17 +781,27 @@ private fun MiniPlayer(openMusic: () -> Unit) {
 private fun DedicatedSearchScreen(
     title: String,
     initialQuery: String,
+    historyKey: String,
     onDismiss: () -> Unit,
     onSearch: (String) -> Unit,
 ) {
+    val context = LocalContext.current
+    val preferences = remember { context.getSharedPreferences("search_history", Context.MODE_PRIVATE) }
+    fun readHistory(): List<String> = runCatching {
+        val values = org.json.JSONArray(preferences.getString(historyKey, "[]"))
+        (0 until values.length()).mapNotNull { values.optString(it).takeIf(String::isNotBlank) }
+    }.getOrDefault(emptyList())
     var query by remember(initialQuery) { mutableStateOf(initialQuery) }
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var history by remember(historyKey) { mutableStateOf(readHistory()) }
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     fun submit(value: String) {
         val clean = value.trim()
         if (clean.isBlank()) return
+        history = (listOf(clean) + history.filterNot { it.equals(clean, ignoreCase = true) }).take(20)
+        preferences.edit().putString(historyKey, org.json.JSONArray(history).toString()).apply()
         focusManager.clearFocus()
         keyboardController?.hide()
         onSearch(clean)
@@ -828,14 +844,30 @@ private fun DedicatedSearchScreen(
         }
         HorizontalDivider()
         LazyColumn(Modifier.fillMaxSize()) {
-            items(suggestions, key = { it }) { suggestion ->
+            if (query.isBlank() && history.isNotEmpty()) {
+                item {
+                    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Recent searches", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                        TextButton(onClick = {
+                            history = emptyList()
+                            preferences.edit().remove(historyKey).apply()
+                        }) { Text("Clear all") }
+                    }
+                }
+            }
+            val displayed = if (query.isBlank()) history else suggestions
+            items(displayed, key = { it }) { suggestion ->
                 Row(
                     Modifier.fillMaxWidth().clickable { submit(suggestion) }.padding(horizontal = 20.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Default.Search, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(if (query.isBlank()) Icons.Default.History else Icons.Default.Search, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(suggestion, Modifier.padding(start = 18.dp).weight(1f), style = MaterialTheme.typography.bodyLarge)
-                    Icon(Icons.Default.NorthWest, "Use suggestion", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (query.isBlank()) IconButton(onClick = {
+                        history = history.filterNot { it == suggestion }
+                        preferences.edit().putString(historyKey, org.json.JSONArray(history).toString()).apply()
+                    }) { Icon(Icons.Default.Close, "Remove from search history") }
+                    else Icon(Icons.Default.NorthWest, "Use suggestion", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -874,7 +906,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         return
     }
     if (searchOpen) {
-        DedicatedSearchScreen("Search YouTube", query, { searchOpen = false }) { requested ->
+        DedicatedSearchScreen("Search YouTube", query, "youtube", { searchOpen = false }) { requested ->
             query = requested
             searchOpen = false
             scrollHomeToTop()
@@ -882,7 +914,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 loading = true; error = null
                 runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.search(requested) }) }
                     .onSuccess { feed = it }
-                    .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }
+                    .onFailure { if (!it.isExpectedCancellation()) error = it.message ?: "Search failed" }
                 loading = false
             }
         }
@@ -891,7 +923,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     LaunchedEffect(Unit) {
         if (YouTubeRepository.signedIn() && homeFeed.isEmpty()) {
             loading = true
-            runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.home() }) }.onSuccess { homeFeed = it; if (query.isBlank()) feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+            runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.home() }) }.onSuccess { homeFeed = it; if (query.isBlank()) feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }
             loading = false
         }
     }
@@ -934,7 +966,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 scope.launch {
                     loading = true; error = null; results = emptyList()
                     runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.home() }) }
-                        .onSuccess { homeFeed = it; feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+                        .onSuccess { homeFeed = it; feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }
                     loading = false
                 }
             }) { Icon(Icons.Default.Refresh, "Refresh") }
@@ -990,7 +1022,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var refreshKey by remember { mutableIntStateOf(0) }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
-    LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { loader() }) }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
+    LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { loader() }) }.onSuccess { feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } else Icon(icon, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(8.dp)); Text(title, Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); IconButton(onClick = { refreshKey++ }) { Icon(Icons.Default.Refresh, "Refresh") } }
@@ -1031,8 +1063,8 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
         if (reopenPlayerRequest > 0) selected = AutoMusicService.nowPlaying.value
     }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { block() }) }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
-    LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
+    fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { block() }) }.onSuccess { tracks = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false } }
+    LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false } else loading = false }
     fun loadMore() {
         if (query.isBlank() || loadingMore || tracks.isEmpty()) return
         loadingMore = true
@@ -1047,7 +1079,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     }
     if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
     if (searchOpen) {
-        DedicatedSearchScreen("Search YT Music", query, { searchOpen = false }) { requested ->
+        DedicatedSearchScreen("Search YT Music", query, "music", { searchOpen = false }) { requested ->
             query = requested
             searchOpen = false
             scrollMusicToTop()
@@ -1078,7 +1110,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                     loading = true; error = null
                     runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }
                         .onSuccess { homeTracks = it; tracks = it }
-                        .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+                        .onFailure { if (!it.isExpectedCancellation()) error = it.message }
                     loading = false
                 }
             }) { Icon(Icons.Default.Refresh, "Refresh") }
@@ -3118,11 +3150,29 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
 
     if (activity.pipMode) {
-        AndroidView(
-            factory = { PlayerView(it).apply { this.player = player; useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER); currentPlayerView = this; activity.visiblePlayerView(this) } },
-            modifier = Modifier.fillMaxSize(),
-            update = { currentPlayerView = it; it.useController = false; it.hideController(); activity.visiblePlayerView(it) }
-        )
+        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+            AndroidView(
+                factory = { context -> PlayerView(context).apply {
+                    setBackgroundColor(Color.BLACK)
+                    setShutterBackgroundColor(Color.BLACK)
+                    this.player = player
+                    useController = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+                    currentPlayerView = this
+                    activity.visiblePlayerView(this)
+                } },
+                modifier = Modifier.fillMaxSize().background(ComposeColor.Black),
+                update = {
+                    it.setBackgroundColor(Color.BLACK)
+                    it.setShutterBackgroundColor(Color.BLACK)
+                    currentPlayerView = it
+                    it.useController = false
+                    it.hideController()
+                    activity.visiblePlayerView(it)
+                }
+            )
+        }
     } else if (fullscreen) {
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
             AndroidView(

@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.11] - 2026-10-23
+
+### Fixed
+- Remove reserved system-bar space from the tablet player while fullscreen or in picture-in-picture mode.
+- Keep the picture-in-picture window at the last valid video aspect ratio during playback state changes.
+- Keep feed title and channel identity stable while player metadata and formats are loading.
+- Keep YT Music cards, player, notification and Android Auto on the same stable title and full artist name.
+- Remove the YouTube-generated `- Topic` suffix from music artist names.
+- Resolve original feed metadata before rendering so cards no longer flash translated labels.
+
 ## [2.10] - 2026-10-23
 
 ### Fixed

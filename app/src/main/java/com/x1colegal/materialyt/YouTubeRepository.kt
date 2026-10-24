@@ -2530,15 +2530,21 @@ object YouTubeRepository {
             // A byline may render as "@handle • 1.2M subscribers" when all runs are joined.
             // The run carrying the UC browse endpoint is the actual channel name.
             val linkedChannelName = findLinkedChannelName(renderer)
-            val rawSubtitle = channelSubtitle ?: musicArtist ?: linkedChannelName ?: text(renderer.opt("shortBylineText")) ?: text(renderer.opt("ownerText")) ?: text(renderer.opt("longBylineText")) ?: text(renderer.opt("subtitle"))
+            val shortByline = text(renderer.opt("shortBylineText"))
+            val ownerText = text(renderer.opt("ownerText"))
+            val longByline = text(renderer.opt("longBylineText"))
+            val rendererSubtitle = text(renderer.opt("subtitle"))
+            val fullMusicArtist = if (musicRenderer) {
+                (listOf(musicArtist, linkedChannelName, shortByline, ownerText, longByline, rendererSubtitle) + columns.drop(1))
+                    .mapNotNull { normalizedMusicArtist(it, title) }
+                    .maxByOrNull(String::length)
+            } else null
+            val rawSubtitle = channelSubtitle ?: fullMusicArtist ?: linkedChannelName ?: shortByline ?: ownerText ?: longByline ?: rendererSubtitle
                 ?: columns.drop(1).firstOrNull()
                 ?: deepText(renderer, "shortBylineText") ?: deepText(renderer, "ownerText") ?: deepText(renderer, "longBylineText") ?: deepText(renderer, "subtitle")
                 ?: inferChannelName(renderer, title)?.takeIf { '<' !in it && '>' !in it } ?: "Unknown channel"
             var subtitle = (if (musicRenderer) {
-                val parts = rawSubtitle.split(" • ").map(String::trim).filter(String::isNotBlank)
-                val leadingType = parts.firstOrNull()?.lowercase() in setOf("song", "video", "episode", "album", "playlist")
-                (if (leadingType) parts.getOrNull(1) else parts.firstOrNull())
-                    ?.substringBefore(": ")?.trim().orEmpty().ifBlank { rawSubtitle }
+                normalizedMusicArtist(rawSubtitle, title).orEmpty().ifBlank { rawSubtitle }
             } else rawSubtitle).replace(Regex("(\\d+),(\\d+)"), "$1.$2")
             if (!isChannel && !isPlaylist && isChannelMetadataLabel(subtitle) && authorChannelId.isNotBlank()) {
                 subtitle = resolveChannelName(authorChannelId, id).orEmpty().ifBlank { subtitle }
@@ -2775,6 +2781,16 @@ object YouTubeRepository {
         return (0 until columns.length()).mapNotNull { index ->
             deepText(columns.opt(index), "text")?.takeIf { it.isNotBlank() }
         }
+    }
+
+    private fun normalizedMusicArtist(value: String?, title: String): String? {
+        val parts = value?.split(" • ")?.map(String::trim)?.filter(String::isNotBlank).orEmpty()
+        if (parts.isEmpty()) return null
+        val leadingType = parts.first().lowercase() in setOf("song", "video", "episode", "album", "playlist")
+        return (if (leadingType) parts.getOrNull(1) else parts.firstOrNull())
+            ?.replace(Regex("\\s+-\\s+Topic$", RegexOption.IGNORE_CASE), "")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it != title && !it.matches(Regex("\\d{1,2}:\\d{2}(:\\d{2})?")) }
     }
 
     private fun findMusicArtist(value: Any?, title: String): String? {

@@ -201,7 +201,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private fun playMediaId(mediaId: String?) {
         if (mediaId == null) return
         tracks.firstOrNull { it.id == mediaId }?.let(::play) ?: scope.launch {
-            tracks = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.getOrDefault(emptyList())
+            tracks = runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.getOrDefault(emptyList())
             tracks.firstOrNull { it.id == mediaId }?.let(::play)
         }
     }
@@ -213,7 +213,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         if (parentId != "materialyt_music") { result.sendResult(mutableListOf()); return }
         result.detach()
         scope.launch {
-            tracks = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.getOrDefault(emptyList())
+            tracks = runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.getOrDefault(emptyList())
             result.sendResult(tracks.map { track ->
                 val description = MediaDescriptionCompat.Builder().setMediaId(track.id).setTitle(track.title)
                     .setSubtitle(track.subtitle).setIconUri(Uri.parse(track.thumbnail)).build()

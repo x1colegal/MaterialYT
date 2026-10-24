@@ -127,9 +127,14 @@ import com.google.android.exoplayer2.ui.AspectRatioFrameLayout
 import com.google.android.exoplayer2.ui.PlayerControlView
 import com.google.android.exoplayer2.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import java.util.concurrent.TimeUnit
@@ -252,6 +257,7 @@ class MainActivity : ComponentActivity() {
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
     private var suppressNextAutoPip = false
+    private var pipAspectRatio = Rational(16, 9)
     var isFullscreen by mutableStateOf(false)
         private set
     var pipMode by mutableStateOf(false)
@@ -385,24 +391,27 @@ class MainActivity : ComponentActivity() {
 
     fun pip() {
         visiblePlayerView?.hideController()
+        currentVideoAspectRatio()?.let { pipAspectRatio = it }
         if (Build.VERSION.SDK_INT >= 26) enterPictureInPictureMode(pipParams())
+    }
+
+    private fun currentVideoAspectRatio(): Rational? {
+        val videoSize = player?.videoSize ?: return null
+        if (videoSize.width <= 0 || videoSize.height <= 0) return null
+        val ratio = (videoSize.width.toFloat() * videoSize.pixelWidthHeightRatio / videoSize.height)
+            .takeIf { it.isFinite() && it in 0.45f..2.35f } ?: return null
+        return Rational((ratio * 1_000).roundToInt(), 1_000)
     }
 
     private fun pipParams(): PictureInPictureParams {
         val playing = player?.isPlaying == true
-        val videoFormat = player?.videoFormat
-        val videoWidth = videoFormat?.width?.takeIf { it > 0 } ?: 16
-        val videoHeight = videoFormat?.height?.takeIf { it > 0 } ?: 9
-        val pixelRatio = videoFormat?.pixelWidthHeightRatio?.takeIf { it > 0f } ?: 1f
-        val displayRatio = (videoWidth.toFloat() * pixelRatio / videoHeight).coerceIn(0.45f, 2.35f)
-        val aspectRatio = Rational((displayRatio * 1_000).roundToInt(), 1_000)
         val intent = PendingIntent.getBroadcast(this, 73, Intent(ACTION_PIP_TOGGLE).setPackage(packageName),
             PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
         val action = RemoteAction(
             android.graphics.drawable.Icon.createWithResource(this, if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play),
             if (playing) "Pause" else "Play", if (playing) "Pause video" else "Play video", intent
         )
-        return PictureInPictureParams.Builder().setAspectRatio(aspectRatio).setActions(listOf(action)).build()
+        return PictureInPictureParams.Builder().setAspectRatio(pipAspectRatio).setActions(listOf(action)).build()
     }
 
     fun updatePipAction() {
@@ -673,7 +682,12 @@ private fun AppScaffold(
     }
     Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
     if (tablet) {
-        Row(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+        val tabletViewportModifier = if (!activity.isFullscreen && !activity.pipMode) {
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+        } else {
+            Modifier.fillMaxSize()
+        }
+        Row(tabletViewportModifier) {
             if (!hideNavigation) NavigationRail {
                 Spacer(Modifier.weight(1f))
                 tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
@@ -866,7 +880,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             scrollHomeToTop()
             scope.launch {
                 loading = true; error = null
-                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(requested) } }
+                runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.search(requested) }) }
                     .onSuccess { feed = it }
                     .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message ?: "Search failed" }
                 loading = false
@@ -877,7 +891,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     LaunchedEffect(Unit) {
         if (YouTubeRepository.signedIn() && homeFeed.isEmpty()) {
             loading = true
-            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }.onSuccess { homeFeed = it; if (query.isBlank()) feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+            runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.home() }) }.onSuccess { homeFeed = it; if (query.isBlank()) feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
             loading = false
         }
     }
@@ -885,9 +899,9 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         if (loadingMore || feed.isEmpty()) return
         loadingMore = true
         scope.launch {
-            val more = runCatching { withContext(Dispatchers.IO) {
+            val more = runCatching { originalMetadataItems(withContext(Dispatchers.IO) {
                 if (query.isBlank()) YouTubeRepository.homeContinuation() else YouTubeRepository.searchContinuation(query)
-            } }.getOrDefault(emptyList())
+            }) }.getOrDefault(emptyList())
             if (more.isNotEmpty()) {
                 feed = (feed + more).distinctBy { it.id }
                 if (query.isBlank()) homeFeed = feed
@@ -919,7 +933,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 keyboardController?.hide()
                 scope.launch {
                     loading = true; error = null; results = emptyList()
-                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
+                    runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.home() }) }
                         .onSuccess { homeFeed = it; feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
                     loading = false
                 }
@@ -976,7 +990,7 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var refreshKey by remember { mutableIntStateOf(0) }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
-    LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { loader() } }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
+    LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { loader() }) }.onSuccess { feed = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } else Icon(icon, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(8.dp)); Text(title, Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); IconButton(onClick = { refreshKey++ }) { Icon(Icons.Default.Refresh, "Refresh") } }
@@ -1017,13 +1031,13 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
         if (reopenPlayerRequest > 0) selected = AutoMusicService.nowPlaying.value
     }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
-    fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { withContext(Dispatchers.IO) { block() } }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
-    LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
+    fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { block() }) }.onSuccess { tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } }
+    LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }; loading = false } else loading = false }
     fun loadMore() {
         if (query.isBlank() || loadingMore || tracks.isEmpty()) return
         loadingMore = true
         scope.launch {
-            val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicContinuation(query) } }.getOrDefault(emptyList())
+            val more = runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.musicContinuation(query) }) }.getOrDefault(emptyList())
             if (more.isNotEmpty()) {
                 tracks = (tracks + more).distinctBy { it.id }
                 if (query.isBlank()) homeTracks = tracks
@@ -1062,7 +1076,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                 query = ""
                 scope.launch {
                     loading = true; error = null
-                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.music() } }
+                    runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }
                         .onSuccess { homeTracks = it; tracks = it }
                         .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
                     loading = false
@@ -1697,27 +1711,39 @@ private fun ChannelRow(item: FeedItem, click: () -> Unit) {
     }
 }
 
+internal suspend fun originalMetadataItems(items: List<FeedItem>): List<FeedItem> = coroutineScope {
+    val requests = Semaphore(4)
+    items.map { item ->
+        async(Dispatchers.IO) {
+            if (item.channel || item.playlist || item.id.length != 11) return@async item
+            requests.withPermit {
+                val metadata = YouTubeRepository.canonicalVideoMetadata(item.id) ?: return@withPermit item
+                item.copy(
+                    title = metadata.title.takeIf(String::isNotBlank) ?: item.title,
+                    subtitle = (metadata.author.takeIf(String::isNotBlank) ?: item.subtitle)
+                        .replace(Regex("\\s+-\\s+Topic$", RegexOption.IGNORE_CASE), "")
+                        .trim(),
+                )
+            }
+        }
+    }.awaitAll()
+}
+
 @Composable
 private fun FeedRow(item: FeedItem, click: () -> Unit) {
     if (item.channel) {
         ChannelRow(item, click)
         return
     }
-    var canonical by remember(item.id) { mutableStateOf<CanonicalVideoMetadata?>(null) }
-    LaunchedEffect(item.id) {
-        canonical = withContext(Dispatchers.IO) { YouTubeRepository.canonicalVideoMetadata(item.id) }
-    }
-    val displayedTitle = canonical?.title?.takeIf(String::isNotBlank) ?: item.title
-    val displayedChannel = canonical?.author?.takeIf(String::isNotBlank) ?: item.subtitle
     Column(Modifier.fillMaxWidth().padding(bottom = 18.dp).clickable(onClick = click)) {
         AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(item.thumbnailWidth.toFloat() / item.thumbnailHeight.coerceAtLeast(1)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
         Row(Modifier.padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.Top) {
             if (item.channelThumbnail.isNotBlank()) AsyncImage(item.channelThumbnail, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
             else Surface(Modifier.size(38.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(8.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer) }
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(displayedTitle, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(3.dp))
-                Text(displayedChannel, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -2574,6 +2600,16 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var miniplayerDismissed by remember { mutableStateOf(false) }
     var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(true) }
+    fun stableMetadata(latest: VideoDetails?): VideoDetails? {
+        latest ?: return videoMetadata
+        val current = videoMetadata ?: return latest
+        val stableTitle = current.title.trim().takeIf { it.isNotBlank() && !it.equals("Video", true) }
+        val stableAuthor = cleanChannelDisplayName(current.author)
+        return latest.copy(
+            title = stableTitle ?: latest.title,
+            author = stableAuthor ?: latest.author,
+        )
+    }
     fun bindPlaylistControls(view: PlayerView) {
         val previous = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_prev)
         val next = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_next)
@@ -2612,7 +2648,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     LaunchedEffect(info, videoMetadata, channelInfo) {
         if (info != null || videoMetadata != null) {
             val title = videoMetadata?.title ?: info?.name ?: "Video"
-            val author = displayChannelName(info?.uploaderName, videoMetadata?.author, channelInfo?.name)
+            val author = displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name)
             val thumb = info?.thumbnails?.lastOrNull()?.url ?: videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
             activity.showPlaybackNotification(mediaSession, title, author, thumb, player.isPlaying)
         }
@@ -2657,7 +2693,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { YouTubeRepository.reportPlayback(videoId, maxOf(0, pos - 1000L), pos, paused = true) } }
                 }
                 val title = videoMetadata?.title ?: info?.name ?: "Video"
-                val author = displayChannelName(info?.uploaderName, videoMetadata?.author, channelInfo?.name)
+                val author = displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name)
                 val thumb = info?.thumbnails?.lastOrNull()?.url ?: videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
                 activity.showPlaybackNotification(mediaSession, title, author, thumb, isPlaying)
                 mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
@@ -2719,7 +2755,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             playerBuffered = player.bufferedPosition.coerceAtLeast(playerPosition)
             playerDuration = player.duration.coerceAtLeast(0L)
             YouTubeRepository.videoDetails(videoId)?.let { latest ->
-                if (latest != videoMetadata) videoMetadata = latest
+                val stable = stableMetadata(latest)
+                if (stable != videoMetadata) videoMetadata = stable
             }
             if (!hasStartedPlayback && playerPosition > 0L) {
                 hasStartedPlayback = true
@@ -2751,7 +2788,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     // enrich it while playback is still preparing on slower tablets.
     LaunchedEffect(videoId) {
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.refreshVideoDetails(videoId) } }
-            .onSuccess { videoMetadata = it }
+            .onSuccess { videoMetadata = stableMetadata(it) }
             .onFailure { AppLog.failure("video metadata video=$videoId", it) }
     }
     LaunchedEffect(videoId) {
@@ -2798,7 +2835,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         false, it.audioTrackName, it.audioTrackId, it.originalAudio, it)
                 }
                 selectedAudio = selectAudioStream(audioStreams, audioCodec)
-                YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = it }
+                YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = stableMetadata(it) }
                 availableStreams = extracted.formats.filter { !it.audio && it.height > 0 }.map {
                     PlayerChoice(extracted.serverAbrStreamingUrl, it.codec, it.height, it.fps,
                         it.bitrate, true, sabrFormat = it)
@@ -2814,7 +2851,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 availableStreams = extracted.filter { !it.audio && it.height > 0 }
                     .map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-                YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = it }
+                YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = stableMetadata(it) }
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
             }.onFailure { e ->
                 AppLog.failure("player repository fallback video=$videoId", e)
@@ -3058,7 +3095,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     }
                     Column(Modifier.padding(horizontal = 10.dp).weight(1f)) {
                         Text(videoMetadata?.title ?: info?.name ?: "Video", Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
-                        Text(displayChannelName(info?.uploaderName, videoMetadata?.author, channelInfo?.name), Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.bodySmall)
+                        Text(displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name), Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.bodySmall)
                     }
                     var playing by remember { mutableStateOf(player.isPlaying) }
                     DisposableEffect(player) {
@@ -3155,7 +3192,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                             else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
                             Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                                Text(displayChannelName(info?.uploaderName, videoMetadata?.author, channelInfo?.name), style = MaterialTheme.typography.titleMedium)
+                                Text(displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name), style = MaterialTheme.typography.titleMedium)
                                 val subscribers = info?.uploaderSubscriberCount ?: -1
                                 if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -3326,7 +3363,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) { val target = info?.uploaderUrl ?: videoMetadata?.authorUrl; if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) } }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
                                 if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop) else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
-                                Column(Modifier.padding(horizontal = 12.dp).weight(1f)) { Text(displayChannelName(info?.uploaderName, videoMetadata?.author, channelInfo?.name), style = MaterialTheme.typography.titleMedium); val subscribers = info?.uploaderSubscriberCount ?: -1; if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                Column(Modifier.padding(horizontal = 12.dp).weight(1f)) { Text(displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name), style = MaterialTheme.typography.titleMedium); val subscribers = info?.uploaderSubscriberCount ?: -1; if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                 Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
                             }
                             HorizontalDivider()

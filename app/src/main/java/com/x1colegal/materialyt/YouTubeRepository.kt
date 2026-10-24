@@ -1580,19 +1580,15 @@ object YouTubeRepository {
         )
         val primary = findObject(response, "videoPrimaryInfoRenderer")?.optJSONObject("videoPrimaryInfoRenderer")
         val owner = findObject(response, "videoOwnerRenderer")?.optJSONObject("videoOwnerRenderer")
-        val subscribeRenderer = findObject(response, "subscribeButtonRenderer")?.optJSONObject("subscribeButtonRenderer")
+        val subscribeRenderer = findObject(owner, "subscribeButtonRenderer")?.optJSONObject("subscribeButtonRenderer")
         val channelId = response.optJSONObject("videoDetails")?.optString("channelId").orEmpty()
             .ifBlank { owner?.let { findString(it, "browseId") }.orEmpty() }
             .ifBlank { subscribeRenderer?.optString("channelId").orEmpty() }
             .ifBlank { findString(response, "channelId").orEmpty() }
             .takeIf { it.startsWith("UC") }.orEmpty()
-        val subscriptionState = findString(response, "subscriptionState").orEmpty()
-        val subscribed = when {
-            subscriptionState.isNotBlank() -> subscriptionState.contains("SUBSCRIBED", true) && !subscriptionState.contains("UNSUBSCRIBED", true)
-            findBoolean(response, "subscribed") != null -> findBoolean(response, "subscribed") == true
-            subscribeRenderer?.has("subscribed") == true -> subscribeRenderer.optBoolean("subscribed")
-            else -> containsString(response, "/subscription/unsubscribe")
-        }
+        val subscription = subscriptionState(response, owner, channelId)
+        val subscribed = subscription.first ?: false
+        AppLog.event("video interactions subscription video=$videoId channel=$channelId source=${subscription.second} subscribed=$subscribed")
         val likeStatus = findString(primary, "likeStatus").orEmpty()
         val toggleState = findString(primary, "toggleButtonStateId").orEmpty()
         val rating = when (likeStatus.uppercase()) {
@@ -1688,20 +1684,63 @@ object YouTubeRepository {
             JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", channelId),
             origin,
         )
-        val subscriptionState = findString(response, "subscriptionState").orEmpty()
-        val subscribeRenderer = findObject(response, "subscribeButtonRenderer")
-            ?.optJSONObject("subscribeButtonRenderer")
-        val subscriptionEntity = findObject(response, "subscriptionStateEntity")
-            ?.optJSONObject("subscriptionStateEntity")
-        return when {
-            subscriptionState.isNotBlank() -> subscriptionState.contains("SUBSCRIBED", true) &&
-                !subscriptionState.contains("UNSUBSCRIBED", true)
-            subscribeRenderer?.has("subscribed") == true -> subscribeRenderer.optBoolean("subscribed")
-            subscriptionEntity?.has("subscribed") == true -> subscriptionEntity.optBoolean("subscribed")
-            containsString(response, "/subscription/unsubscribe") -> true
-            containsString(response, "/subscription/subscribe") -> false
-            else -> error("YouTube did not expose this channel's subscription state")
+        val subscription = subscriptionState(response, response, channelId)
+        AppLog.event("channel subscription channel=$channelId source=${subscription.second} subscribed=${subscription.first}")
+        return subscription.first ?: error("YouTube did not expose this channel's subscription state")
+    }
+
+    /**
+     * Resolve the subscription state without reading an unrelated channel from a feed or
+     * recommendation. Modern YouTube responses include both button states in the view model;
+     * only the entity whose key matches stateEntityStoreKey represents the active state.
+     */
+    private fun subscriptionState(response: JSONObject, scope: Any?, expectedChannelId: String): Pair<Boolean?, String> {
+        val legacy = findObject(scope, "subscribeButtonRenderer")?.optJSONObject("subscribeButtonRenderer")
+        val legacyChannelId = legacy?.optString("channelId").orEmpty()
+            .ifBlank { legacy?.let { findString(it, "channelIds") }.orEmpty() }
+        if (legacy?.has("subscribed") == true &&
+            (expectedChannelId.isBlank() || legacyChannelId.isBlank() || legacyChannelId == expectedChannelId)
+        ) return legacy.optBoolean("subscribed") to "legacy_renderer"
+
+        val view = findObject(scope, "subscribeButtonViewModel")?.optJSONObject("subscribeButtonViewModel")
+        val viewChannelId = view?.let(::findChannelId).orEmpty()
+        if (view != null && (expectedChannelId.isBlank() || viewChannelId.isBlank() || viewChannelId == expectedChannelId)) {
+            val key = view.optString("stateEntityStoreKey").ifBlank {
+                view.optJSONObject("subscribeButtonContent")?.optJSONObject("subscribeState")?.optString("key").orEmpty()
+            }
+            val entity = findSubscriptionStateEntity(response, key)
+            if (entity?.has("subscribed") == true) return entity.optBoolean("subscribed") to "state_entity"
         }
+
+        val namedState = findString(scope, "subscriptionState").orEmpty()
+        if (namedState.isNotBlank()) return (
+            namedState.contains("SUBSCRIBED", true) && !namedState.contains("UNSUBSCRIBED", true)
+        ) to "named_state"
+        if (containsString(scope, "/subscription/unsubscribe")) return true to "owner_endpoint"
+        if (containsString(scope, "/subscription/subscribe")) return false to "owner_endpoint"
+        return null to "missing"
+    }
+
+    private fun findSubscriptionStateEntity(value: Any?, key: String): JSONObject? = when (value) {
+        is JSONObject -> {
+            val entity = value.optJSONObject("subscriptionStateEntity")
+            if (entity != null && key.isNotBlank() && entity.optString("key") == key) entity
+            else value.keys().asSequence().mapNotNull { findSubscriptionStateEntity(value.opt(it), key) }.firstOrNull()
+        }
+        is JSONArray -> (0 until value.length()).asSequence()
+            .mapNotNull { findSubscriptionStateEntity(value.opt(it), key) }.firstOrNull()
+        else -> null
+    }
+
+    private fun findChannelId(value: Any?): String? = when (value) {
+        is String -> value.takeIf { it.startsWith("UC") }
+        is JSONObject -> value.optString("channelId").takeIf { it.startsWith("UC") }
+            ?: value.optJSONArray("channelIds")?.let { ids ->
+                (0 until ids.length()).asSequence().mapNotNull { findChannelId(ids.opt(it)) }.firstOrNull()
+            }
+            ?: value.keys().asSequence().mapNotNull { findChannelId(value.opt(it)) }.firstOrNull()
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findChannelId(value.opt(it)) }.firstOrNull()
+        else -> null
     }
 
     private fun findToggledRating(value: Any?): VideoRating = when (value) {

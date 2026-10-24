@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [2.12] - 2026-10-24
+
+### Fixed
+- Match the current channel's subscription state entity instead of reading subscription data from unrelated recommended videos.
+
 ## [2.11] - 2026-10-23
 
 ### Fixed

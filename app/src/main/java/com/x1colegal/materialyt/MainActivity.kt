@@ -781,27 +781,22 @@ private fun MiniPlayer(openMusic: () -> Unit) {
 private fun DedicatedSearchScreen(
     title: String,
     initialQuery: String,
-    historyKey: String,
+    music: Boolean,
     onDismiss: () -> Unit,
     onSearch: (String) -> Unit,
 ) {
-    val context = LocalContext.current
-    val preferences = remember { context.getSharedPreferences("search_history", Context.MODE_PRIVATE) }
-    fun readHistory(): List<String> = runCatching {
-        val values = org.json.JSONArray(preferences.getString(historyKey, "[]"))
-        (0 until values.length()).mapNotNull { values.optString(it).takeIf(String::isNotBlank) }
-    }.getOrDefault(emptyList())
     var query by remember(initialQuery) { mutableStateOf(initialQuery) }
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
-    var history by remember(historyKey) { mutableStateOf(readHistory()) }
+    var history by remember(music) { mutableStateOf<List<AccountSearchEntry>>(emptyList()) }
+    var loadingHistory by remember { mutableStateOf(false) }
+    var historyError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     fun submit(value: String) {
         val clean = value.trim()
         if (clean.isBlank()) return
-        history = (listOf(clean) + history.filterNot { it.equals(clean, ignoreCase = true) }).take(20)
-        preferences.edit().putString(historyKey, org.json.JSONArray(history).toString()).apply()
         focusManager.clearFocus()
         keyboardController?.hide()
         onSearch(clean)
@@ -812,9 +807,18 @@ private fun DedicatedSearchScreen(
             suggestions = emptyList()
         } else {
             delay(180)
-            suggestions = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.searchSuggestions(requested) } }
+            suggestions = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.searchSuggestions(requested, music) } }
                 .getOrDefault(emptyList())
         }
+    }
+    LaunchedEffect(music) {
+        if (!YouTubeRepository.signedIn()) return@LaunchedEffect
+        loadingHistory = true
+        historyError = null
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.accountSearchHistory(music) } }
+            .onSuccess { history = it }
+            .onFailure { historyError = it.message ?: "Could not load search history" }
+        loadingHistory = false
     }
     LaunchedEffect(Unit) {
         delay(100)
@@ -849,23 +853,33 @@ private fun DedicatedSearchScreen(
                     Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Recent searches", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                         TextButton(onClick = {
-                            history = emptyList()
-                            preferences.edit().remove(historyKey).apply()
+                            scope.launch {
+                                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.clearAccountSearchHistory() } }
+                                    .onSuccess { history = emptyList() }
+                                    .onFailure { historyError = it.message ?: "Could not clear search history" }
+                            }
                         }) { Text("Clear all") }
                     }
                 }
             }
-            val displayed = if (query.isBlank()) history else suggestions
-            items(displayed, key = { it }) { suggestion ->
+            if (query.isBlank() && loadingHistory) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+            if (query.isBlank() && historyError != null) item {
+                Text(historyError!!, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error)
+            }
+            val displayed = if (query.isBlank()) history else suggestions.map { AccountSearchEntry(it) }
+            items(displayed, key = { "${it.text}:${it.feedbackToken.orEmpty()}" }) { suggestion ->
                 Row(
-                    Modifier.fillMaxWidth().clickable { submit(suggestion) }.padding(horizontal = 20.dp, vertical = 14.dp),
+                    Modifier.fillMaxWidth().clickable { submit(suggestion.text) }.padding(horizontal = 20.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(if (query.isBlank()) Icons.Default.History else Icons.Default.Search, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(suggestion, Modifier.padding(start = 18.dp).weight(1f), style = MaterialTheme.typography.bodyLarge)
-                    if (query.isBlank()) IconButton(onClick = {
-                        history = history.filterNot { it == suggestion }
-                        preferences.edit().putString(historyKey, org.json.JSONArray(history).toString()).apply()
+                    Text(suggestion.text, Modifier.padding(start = 18.dp).weight(1f), style = MaterialTheme.typography.bodyLarge)
+                    if (query.isBlank() && suggestion.feedbackToken != null) IconButton(onClick = {
+                        scope.launch {
+                            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.removeSearchHistoryEntry(suggestion) } }
+                                .onSuccess { removed -> if (removed) history = history.filterNot { it == suggestion } }
+                                .onFailure { historyError = it.message ?: "Could not remove search" }
+                        }
                     }) { Icon(Icons.Default.Close, "Remove from search history") }
                     else Icon(Icons.Default.NorthWest, "Use suggestion", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -906,7 +920,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         return
     }
     if (searchOpen) {
-        DedicatedSearchScreen("Search YouTube", query, "youtube", { searchOpen = false }) { requested ->
+        DedicatedSearchScreen("Search YouTube", query, false, { searchOpen = false }) { requested ->
             query = requested
             searchOpen = false
             scrollHomeToTop()
@@ -1079,7 +1093,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     }
     if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
     if (searchOpen) {
-        DedicatedSearchScreen("Search YT Music", query, "music", { searchOpen = false }) { requested ->
+        DedicatedSearchScreen("Search YT Music", query, true, { searchOpen = false }) { requested ->
             query = requested
             searchOpen = false
             scrollMusicToTop()

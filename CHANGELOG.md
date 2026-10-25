@@ -2,6 +2,17 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.1] - 2026-10-24
+
+### Changed
+- Replace device-local recent searches with the signed-in Google account's YouTube search history.
+- Read existing YouTube searches internally from Google My Activity while keeping the web surface hidden from the app UI.
+- Use native authenticated YT Music search-history renderers and feedback tokens for removal.
+
+### Fixed
+- Make Clear all operate on the YouTube account history instead of only deleting an app-local list.
+- Keep authenticated YouTube and YT Music suggestions separate and sourced from their respective services.
+
 ## [3.0] - 2026-10-24
 
 ### Added

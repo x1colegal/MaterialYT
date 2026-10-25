@@ -1,6 +1,10 @@
 package com.x1colegal.materialyt
 
 import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -16,6 +20,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CountDownLatch
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import android.os.SystemClock
@@ -58,6 +63,7 @@ data class SabrPlaybackInfo(
     val formats: List<SabrFormat>
 )
 data class ChannelInfo(val name: String, val thumbnail: String)
+data class AccountSearchEntry(val text: String, val feedbackToken: String? = null)
 data class DescriptionLinkTarget(val start: Int, val end: Int, val target: String)
 data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "", val descriptionLinks: List<DescriptionLinkTarget> = emptyList())
 enum class VideoRating { NONE, LIKE, DISLIKE }
@@ -613,9 +619,13 @@ object YouTubeRepository {
     }
     fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home")).also { activeMusicQuery = null }
 
-    fun searchSuggestions(query: String): List<String> {
+    fun searchSuggestions(query: String, music: Boolean = false): List<String> {
         val clean = query.trim()
         if (clean.isBlank()) return emptyList()
+        if (music && signedIn()) return musicSearchSuggestions(clean).map { it.text }.distinct().take(12)
+        if (signedIn()) {
+            authenticatedYouTubeSuggestions(clean).takeIf { it.isNotEmpty() }?.let { return it.take(12) }
+        }
         val url = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${URLEncoder.encode(clean, "UTF-8")}"
         val request = Request.Builder().url(url).header("User-Agent", UA).build()
         return client.newCall(request).execute().use { response ->
@@ -629,6 +639,203 @@ object YouTubeRepository {
                     else -> null
                 }
             }.distinct().take(12)
+        }
+    }
+
+    fun accountSearchHistory(music: Boolean): List<AccountSearchEntry> {
+        if (!signedIn()) return emptyList()
+        if (music) return musicSearchSuggestions("").filter { it.feedbackToken != null }.distinctBy { it.text.lowercase() }
+
+        googleActivitySearchHistory().takeIf { it.isNotEmpty() }?.let { return it }
+
+        val fromHistoryPage = runCatching {
+            val root = initialData(get("https://www.youtube.com/feed/history/search_history?hl=en"))
+            val entries = linkedMapOf<String, AccountSearchEntry>()
+            fun collect(value: Any?) {
+                when (value) {
+                    is JSONObject -> {
+                        val renderer = value.optJSONObject("searchHistoryQueryRenderer")
+                            ?: value.optJSONObject("historySuggestionRenderer")
+                        if (renderer != null) {
+                            val query = renderer.optJSONObject("navigationEndpoint")
+                                ?.optJSONObject("searchEndpoint")?.optString("query").orEmpty()
+                                .ifBlank { text(renderer.opt("query")) ?: text(renderer.opt("suggestion")).orEmpty() }
+                                .trim()
+                            if (query.isNotBlank()) entries.putIfAbsent(query.lowercase(), AccountSearchEntry(query, findString(renderer, "feedbackToken")))
+                        }
+                        value.keys().forEach { collect(value.opt(it)) }
+                    }
+                    is JSONArray -> for (index in 0 until value.length()) collect(value.opt(index))
+                }
+            }
+            collect(root)
+            entries.values.toList()
+        }.getOrDefault(emptyList())
+        if (fromHistoryPage.isNotEmpty()) return fromHistoryPage
+        return authenticatedYouTubeSuggestions("").map { AccountSearchEntry(it) }
+    }
+
+    private fun googleActivitySearchHistory(): List<AccountSearchEntry> {
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<List<AccountSearchEntry>>(emptyList())
+        Handler(Looper.getMainLooper()).post {
+            val webView = WebView(MaterialYtApp.instance)
+            var finished = false
+            fun complete(entries: List<AccountSearchEntry>) {
+                if (finished) return
+                finished = true
+                result.set(entries)
+                runCatching { webView.stopLoading(); webView.destroy() }
+                latch.countDown()
+            }
+            val timeout = Runnable { complete(emptyList()) }
+            Handler(Looper.getMainLooper()).postDelayed(timeout, 15_000)
+            webView.settings.javaScriptEnabled = true
+            webView.settings.domStorageEnabled = true
+            webView.settings.userAgentString = UA
+            webView.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String) {
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (finished) return@postDelayed
+                        val script = """
+                            (() => {
+                              const out = [];
+                              const add = value => { value = (value || '').trim(); if (value && !out.includes(value)) out.push(value); };
+                              for (const anchor of document.querySelectorAll('a[href]')) {
+                                let href = anchor.href || '';
+                                try { href = decodeURIComponent(href); } catch (_) {}
+                                const match = href.match(/[?&]search_query=([^&#]+)/);
+                                if (match) { try { add(decodeURIComponent(match[1].replace(/\+/g, ' '))); } catch (_) { add(match[1]); } }
+                              }
+                              for (const line of (document.body?.innerText || '').split(/\n+/)) {
+                                const match = line.trim().match(/^Searched for\s+(.+)$/i);
+                                if (match) add(match[1]);
+                              }
+                              return JSON.stringify(out.slice(0, 30));
+                            })()
+                        """.trimIndent()
+                        view.evaluateJavascript(script) { encoded ->
+                            val entries = runCatching {
+                                val jsonText = org.json.JSONTokener(encoded).nextValue() as? String ?: "[]"
+                                val array = JSONArray(jsonText)
+                                (0 until array.length()).mapNotNull { index ->
+                                    array.optString(index).trim().takeIf(String::isNotBlank)?.let { AccountSearchEntry(it) }
+                                }.distinctBy { it.text.lowercase() }
+                            }.getOrDefault(emptyList())
+                            AppLog.event("Google Activity search history url=${url.substringBefore('?')} items=${entries.size}")
+                            complete(entries)
+                        }
+                    }, 2_500)
+                }
+            }
+            webView.loadUrl("https://myactivity.google.com/product/youtube?restrict=search&hl=en")
+        }
+        latch.await(16, TimeUnit.SECONDS)
+        return result.get()
+    }
+
+    fun removeSearchHistoryEntry(entry: AccountSearchEntry): Boolean {
+        val token = entry.feedbackToken ?: return false
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val response = post("$origin/youtubei/v1/feedback?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB_REMIX", bootstrap.version))
+            .put("feedbackTokens", JSONArray().put(token)), origin)
+        return response.optJSONArray("feedbackResponses")?.optJSONObject(0)?.optBoolean("isProcessed", true) != false
+    }
+
+    fun clearAccountSearchHistory(): Boolean {
+        require(signedIn()) { "Sign in again to clear search history" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        post("$origin/youtubei/v1/history/clear_search_history?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB", bootstrap.version)), origin)
+        return true
+    }
+
+    private fun musicSearchSuggestions(query: String): List<AccountSearchEntry> {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val response = post("$origin/youtubei/v1/music/get_search_suggestions?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB_REMIX", bootstrap.version)).put("input", query), origin)
+        val output = mutableListOf<AccountSearchEntry>()
+        fun collect(value: Any?) {
+            when (value) {
+                is JSONObject -> {
+                    val renderer = value.optJSONObject("historySuggestionRenderer")
+                        ?: value.optJSONObject("searchSuggestionRenderer")
+                    if (renderer != null) {
+                        val text = renderer.optJSONObject("navigationEndpoint")?.optJSONObject("searchEndpoint")
+                            ?.optString("query").orEmpty().ifBlank { text(renderer.opt("suggestion")).orEmpty() }.trim()
+                        if (text.isNotBlank()) output += AccountSearchEntry(text, renderer.optJSONObject("serviceEndpoint")
+                            ?.optJSONObject("feedbackEndpoint")?.optString("feedbackToken")?.takeIf(String::isNotBlank))
+                    }
+                    value.keys().forEach { collect(value.opt(it)) }
+                }
+                is JSONArray -> for (index in 0 until value.length()) collect(value.opt(index))
+            }
+        }
+        collect(response)
+        return output.distinctBy { it.text.lowercase() }
+    }
+
+    private fun authenticatedYouTubeSuggestions(query: String): List<String> {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val guideContext = context("WEB", bootstrap.version).apply {
+            getJSONObject("client")
+                .put("clientScreen", "WATCH")
+                .put("userAgent", UA)
+                .put("acceptLanguage", "en-US")
+                .put("acceptRegion", "US")
+                .put("utcOffsetMinutes", -180)
+            put("user", JSONObject().put("enableSafetyMode", false).put("lockedSafetyMode", false))
+        }
+        val guide = runCatching {
+            post("$origin/youtubei/v1/guide?key=${bootstrap.key}", JSONObject()
+                .put("context", guideContext), origin)
+        }.getOrNull()
+        fun suggestToken(value: Any?): String? = when (value) {
+            is JSONObject -> {
+                if (value.optString("key") == "suggest_token") value.optString("value").takeIf(String::isNotBlank)
+                else value.keys().asSequence().mapNotNull { suggestToken(value.opt(it)) }.firstOrNull()
+            }
+            is JSONArray -> (0 until value.length()).asSequence().mapNotNull { suggestToken(value.opt(it)) }.firstOrNull()
+            else -> null
+        }
+        val token = suggestToken(guide) ?: runCatching {
+            val homeContext = JSONObject(guideContext.toString())
+            val home = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+                .put("context", homeContext).put("browseId", "FEwhat_to_watch"), origin)
+            suggestToken(home)
+        }.getOrNull()
+        val url = buildString {
+            append("https://clients1.google.com/complete/search?client=youtube-lr&ds=yt&xhr=t&oe=utf-8&xssi=t")
+            append("&hl=en&gl=US&q=").append(URLEncoder.encode(query, "UTF-8"))
+            token?.let { append("&tok=").append(URLEncoder.encode(it, "UTF-8")) }
+        }
+        val request = Request.Builder().url(url).header("User-Agent", UA).apply {
+            cookies(origin).takeIf(String::isNotBlank)?.let { header("Cookie", it) }
+            header("Accept-Language", "en-US,en;q=0.9")
+        }.build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return emptyList()
+            val raw = response.body?.string().orEmpty().removePrefix(")]}'").trimStart()
+            val start = raw.indexOf('[')
+            val end = raw.lastIndexOf(']')
+            if (start < 0 || end <= start) return emptyList()
+            val root = JSONArray(raw.substring(start, end + 1))
+            val values = root.optJSONArray(1) ?: return emptyList()
+            (0 until values.length()).mapNotNull { index ->
+                val value = values.opt(index)
+                when (value) {
+                    is String -> value
+                    is JSONArray -> value.optString(0)
+                    else -> null
+                }?.trim()?.takeIf(String::isNotBlank)
+            }.distinct().take(20).also {
+                AppLog.event("account search suggestions queryBlank=${query.isBlank()} token=${token != null} items=${it.size}")
+            }
         }
     }
 

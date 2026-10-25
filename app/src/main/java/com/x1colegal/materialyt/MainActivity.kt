@@ -391,16 +391,35 @@ class MainActivity : ComponentActivity() {
 
     fun pip() {
         visiblePlayerView?.hideController()
-        currentVideoAspectRatio()?.let { pipAspectRatio = it }
+        // Never carry a stale aspect ratio from a previous video into a new PiP window.
+        // ExoPlayer may briefly report an empty VideoSize while its Surface is moving.
+        pipAspectRatio = currentVideoAspectRatio() ?: Rational(16, 9)
         if (Build.VERSION.SDK_INT >= 26) enterPictureInPictureMode(pipParams())
     }
 
     private fun currentVideoAspectRatio(): Rational? {
         val videoSize = player?.videoSize ?: return null
         if (videoSize.width <= 0 || videoSize.height <= 0) return null
-        val ratio = (videoSize.width.toFloat() * videoSize.pixelWidthHeightRatio / videoSize.height)
-            .takeIf { it.isFinite() && it in 0.45f..2.35f } ?: return null
+        val ratio = normalizedPipRatio(videoSize.width, videoSize.height, videoSize.pixelWidthHeightRatio) ?: return null
         return Rational((ratio * 1_000).roundToInt(), 1_000)
+    }
+
+    private fun normalizedPipRatio(width: Int, height: Int, pixelRatio: Float): Float? {
+        if (width <= 0 || height <= 0) return null
+        val ratio = width.toFloat() * pixelRatio / height
+        if (!ratio.isFinite() || ratio <= 0f) return null
+        // Android accepts PiP windows from roughly 1:2.39 through 2.39:1.
+        // Preserve the real ratio inside that range; clamp only genuinely wider/taller
+        // media so PlayerView letterboxes it instead of falling back to a 16:9 window.
+        return ratio.coerceIn(1f / 2.39f, 2.39f)
+    }
+
+    fun updatePipAspectRatio(width: Int, height: Int, pixelRatio: Float) {
+        val ratio = normalizedPipRatio(width, height, pixelRatio) ?: return
+        pipAspectRatio = Rational((ratio * 1_000).roundToInt(), 1_000)
+        if (Build.VERSION.SDK_INT >= 26 && isInPictureInPictureMode) {
+            setPictureInPictureParams(pipParams())
+        }
     }
 
     private fun pipParams(): PictureInPictureParams {
@@ -426,6 +445,17 @@ class MainActivity : ComponentActivity() {
         pipMode = isInPictureInPictureMode
         if (isInPictureInPictureMode) {
             visiblePlayerView?.hideController()
+            // The decoder can publish its final dimensions during the PiP transition.
+            // Reapply them after Android has created the PiP task so the window cannot
+            // remain square or retain the previous video's shape.
+            window.decorView.post {
+                currentVideoAspectRatio()?.let { ratio ->
+                    pipAspectRatio = ratio
+                    if (Build.VERSION.SDK_INT >= 26 && this.isInPictureInPictureMode) {
+                        setPictureInPictureParams(pipParams())
+                    }
+                }
+            }
         } else {
             applyFullscreenState()
         }
@@ -2751,6 +2781,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 if (resumeStartMs > 0L) initialStartApplied = true
                 decoderRecoveryPosition = null
                 PlaybackLoadStatus.clear(videoId)
+            }
+            override fun onVideoSizeChanged(videoSize: com.google.android.exoplayer2.video.VideoSize) {
+                activity.updatePipAspectRatio(videoSize.width, videoSize.height, videoSize.pixelWidthHeightRatio)
             }
             override fun onPlayerError(cause: PlaybackException) {
                 Log.e("MaterialYT", "video player ${cause.errorCodeName}", cause)

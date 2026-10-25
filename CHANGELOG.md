@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.2] - 2026-10-25
+
+### Fixed
+- Prevent picture-in-picture windows from inheriting a stale square or stretched aspect ratio from previous playback.
+- Refresh the PiP window when ExoPlayer publishes the video's final dimensions during the Android transition.
+- Preserve widescreen and ultrawide video ratios throughout Android's supported PiP range, with proportional letterboxing only beyond the platform limit.
+
 ## [3.1] - 2026-10-24
 
 ### Changed

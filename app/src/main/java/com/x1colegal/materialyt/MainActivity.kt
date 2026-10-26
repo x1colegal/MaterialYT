@@ -3717,7 +3717,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     } else {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             if (tablet) {
-                Row(Modifier.fillMaxSize()) {
+                // Paint edge-to-edge with Surface, but keep the non-fullscreen player UI
+                // inside the tablet's visible system-bar viewport.
+                Row(Modifier.fillMaxSize().windowInsetsPadding(ComposeWindowInsets.safeDrawing)) {
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                             AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })

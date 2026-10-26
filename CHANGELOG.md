@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.6] - 2026-10-26
+
+### Fixed
+- Keep the non-fullscreen tablet video player inside the visible system-bar viewport while preserving its edge-to-edge painted background.
+
 ## [3.5] - 2026-10-26
 
 ### Fixed

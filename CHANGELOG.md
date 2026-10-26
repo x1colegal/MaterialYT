@@ -2,6 +2,50 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.3] - 2026-10-26
+
+### Changed
+- Rebuild the native YT Music home from the actual WEB_REMIX sections, preserving category navigation, section titles, compact song rows, and horizontal album and playlist shelves.
+- Load additional YT Music home sections as the user reaches the end instead of stopping after the first two server-provided shelves.
+- Remove the nonfunctional YT Music category chip bar and render server carousels, including Continue playing, as horizontally scrollable shelves.
+- Keep YT Music focused on music by filtering video and UGC entries from Home, search, playlists, and Up Next queues.
+- Keep YT Music carousel cards at a stable height, remove the redundant Now playing label, expose playlist results in search, and allow failed home continuations to be retried.
+- Keep artist names directly below single-line carousel titles and hide YouTube's inaccessible Saved Shorts pseudo-playlist instead of exposing a permanently empty screen.
+- Report YT Music playback through authenticated WEB_REMIX tracking on `music.youtube.com` so listening activity can populate Continue hearing instead of being treated only as regular YouTube playback.
+- Load signed-in YouTube search history through YouTube's lightweight native suggestions service before using the hidden Google My Activity fallback.
+- Match the current YouTube web client's authenticated suggestion request for faster search-screen startup.
+
+### Added
+- Add a native Continue playing card backed by the active music session, replacing the old history-shaped continuation presentation.
+- Automatically play the next playlist video, or YouTube's first valid Up Next recommendation, after a visible five-second countdown.
+- Keep picture-in-picture black during the video autoplay countdown instead of rendering the full countdown UI inside PiP.
+- Advance immediately to the next playable YT Music playlist item, or the first valid music-only Up Next track outside a playlist, when playback ends.
+- Create public, unlisted, or private playlists from the signed-in Account playlist screen.
+- Save the current video to an existing account playlist directly from the player actions.
+- Save Shorts and YT Music tracks to an existing account playlist from their respective players.
+- Recognize authenticated library playlists as editable even when YouTube omits the legacy `isEditable` field, preserve their per-video removal tokens, and avoid treating unrelated Up Next recommendations as playlist contents.
+- Load the mobile-only Saved Shorts collection through authenticated Android and MWEB playlist surfaces when the desktop WEB client returns an empty `VLYS` page.
+- Delete owned playlists and remove individual videos when YouTube marks the playlist as editable.
+- Open YT Music playlists in a native track-list screen and play their songs through the YT Music player.
+
+### Fixed
+- Try direct WEB browse and authenticated WEB_REMIX playlist paths when a playlist exposes no videos through its standard `VL` browse response.
+- Use the YT Music `WEB_REMIX` queue for music autoplay instead of regular YouTube video recommendations.
+- Reset autoplayed and playlist videos to `00:00` instead of restoring the previous video's history position.
+- Keep generic search suggestions out of the signed-in search-history list.
+- Include the signed-in YT Music playlist library in the native Music home screen.
+- Parse the current `lockupViewModel` playlist rows used by Liked Videos, Saved Shorts, Watch Later and newly created playlists.
+- Send the current `playlistId` field when deleting an owned playlist instead of the rejected legacy field.
+- Allow Watch Later row removal when YouTube provides a membership token without exposing playlist deletion for system playlists.
+- Recognize account and system playlist IDs exposed through YouTube's current lockup renderers.
+- Follow playlist-specific continuation commands so playlist pages load their complete video list.
+- Fall back to the authenticated playlist page when a private playlist returns no usable videos through the initial Innertube browse response.
+- Parse `playlistVideoRenderer` entries as videos instead of accidentally treating and filtering them as nested playlist cards.
+- Keep recommendations out of playlist contents so saving one YT Music track does not appear to add unrelated songs.
+- Detect Shorts renderers inside playlists and open them with the native vertical Shorts player.
+- Hide the app navigation bar while playing a video opened from Account playlists.
+- Insert newly created playlists into the Account UI immediately without requiring a manual refresh.
+
 ## [3.2] - 2026-10-25
 
 ### Fixed

@@ -679,12 +679,12 @@ private fun AppScaffold(
                     activeVideoUrl = videoUrl
                     playerMode = true
                 }) { playerMode = it }
-                "YT Music" -> MusicScreen(activity, audioCodec, onPlayer, reopenMusicPlayer) { playerMode = it }
+                "YT Music" -> MusicScreen(activity, audioCodec, reopenMusicPlayer) { playerMode = it }
                 "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, {
                     activeVideoUrl = it
                     playerMode = true
                 }, loader = { YouTubeRepository.history() })
-                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer, { videoUrl ->
+                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer, { playerMode = it }, { videoUrl ->
                     activeVideoUrl = videoUrl
                     playerMode = true
                 }) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
@@ -1057,19 +1057,20 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
 }
 
 @Composable
-private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, onBack: (() -> Unit)? = null, loader: () -> List<FeedItem>) {
+private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, onBack: (() -> Unit)? = null, allowCreatePlaylist: Boolean = false, loader: () -> List<FeedItem>) {
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
+    var showCreatePlaylist by remember { mutableStateOf(false) }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { loader() }) }.onSuccess { feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } else Icon(icon, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(8.dp)); Text(title, Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); IconButton(onClick = { refreshKey++ }) { Icon(Icons.Default.Refresh, "Refresh") } }
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } else Icon(icon, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(8.dp)); Text(title, Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); if (allowCreatePlaylist) IconButton(onClick = { showCreatePlaylist = true }) { Icon(Icons.Default.PlaylistAdd, "Create playlist") }; IconButton(onClick = { refreshKey++ }) { Icon(Icons.Default.Refresh, "Refresh") } }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
@@ -1083,18 +1084,67 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         }
         }
     }
+    if (showCreatePlaylist) CreatePlaylistDialog(
+        onDismiss = { showCreatePlaylist = false },
+        onCreated = { id, name ->
+            val created = FeedItem(id, name, "Private playlist", "", 16, 9, "", "https://www.youtube.com/playlist?list=$id", playlist = true)
+            feed = listOf(created) + feed.filterNot { it.id == id }
+            showCreatePlaylist = false
+        },
+    )
 }
 
 @Composable
-private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, onPlayer: (ExoPlayer) -> Unit, reopenPlayerRequest: Int, onPlayerMode: (Boolean) -> Unit) {
+private fun CreatePlaylistDialog(onDismiss: () -> Unit, onCreated: (String, String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var title by remember { mutableStateOf("") }
+    var privacy by remember { mutableStateOf("PRIVATE") }
+    var working by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = { if (!working) onDismiss() },
+        title = { Text("Create playlist") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(title, { title = it }, label = { Text("Playlist name") }, singleLine = true)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("PRIVATE" to "Private", "UNLISTED" to "Unlisted", "PUBLIC" to "Public").forEach { (value, label) ->
+                        FilterChip(selected = privacy == value, onClick = { privacy = value }, label = { Text(label) })
+                    }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !working) { Text("Cancel") } },
+        confirmButton = {
+            Button(onClick = {
+                working = true; error = null
+                scope.launch {
+                    val cleanTitle = title.trim()
+                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.createPlaylist(cleanTitle, privacy) } }
+                        .onSuccess { id -> onCreated(id, cleanTitle) }
+                        .onFailure { error = it.message ?: "Could not create playlist" }
+                    working = false
+                }
+            }, enabled = title.isNotBlank() && !working) { Text(if (working) "Creating…" else "Create") }
+        },
+    )
+}
+
+@Composable
+private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, reopenPlayerRequest: Int, onPlayerMode: (Boolean) -> Unit) {
     val scope = rememberCoroutineScope()
     val initialContentFocus = remember { FocusRequester() }
     var query by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var homeTracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var musicHome by remember { mutableStateOf(MusicHomePage(emptyList(), emptyList())) }
     var selected by remember { mutableStateOf<FeedItem?>(null) }
+    var selectedPlaylist by remember { mutableStateOf<FeedItem?>(null) }
     var loading by remember { mutableStateOf(true) }
     var loadingMore by remember { mutableStateOf(false) }
+    var loadingHomeMore by remember { mutableStateOf(false) }
+    var homeContinuationError by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var searchOpen by remember { mutableStateOf(false) }
     val musicListState = rememberLazyListState()
@@ -1108,7 +1158,18 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
     }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { block() }) }.onSuccess { tracks = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false } }
-    LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) { runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.onSuccess { homeTracks = it; tracks = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false } else loading = false }
+    suspend fun loadHome(category: MusicCategory? = null) {
+        loading = true; error = null
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicHome(category) } }
+            .onSuccess { page ->
+                val normalized = page.copy(sections = page.sections.map { it.copy(items = originalMetadataItems(it.items)) })
+                musicHome = normalized
+                homeTracks = normalized.sections.flatMap { it.items }.distinctBy { it.id }
+                tracks = homeTracks
+            }.onFailure { if (!it.isExpectedCancellation()) error = it.message }
+        loading = false
+    }
+    LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) loadHome() else loading = false }
     fun loadMore() {
         if (query.isBlank() || loadingMore || tracks.isEmpty()) return
         loadingMore = true
@@ -1121,12 +1182,45 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
             loadingMore = false
         }
     }
-    if (selected != null) { MusicPlayer(activity, selected!!, audioCodec) { selected = null }; return }
+    fun loadMoreHome() {
+        if (loadingHomeMore || !musicHome.hasMore) return
+        loadingHomeMore = true
+        homeContinuationError = null
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicHomeContinuation() } }
+                .onSuccess { next ->
+                    val normalized = next.sections.map { it.copy(items = originalMetadataItems(it.items)) }
+                    musicHome = musicHome.copy(
+                        sections = (musicHome.sections + normalized).distinctBy { section -> section.title to section.items.firstOrNull()?.id },
+                        hasMore = next.hasMore,
+                    )
+                }.onFailure { if (!it.isExpectedCancellation()) homeContinuationError = it.message ?: "Could not load more music" }
+            loadingHomeMore = false
+        }
+    }
+    selected?.let { selectedTrack ->
+        MusicPlayer(
+            activity,
+            selectedTrack,
+            audioCodec,
+            onAutoplayTrack = { selected = it },
+            onBack = { selected = null },
+        )
+        return
+    }
+    selectedPlaylist?.let { playlist ->
+        MusicPlaylistScreen(activity, playlist, audioCodec, onPlayerMode) { selectedPlaylist = null }
+        return
+    }
     if (searchOpen) {
         DedicatedSearchScreen("Search YT Music", query, true, { searchOpen = false }) { requested ->
             query = requested
             searchOpen = false
             scrollMusicToTop()
+            // Do not render the still-cached Home shelves through the generic
+            // search layout while the network request is in flight. That made
+            // Continue Hearing briefly turn into synthetic Songs/Playlists.
+            tracks = emptyList()
             load { YouTubeRepository.musicSearch(requested) }
         }
         return
@@ -1151,17 +1245,34 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
             IconButton(onClick = {
                 query = ""
                 scope.launch {
-                    loading = true; error = null
-                    runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }
-                        .onSuccess { homeTracks = it; tracks = it }
-                        .onFailure { if (!it.isExpectedCancellation()) error = it.message }
-                    loading = false
+                    loadHome()
                 }
             }) { Icon(Icons.Default.Refresh, "Refresh") }
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+        if (query.isBlank() && musicHome.sections.isNotEmpty()) {
+            LaunchedEffect(musicListState, musicHome.sections.size, musicHome.hasMore) {
+                snapshotFlow { musicListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+                    if (last >= musicHome.sections.lastIndex - 1) loadMoreHome()
+                }
+            }
+            LazyColumn(state = musicListState, contentPadding = PaddingValues(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                items(musicHome.sections, key = { "section-${it.title}-${it.items.firstOrNull()?.id}" }) { section ->
+                    MusicHomeSectionView(section, tablet, { selected = it }, { selectedPlaylist = it })
+                }
+                if (loadingHomeMore) item { Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
+                if (homeContinuationError != null) item {
+                    Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
+                        TextButton(onClick = { loadMoreHome() }) { Text("Retry loading more") }
+                    }
+                }
+            }
+            return@Column
+        }
+        val musicPlaylists = tracks.filter { it.playlist }
+        val musicSongs = tracks.filterNot { it.playlist || it.channel }
         if (tablet) {
             LaunchedEffect(musicGridState, tracks.size, query) {
                 snapshotFlow { musicGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
@@ -1176,7 +1287,10 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                gridItems(tracks) { track -> FeedRow(track) { selected = track } }
+                if (musicPlaylists.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
+                    MusicCollectionShelf(musicPlaylists, cardWidth = 184.dp) { selectedPlaylist = it }
+                }
+                gridItems(musicSongs) { track -> MusicTrackRow(track) { selected = track } }
                 if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         } else {
@@ -1185,8 +1299,10 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
                     if (query.isNotBlank() && tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMore()
                 }
             }
-            LazyColumn(state = musicListState) {
-                items(tracks) { track -> FeedRow(track) { selected = track } }
+            LazyColumn(state = musicListState, contentPadding = PaddingValues(bottom = 16.dp)) {
+                if (musicPlaylists.isNotEmpty()) item { MusicCollectionShelf(musicPlaylists, cardWidth = 148.dp) { selectedPlaylist = it } }
+                if (musicSongs.isNotEmpty()) item { Text("Songs", Modifier.padding(horizontal = 16.dp, vertical = 12.dp), style = MaterialTheme.typography.titleLarge) }
+                items(musicSongs, key = { "music-${it.id}" }) { track -> MusicTrackRow(track) { selected = track } }
                 if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         }
@@ -1194,15 +1310,178 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, on
 }
 
 @Composable
-private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec: AudioCodecChoice, onBack: () -> Unit) {
+private fun MusicHomeSectionView(section: MusicHomeSection, tablet: Boolean, onTrack: (FeedItem) -> Unit, onPlaylist: (FeedItem) -> Unit) {
+    val scope = rememberCoroutineScope()
+    val rowState = rememberLazyListState()
+    var visibleItems by remember(section.title) { mutableStateOf(section.items) }
+    var continuation by remember(section.title) { mutableStateOf(section.continuation) }
+    var loadingMore by remember(section.title) { mutableStateOf(false) }
+    LaunchedEffect(section.items, section.continuation) {
+        visibleItems = section.items
+        continuation = section.continuation
+        loadingMore = false
+    }
+    Column(Modifier.fillMaxWidth()) {
+        if (section.strapline.isNotBlank()) Text(section.strapline.uppercase(), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(section.title, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        val horizontalSongs = section.horizontal || section.title.contains("continue", true) || section.title.contains("listen again", true) || section.title.contains("quick picks", true)
+        val collections = section.items.count { it.playlist || it.channel } >= section.items.size / 2
+        if (collections || horizontalSongs) {
+            LaunchedEffect(rowState, visibleItems.size, continuation) {
+                snapshotFlow { rowState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+                    val token = continuation
+                    if (token != null && !loadingMore && last >= visibleItems.lastIndex - 2) {
+                        loadingMore = true
+                        scope.launch {
+                            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicSectionContinuation(token) } }
+                                .onSuccess { page ->
+                                    visibleItems = (visibleItems + page.items).distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+                                    continuation = page.continuation
+                                }
+                                .onFailure { AppLog.failure("music shelf continuation title=${section.title}", it) }
+                            loadingMore = false
+                        }
+                    }
+                }
+            }
+            LazyRow(state = rowState, contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                items(visibleItems, key = { "${section.title}-${it.id}" }) { item ->
+                    val width = if (tablet) 208.dp else 168.dp
+                    Column(Modifier.width(width).clickable { if (item.playlist) onPlaylist(item) else onTrack(item) }) {
+                        AsyncImage(
+                            item.thumbnail,
+                            null,
+                            Modifier.fillMaxWidth().aspectRatio(1f)
+                                .clip(if (item.channel) CircleShape else RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
+                            contentScale = ContentScale.Crop,
+                        )
+                        Text(item.title, Modifier.padding(top = 8.dp).height(24.dp).autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
+                        Text(item.subtitle, Modifier.height(20.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                if (loadingMore) item { Box(Modifier.width(72.dp).height(184.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
+            }
+        } else section.items.take(if (tablet) 12 else 8).forEach { item -> MusicTrackRow(item) { onTrack(item) } }
+    }
+}
+
+@Composable
+private fun MusicCollectionShelf(items: List<FeedItem>, cardWidth: androidx.compose.ui.unit.Dp, onClick: (FeedItem) -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        Text("Playlists", Modifier.padding(horizontal = 16.dp, vertical = 10.dp), style = MaterialTheme.typography.titleLarge)
+        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(items, key = { "music-playlist-${it.id}" }) { item ->
+                Column(Modifier.width(cardWidth).clickable { onClick(item) }) {
+                    AsyncImage(
+                        item.thumbnail,
+                        null,
+                        Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentScale = ContentScale.Crop,
+                    )
+                    Text(item.title, Modifier.padding(top = 8.dp).height(24.dp).autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
+                    Text(item.subtitle, Modifier.height(20.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+}
+
+@Composable
+private fun MusicTrackRow(item: FeedItem, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AsyncImage(item.thumbnail, null, Modifier.size(64.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
+        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+            Text(item.title, Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleMedium)
+            Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Icon(Icons.Default.PlayArrow, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun MusicPlaylistScreen(activity: MainActivity, playlist: FeedItem, preferredCodec: AudioCodecChoice, onPlayerMode: (Boolean) -> Unit, onBack: () -> Unit) {
+    var tracks by remember(playlist.id) { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var selected by remember(playlist.id) { mutableStateOf<FeedItem?>(null) }
+    var loading by remember(playlist.id) { mutableStateOf(true) }
+    var error by remember(playlist.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(playlist.id) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicPlaylistVideos(playlist.id) } }
+            .onSuccess { tracks = it }
+            .onFailure { error = it.message ?: "Could not load playlist" }
+        loading = false
+    }
+    LaunchedEffect(selected) { onPlayerMode(selected != null) }
+    selected?.let { track ->
+        val currentIndex = tracks.indexOfFirst { it.id == track.id }
+        MusicPlayer(
+            activity,
+            track,
+            preferredCodec,
+            queue = tracks,
+            queueIndex = currentIndex,
+            onQueueIndex = { index -> tracks.getOrNull(index)?.let { selected = it } },
+            onAutoplayTrack = { next ->
+                val queued = tracks.firstOrNull { it.id == next.id }
+                selected = queued ?: next
+            },
+        ) { selected = null }
+        return
+    }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back to YT Music") }
+            Column(Modifier.weight(1f)) {
+                Text(playlist.title, style = MaterialTheme.typography.headlineSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${tracks.size} tracks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (tracks.isNotEmpty()) FilledTonalButton(onClick = { selected = tracks.first() }) {
+                Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Play")
+            }
+        }
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
+            items(tracks, key = { it.id }) { track ->
+                Row(Modifier.fillMaxWidth().clickable { selected = track }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AsyncImage(track.thumbnail, null, Modifier.size(72.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
+                    Column(Modifier.padding(start = 14.dp).weight(1f)) {
+                        Text(track.title, Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleMedium)
+                        Text(track.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Icon(Icons.Default.PlayArrow, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MusicPlayer(
+    activity: MainActivity,
+    track: FeedItem,
+    preferredCodec: AudioCodecChoice,
+    queue: List<FeedItem> = emptyList(),
+    queueIndex: Int = -1,
+    onQueueIndex: (Int) -> Unit = {},
+    onAutoplayTrack: (FeedItem) -> Unit = {},
+    onBack: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
     var showLyrics by remember { mutableStateOf(false) }
     var showComments by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showSavePlaylist by remember(track.id) { mutableStateOf(false) }
     
     var lyrics by remember { mutableStateOf<List<LyricLine>?>(null) }
     var lyricsError by remember { mutableStateOf<String?>(null) }
     var interactions by remember(track.id) { mutableStateOf(VideoInteractionState()) }
+    var musicAutoplayNext by remember(track.id) { mutableStateOf<FeedItem?>(null) }
     var interactionBusy by remember(track.id) { mutableStateOf(false) }
     var comments by remember(track.id) { mutableStateOf<List<VideoComment>>(emptyList()) }
     var commentsContinuation by remember(track.id) { mutableStateOf<String?>(null) }
@@ -1218,6 +1497,8 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     val playing = AutoMusicService.playing.value
     val audioTracks = AutoMusicService.availableAudioTracks.value
     val selectedAudioTrack = AutoMusicService.selectedAudioTrack.value
+    val playbackEndedGeneration = AutoMusicService.playbackEndedGeneration.intValue
+    var observedPlaybackEnd by remember(track.id) { mutableIntStateOf(playbackEndedGeneration) }
     val musicLoadStatus by PlaybackLoadStatus.message.collectAsState()
     val musicLoadMessage = musicLoadStatus?.takeIf { it.mediaId == track.id }?.text
     BackHandler { onBack() }
@@ -1232,6 +1513,27 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
     LaunchedEffect(track.id, preferredCodec) {
         if (AutoMusicService.nowPlaying.value?.id != track.id || (!AutoMusicService.playing.value && AutoMusicService.position.longValue == 0L)) {
             AutoMusicService.play(activity, track, preferredCodec)
+        }
+    }
+    LaunchedEffect(track.id) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicUpNext(track.id) } }
+            .onSuccess {
+                musicAutoplayNext = it
+                AppLog.event("music up next video=${track.id} next=${it?.id ?: "none"}")
+            }
+            .onFailure { AppLog.failure("music up next video=${track.id}", it) }
+    }
+    LaunchedEffect(playbackEndedGeneration, track.id, queueIndex, queue.size, musicAutoplayNext?.id) {
+        if (playbackEndedGeneration <= observedPlaybackEnd) return@LaunchedEffect
+        if (AutoMusicService.nowPlaying.value?.id != track.id) return@LaunchedEffect
+        if (queueIndex in 0 until queue.lastIndex) {
+            observedPlaybackEnd = playbackEndedGeneration
+            onQueueIndex(queueIndex + 1)
+        } else if (musicAutoplayNext != null) {
+            observedPlaybackEnd = playbackEndedGeneration
+            onAutoplayTrack(musicAutoplayNext!!)
+        } else if (queue.isNotEmpty()) {
+            observedPlaybackEnd = playbackEndedGeneration
         }
     }
     LaunchedEffect(track.id) {
@@ -1305,12 +1607,15 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onBack, modifier = Modifier.offset(y = (-12).dp)) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
-                Text("Now playing", Modifier.weight(1f).offset(y = (-12).dp), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.weight(1f))
                 IconButton(onClick = { rate(VideoRating.LIKE) }, enabled = !interactionBusy, modifier = Modifier.offset(y = (-12).dp)) {
                     Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
                 }
                 IconButton(onClick = { rate(VideoRating.DISLIKE) }, enabled = !interactionBusy, modifier = Modifier.offset(y = (-12).dp)) {
                     Icon(Icons.Default.ThumbDown, "Dislike", tint = if (interactions.rating == VideoRating.DISLIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
+                }
+                IconButton(onClick = { showSavePlaylist = true }, modifier = Modifier.offset(y = (-12).dp)) {
+                    Icon(Icons.Default.PlaylistAdd, "Save to playlist", tint = ComposeColor.White)
                 }
                 IconButton(onClick = { showSettings = true }, modifier = Modifier.offset(y = (-12).dp)) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
             }
@@ -1321,7 +1626,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                             AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
-                        Spacer(Modifier.height(18.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(18.dp)); Text(track.title, Modifier.fillMaxWidth().autoMarquee(), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 1, softWrap = false, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(14.dp))
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
@@ -1388,7 +1693,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
                             AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
-                        Spacer(Modifier.height(22.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(22.dp)); Text(track.title, Modifier.fillMaxWidth().autoMarquee(), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 1, softWrap = false, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
                             drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)
@@ -1414,6 +1719,7 @@ private fun MusicPlayer(activity: MainActivity, track: FeedItem, preferredCodec:
             }
         }
     }
+    if (showSavePlaylist) SaveVideoToPlaylistDialog(track.id) { showSavePlaylist = false }
     if (showSettings) AlertDialog(
         onDismissRequest = { showSettings = false },
         confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } },
@@ -1471,6 +1777,39 @@ private fun PlaybackLoadingStatus(message: String, modifier: Modifier = Modifier
         color = ComposeColor.White,
         style = MaterialTheme.typography.labelMedium,
     )
+}
+
+@Composable
+private fun AutoplayCountdownOverlay(next: FeedItem, seconds: Int, onCancel: () -> Unit, modifier: Modifier = Modifier) {
+    Box(modifier.background(ComposeColor.Black.copy(alpha = .88f))) {
+        LinearProgressIndicator(
+            progress = { ((5 - seconds).coerceIn(0, 5) / 5f) },
+            modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+            color = ComposeColor.White,
+            trackColor = ComposeColor.White.copy(alpha = .25f),
+        )
+        Row(
+            Modifier.align(Alignment.Center).fillMaxWidth().padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            if (next.thumbnail.isNotBlank()) {
+                AsyncImage(
+                    next.thumbnail,
+                    null,
+                    Modifier.width(128.dp).aspectRatio(16f / 9f),
+                    contentScale = ContentScale.Crop,
+                )
+                Spacer(Modifier.width(16.dp))
+            }
+            Column(Modifier.weight(1f, fill = false).widthIn(max = 360.dp)) {
+                Text("Up next in $seconds", color = ComposeColor.White, style = MaterialTheme.typography.titleMedium)
+                Text(next.title, color = ComposeColor.White, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (next.subtitle.isNotBlank()) Text(next.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                TextButton(onClick = onCancel, contentPadding = PaddingValues(horizontal = 0.dp)) { Text("Cancel autoplay", color = ComposeColor.White) }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1568,7 +1907,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
-                Text("Now playing", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.weight(1f))
             }
             Crossfade(showLyrics, label = "player page", modifier = Modifier.weight(1f)) { lyricsPage ->
                 if (lyricsPage) {
@@ -1579,7 +1918,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
                 } else {
                     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                         AsyncImage(track.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(track.thumbnailWidth.toFloat() / track.thumbnailHeight.coerceAtLeast(1)).clip(RoundedCornerShape(20.dp)), contentScale = ContentScale.Crop)
-                        Spacer(Modifier.height(24.dp)); Text(track.title, color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.height(24.dp)); Text(track.title, Modifier.fillMaxWidth().autoMarquee(), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 1, softWrap = false); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         AnimatedVisibility(error != null, enter = fadeIn(), exit = fadeOut()) { Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp)) }
                         val duration = player.duration.takeIf { it > 0 } ?: 0L
                         Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
@@ -1910,23 +2249,31 @@ private fun ResultRow(item: InfoItem, showSubtitle: Boolean = true, click: () ->
 
 @Composable
 private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit = {}, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val playlistId = remember(url) { (Regex("[?&]list=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')).removePrefix("VL") }
     var playlist by remember { mutableStateOf<org.schabi.newpipe.extractor.playlist.PlaylistInfo?>(null) }
     var playlistItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var editable by remember { mutableStateOf(false) }
+    var deletable by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
+    var pendingRemoval by remember { mutableStateOf<FeedItem?>(null) }
+    var removing by remember { mutableStateOf(false) }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     LaunchedEffect(url) {
-        val id = (Regex("[?&]list=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')).removePrefix("VL")
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistVideos(id) } }
-            .onSuccess { playlistItems = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistPage(playlistId) } }
+            .onSuccess { page -> playlistItems = page.items; editable = page.editable; deletable = page.deletable }
+            .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
         loading = false
-        runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.playlist.PlaylistInfo.getInfo("https://www.youtube.com/playlist?list=$id") } }
+        runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.playlist.PlaylistInfo.getInfo("https://www.youtube.com/playlist?list=$playlistId") } }
             .onSuccess { playlist = it }
     }
     Box(Modifier.fillMaxSize()) {
       Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Playlist", style = MaterialTheme.typography.headlineMedium) }
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Playlist", Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); if (deletable) IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "Delete playlist") } }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
         if (!loading && tablet) Row(Modifier.weight(1f).fillMaxWidth()) {
@@ -1955,6 +2302,7 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
                             Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                             Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist") }
                     }
                 }
             }
@@ -1965,19 +2313,59 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
                 Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodyMedium)
                 if (playlistItems.isNotEmpty()) Button(onClick = { selectedIndex = 0 }, Modifier.fillMaxWidth()) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play") }
             } }
-            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) } } }
+            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) }; if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist") } } }
         }
       }
       selectedIndex?.let { selected ->
         if (playlistItems.isNotEmpty()) {
             val index = selected.coerceIn(0, playlistItems.lastIndex)
-            VideoScreen(activity, playlistItems[index].url, codec, audioCodec, quality, onPlayer, playlistItems, index, { selectedIndex = it }, onPlayerMode = onPlayerMode) {
-                selectedIndex = null
-                onPlayerMode(false)
+            val selectedItem = playlistItems[index]
+            if (selectedItem.short) {
+                LaunchedEffect(index) { onPlayerMode(true) }
+                BackHandler { selectedIndex = null; onPlayerMode(false) }
+                Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+                    ShortPlayer(activity, selectedItem, true, codec, audioCodec, quality, onPlayer, onOpenChannel = {})
+                    IconButton(onClick = { selectedIndex = null; onPlayerMode(false) }, modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(8.dp)) {
+                        Icon(Icons.Default.ArrowBack, "Back to playlist", tint = ComposeColor.White)
+                    }
+                }
+            } else VideoScreen(activity, selectedItem.url, codec, audioCodec, quality, onPlayer, playlistItems, index, { selectedIndex = it }, onPlayerMode = onPlayerMode) {
+                    selectedIndex = null
+                    onPlayerMode(false)
+                }
             }
         }
-      }
     }
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { if (!deleting) confirmDelete = false },
+        title = { Text("Delete playlist?") },
+        text = { Text("This playlist will be permanently deleted from your YouTube account.") },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }, enabled = !deleting) { Text("Cancel") } },
+        confirmButton = { Button(onClick = {
+            deleting = true
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.deletePlaylist(playlistId) } }
+                    .onSuccess { confirmDelete = false; onBack() }
+                    .onFailure { error = it.message ?: "Could not delete playlist"; confirmDelete = false }
+                deleting = false
+            }
+        }, enabled = !deleting, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text(if (deleting) "Deleting…" else "Delete") } },
+    )
+    pendingRemoval?.let { item -> AlertDialog(
+        onDismissRequest = { if (!removing) pendingRemoval = null },
+        title = { Text("Remove video?") },
+        text = { Text("Remove “${item.title}” from this playlist?") },
+        dismissButton = { TextButton(onClick = { pendingRemoval = null }, enabled = !removing) { Text("Cancel") } },
+        confirmButton = { Button(onClick = {
+            removing = true
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.removeVideoFromPlaylist(playlistId, item.setVideoId) } }
+                    .onSuccess { playlistItems = playlistItems.filterNot { it.setVideoId == item.setVideoId }; pendingRemoval = null }
+                    .onFailure { error = it.message ?: "Could not remove video"; pendingRemoval = null }
+                removing = false
+            }
+        }, enabled = !removing, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text(if (removing) "Removing…" else "Remove") } },
+    ) }
 }
 
 @Composable
@@ -2283,6 +2671,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     
     var showComments by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showSavePlaylist by remember(item.id) { mutableStateOf(false) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
     var hasStartedPlayback by remember(item.id) { mutableStateOf(false) }
     var shortLoadMessage by remember(item.id) { mutableStateOf<String?>(null) }
@@ -2557,6 +2946,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     IconButton(onClick = {
                         showComments = true
                     }) { Icon(Icons.Default.Comment, "Comments", tint = ComposeColor.White) }
+                    IconButton(onClick = { showSavePlaylist = true }) { Icon(Icons.Default.PlaylistAdd, "Save to playlist", tint = ComposeColor.White) }
                     IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
                 }
             }
@@ -2607,6 +2997,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         }
     }
     if (showComments) VideoCommentsSheet(item.id) { showComments = false }
+    if (showSavePlaylist) SaveVideoToPlaylistDialog(item.id) { showSavePlaylist = false }
     if (showSettings) AlertDialog(onDismissRequest = { showSettings = false }, confirmButton = { TextButton(onClick = { showSettings = false }) { Text("Done") } }, title = { Text("Playback settings") }, text = {
         Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState())) {
             Text("Speed", style = MaterialTheme.typography.titleMedium)
@@ -2629,11 +3020,65 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 }
 
 @Composable
+private fun SaveVideoToPlaylistDialog(videoId: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var playlists by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var savingId by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.library().filter { it.playlist } } }
+            .onSuccess { playlists = it }
+            .onFailure { error = it.message ?: "Could not load playlists" }
+        loading = false
+    }
+    AlertDialog(
+        onDismissRequest = { if (savingId == null) onDismiss() },
+        title = { Text("Save to playlist") },
+        text = {
+            Column {
+                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp)) }
+                if (!loading && playlists.isEmpty() && error == null) Text("No playlists found. Create one from Account → Playlists.")
+                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    items(playlists, key = { it.id }) { playlist ->
+                        ListItem(
+                            headlineContent = { Text(playlist.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            supportingContent = { playlist.subtitle.takeIf(String::isNotBlank)?.let { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) } },
+                            leadingContent = {
+                                if (playlist.thumbnail.isNotBlank()) AsyncImage(playlist.thumbnail, null, Modifier.size(56.dp), contentScale = ContentScale.Crop)
+                                else Icon(Icons.Default.PlaylistPlay, null)
+                            },
+                            trailingContent = { if (savingId == playlist.id) CircularProgressIndicator(Modifier.size(24.dp)) },
+                            modifier = Modifier.clickable(enabled = savingId == null) {
+                                savingId = playlist.id; error = null
+                                scope.launch {
+                                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.addVideoToPlaylist(playlist.id, videoId) } }
+                                        .onSuccess {
+                                            android.widget.Toast.makeText(context, "Saved to ${playlist.title}", android.widget.Toast.LENGTH_SHORT).show()
+                                            onDismiss()
+                                        }
+                                        .onFailure { error = it.message ?: "Could not save video" }
+                                    savingId = null
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss, enabled = savingId == null) { Text("Close") } },
+    )
+}
+
+@Composable
 private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onOpenChannel: ((String) -> Unit)? = null, onOpenVideo: ((String) -> Unit)? = null, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
     val requestedStartMs = Regex("[?&]t=(\\d+)").find(url)?.groupValues?.getOrNull(1)?.toLongOrNull()?.times(1_000L) ?: 0L
+    val autoplayRequest = Regex("[?&]autoplay=1(?:&|$)").containsMatchIn(url)
     var resumeStartMs by remember(videoId, requestedStartMs) { mutableLongStateOf(requestedStartMs) }
     var info by remember { mutableStateOf<StreamInfo?>(null) }
     var videoMetadata by remember(videoId) { mutableStateOf(YouTubeRepository.videoDetails(videoId)) }
@@ -2664,6 +3109,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var playerDuration by remember { mutableLongStateOf(0L) }
     var showPlayerSettings by remember { mutableStateOf(false) }
     var showVideoDetails by remember { mutableStateOf(false) }
+    var showSavePlaylist by remember(videoId) { mutableStateOf(false) }
     var phonePanel by remember(videoId) { mutableStateOf(VideoPhonePanel.MAIN) }
     var fullscreen by remember { mutableStateOf(false) }
     var speed by remember { mutableFloatStateOf(1f) }
@@ -2676,6 +3122,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var miniplayerDismissed by remember { mutableStateOf(false) }
     var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(true) }
+    var autoplayPending by remember(videoId) { mutableStateOf(false) }
+    var autoplaySeconds by remember(videoId) { mutableIntStateOf(5) }
     fun stableMetadata(latest: VideoDetails?): VideoDetails? {
         latest ?: return videoMetadata
         val current = videoMetadata ?: return latest
@@ -2753,7 +3201,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == videoId) {
                     PlaybackLoadStatus.show(videoId, "Buffering media…")
                 }
-                if (state == Player.STATE_ENDED && playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1)
+                if (state == Player.STATE_ENDED) autoplayPending = true
                 mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
                     .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO)
                     .setState(if (player.isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED, player.currentPosition.coerceAtLeast(0L), if (player.isPlaying) 1f else 0f).build())
@@ -2814,6 +3262,24 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             player.removeListener(listener)
             player.release()
         }
+    }
+    val autoplayNext = if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) {
+        playlistItems[playlistIndex + 1]
+    } else {
+        interactions.related.firstOrNull { it.id.isNotBlank() && it.id != videoId && !it.channel && !it.playlist }
+    }
+    LaunchedEffect(autoplayPending, autoplayNext?.id) {
+        val next = autoplayNext ?: return@LaunchedEffect
+        if (!autoplayPending) return@LaunchedEffect
+        autoplaySeconds = 5
+        while (autoplaySeconds > 0 && autoplayPending) {
+            delay(1_000L)
+            if (autoplayPending) autoplaySeconds--
+        }
+        if (!autoplayPending) return@LaunchedEffect
+        autoplayPending = false
+        if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1)
+        else onOpenVideo?.invoke(next.url + if ('?' in next.url) "&autoplay=1" else "?autoplay=1")
     }
     BackHandler {
         if (fullscreen) {
@@ -2877,7 +3343,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
     LaunchedEffect(url, codec, audioCodec, quality) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
-        resumeStartMs = if (requestedStartMs > 0L || !YouTubeRepository.signedIn()) requestedStartMs else {
+        resumeStartMs = if (playlistIndex >= 0 || autoplayRequest) 0L else if (requestedStartMs > 0L || !YouTubeRepository.signedIn()) requestedStartMs else {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.historyResumePosition(videoId) } }
                 .onFailure { AppLog.failure("history resume lookup video=$videoId", it) }
                 .getOrDefault(0L)
@@ -3219,6 +3685,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     activity.visiblePlayerView(it)
                 }
             )
+            if (autoplayPending && autoplayNext != null) Box(Modifier.matchParentSize().background(ComposeColor.Black))
         }
     } else if (fullscreen) {
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
@@ -3230,6 +3697,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             if (!hasStartedPlayback) videoLoadMessage?.let { message ->
                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
             }
+            if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
             AnimatedVisibility(controllerVisible, modifier = Modifier.align(Alignment.TopCenter)) { Row(
                 Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 2.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -3252,6 +3720,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             if (!hasStartedPlayback) videoLoadMessage?.let { message ->
                                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                             }
+                            if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                         }
                         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = { isMinimized = true }) { Icon(Icons.Default.ArrowBack, "Back") }
@@ -3279,6 +3748,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             item { VideoActionButton(Icons.Default.ThumbUp, interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "Like" } }, interactions.rating == VideoRating.LIKE, !interactionBusy) { updateRating(VideoRating.LIKE) } }
                             item { VideoActionButton(Icons.Default.ThumbDown, "Dislike", interactions.rating == VideoRating.DISLIKE, !interactionBusy) { updateRating(VideoRating.DISLIKE) } }
                             item { VideoActionButton(Icons.Default.Share, "Share") { shareVideoLink(context, "https://youtu.be/$videoId") } }
+                            item { VideoActionButton(Icons.Default.PlaylistAdd, "Save") { showSavePlaylist = true } }
                         }
                         HorizontalDivider()
                         Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) {
@@ -3388,6 +3858,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                         AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
                         if (!hasStartedPlayback) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
+                        if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                     }
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { if (phonePanel == VideoPhonePanel.MAIN) isMinimized = true else phonePanel = VideoPhonePanel.MAIN }) { Icon(Icons.Default.ArrowBack, "Back") }
@@ -3455,6 +3926,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                 item { VideoActionButton(Icons.Default.ThumbUp, interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "Like" } }, interactions.rating == VideoRating.LIKE, !interactionBusy) { updateRating(VideoRating.LIKE) } }
                                 item { VideoActionButton(Icons.Default.ThumbDown, "Dislike", interactions.rating == VideoRating.DISLIKE, !interactionBusy) { updateRating(VideoRating.DISLIKE) } }
                                 item { VideoActionButton(Icons.Default.Share, "Share") { shareVideoLink(context, "https://youtu.be/$videoId") } }
+                                item { VideoActionButton(Icons.Default.PlaylistAdd, "Save") { showSavePlaylist = true } }
                             }
                             HorizontalDivider()
                             Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) { val target = info?.uploaderUrl ?: videoMetadata?.authorUrl; if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) } }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -3567,6 +4039,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
         }
     )
+    if (showSavePlaylist) SaveVideoToPlaylistDialog(videoId) { showSavePlaylist = false }
     if (showPlayerSettings) AlertDialog(onDismissRequest = { showPlayerSettings = false }, confirmButton = { TextButton(onClick = { showPlayerSettings = false }) { Text("Done") } }, title = { Text("Playback settings") }, text = {
         Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
             Text("Speed", style = MaterialTheme.typography.titleMedium)
@@ -3631,13 +4104,13 @@ private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCo
 }
 
 @Composable
-private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onAuth: (Boolean) -> Unit) {
+private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, onAuth: (Boolean) -> Unit) {
     var destination by remember { mutableStateOf("account") }
     var signedIn by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     var playbackBackend by remember { mutableStateOf(PlaybackBackendPreferences.backend) }
     if (destination == "login") { LoginScreen({ destination = "account" }) { signedIn = true; onAuth(true); destination = "account" }; return }
     if (destination == "your_account") { OwnAccountScreen(activity, codec, audioCodec, quality, onPlayer, openVideo) { destination = "account" }; return }
-    if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, {}, openVideo, onBack = { destination = "account" }) { YouTubeRepository.library() }; return }
+    if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, onPlayerMode, openVideo, onBack = { destination = "account" }, allowCreatePlaylist = true) { YouTubeRepository.library() }; return }
     if (destination == "account") {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item { Text("Account", style = MaterialTheme.typography.headlineMedium) }

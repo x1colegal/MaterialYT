@@ -28,7 +28,11 @@ import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlin.math.roundToInt
 
-data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L)
+data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L, val short: Boolean = false, val setVideoId: String = "", val musicVideo: Boolean = false)
+data class MusicCategory(val title: String, val browseId: String, val params: String = "")
+data class MusicHomeSection(val title: String, val strapline: String = "", val items: List<FeedItem>, val horizontal: Boolean = false, val continuation: String? = null)
+data class MusicHomePage(val categories: List<MusicCategory>, val sections: List<MusicHomeSection>, val hasMore: Boolean = false)
+data class PlaylistPage(val items: List<FeedItem>, val editable: Boolean, val deletable: Boolean)
 data class CanonicalVideoMetadata(val title: String, val author: String)
 data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null)
 data class SabrFormat(
@@ -103,9 +107,13 @@ data class VideoCommentPage(
 )
 
 object YouTubeRepository {
+    private fun audioOnlyMusicItems(items: List<FeedItem>): List<FeedItem> =
+        items.filter { it.playlist || it.channel || !it.musicVideo }
+
     const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
     const val WEB_PLAYER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     const val VISIONOS_UA = "com.google.visionosyoutube/1.03 (RealityDevice17,1; U; CPU visionOS 26_6_1 like Mac OS X; en_US) gzip"
+    private const val YOUTUBE_SUGGEST_EXPERIMENTS = "ytzpb5_e2,ytpo.bo.lqp.elu=1,ytpo.bo.lqp.ecsc=1,ytpo.bo.lqp.mcsc=3,ytpo.bo.lqp.mec=1,ytpo.bo.lqp.rw=0.8,ytpo.bo.lqp.fw=0.2,ytpo.bo.lqp.szp=1,ytpo.bo.lqp.mz=3,ytpo.bo.lqp.al=en_us,ytpo.bo.lqp.zrm=1,ytpo.bo.lqp.er=1,ytpo.bo.ro.erl=1,ytpo.bo.ro.mlus=3,ytpo.bo.ro.erls=3,ytpo.bo.qfo.mlus=3,ytzprp.ppp.e=1,ytzprp.ppp.st=772,ytzprp.ppp.p=5"
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val clientVersions = mutableMapOf<String, String>()
@@ -115,6 +123,7 @@ object YouTubeRepository {
     private val feedGeneration = AtomicLong(0L)
     private val sessionOwnedCommentIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val sessionOwnedCommentAuthors = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val accountPlaylistIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     @Volatile private var signedInCommentChannelId: String? = null
     private val activeFeedCall = AtomicReference<Call?>(null)
     private val playerJavaScriptCache = mutableMapOf<String, String>()
@@ -193,6 +202,8 @@ object YouTubeRepository {
     @Volatile private var shortsToken: String? = null
     @Volatile private var shortsTokenIsContinuation = false
     @Volatile private var musicHomeToken: String? = null
+    @Volatile private var musicHomeRadioSeed: String? = null
+    @Volatile private var musicHomeRadioMode = false
     @Volatile private var musicSearchToken: String? = null
     @Volatile private var activeMusicQuery: String? = null
     private val homeSeenIds = linkedSetOf<String>()
@@ -429,20 +440,208 @@ object YouTubeRepository {
         return feed("your videos", "$origin/channel/$channelId/videos")
     }
     fun library(): List<FeedItem> = feed("playlists", "https://www.youtube.com/feed/playlists")
-    fun playlistVideos(playlistId: String): List<FeedItem> {
+        .filterNot { it.playlist && it.id.removePrefix("VL") == "YS" }
+        .also { items ->
+        accountPlaylistIds.clear()
+        accountPlaylistIds.addAll(items.filter { it.playlist }.map { it.id.removePrefix("VL") })
+        AppLog.event("playlist library ${items.joinToString(" | ") { "${it.title}=${it.id}" }}")
+    }
+
+    fun createPlaylist(title: String, privacy: String = "PRIVATE"): String {
+        require(signedIn()) { "Sign in again to create playlists" }
+        require(title.isNotBlank()) { "Enter a playlist name" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val response = post("$origin/youtubei/v1/playlist/create?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB", bootstrap.version))
+            .put("title", title.trim())
+            .put("privacyStatus", privacy), origin)
+        return response.optString("playlistId").takeIf(String::isNotBlank)
+            ?: findString(response, "playlistId")
+            ?: error("YouTube did not return the new playlist")
+    }
+
+    fun addVideoToPlaylist(playlistId: String, videoId: String) {
+        require(signedIn()) { "Sign in again to save videos" }
+        require(videoId.length == 11) { "Invalid video" }
+        val normalizedId = playlistId.removePrefix("VL")
+        require(normalizedId.isNotBlank()) { "Invalid playlist" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        post("$origin/youtubei/v1/browse/edit_playlist?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB", bootstrap.version))
+            .put("playlistId", normalizedId)
+            .put("actions", JSONArray().put(JSONObject()
+                .put("action", "ACTION_ADD_VIDEO")
+                .put("addedVideoId", videoId))), origin)
+    }
+
+    fun deletePlaylist(playlistId: String) {
+        require(signedIn()) { "Sign in again to delete playlists" }
+        val normalizedId = playlistId.removePrefix("VL")
+        require(normalizedId.isNotBlank()) { "Invalid playlist" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        post("$origin/youtubei/v1/playlist/delete?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB", bootstrap.version))
+            .put("playlistId", normalizedId), origin)
+    }
+
+    fun removeVideoFromPlaylist(playlistId: String, setVideoId: String) {
+        require(signedIn()) { "Sign in again to edit playlists" }
+        val normalizedId = playlistId.removePrefix("VL")
+        require(normalizedId.isNotBlank() && setVideoId.isNotBlank()) { "YouTube did not provide permission to remove this video" }
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        post("$origin/youtubei/v1/browse/edit_playlist?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB", bootstrap.version))
+            .put("playlistId", normalizedId)
+            .put("actions", JSONArray().put(JSONObject()
+                .put("action", "ACTION_REMOVE_VIDEO")
+                .put("setVideoId", setVideoId))), origin)
+    }
+
+    fun playlistVideos(playlistId: String): List<FeedItem> = playlistPage(playlistId).items
+
+    fun playlistPage(playlistId: String): PlaylistPage {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
         val normalizedId = playlistId.removePrefix("VL")
         var page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "VL$normalizedId"), origin)
-        val items = parseItems(page).filterNot { it.playlist }.toMutableList()
+        var editable = findBoolean(page, "isEditable") == true || normalizedId in accountPlaylistIds
+        var deletable = editable && normalizedId.startsWith("PL")
+        var items = parsePlaylistVideos(page).toMutableList()
         val seen = mutableSetOf<String>()
-        repeat(8) {
-            val token = findContinuationToken(page) ?: return@repeat
-            if (!seen.add(token)) return@repeat
+        AppLog.event("playlist browse id=$normalizedId items=${items.size} continuation=${findPlaylistContinuationToken(page) != null}")
+        // Some current playlist responses contain only a continuation in their initial
+        // payload. Consume it before trying HTML; replacing the response with an empty
+        // HTML page here used to discard the only route to the actual videos.
+        while (seen.size < 20) {
+            val token = findPlaylistContinuationToken(page) ?: break
+            if (!seen.add(token)) break
             page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), origin)
-            items += parseItems(page).filterNot { it.playlist }
+            val more = parsePlaylistVideos(page)
+            AppLog.event("playlist continuation id=$normalizedId page=${seen.size} items=${more.size}")
+            items += more
         }
-        return items.distinctBy { it.id }
+        if (items.isEmpty() && normalizedId == "YS") {
+            val mobileCandidates = listOf(
+                Triple("ANDROID", "20.05.35", "3"),
+                Triple("MWEB", bootstrap.version, "2"),
+            )
+            for ((clientName, version, clientId) in mobileCandidates) {
+                val mobile = runCatching {
+                    postAuthenticatedClient(
+                        "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+                        JSONObject().put("context", if (clientName == "ANDROID") {
+                            context(clientName, version).also { context -> context.getJSONObject("client")
+                                .put("androidSdkVersion", 34).put("platform", "MOBILE").put("clientScreen", "PLAYLIST") }
+                        } else context(clientName, version)).put("browseId", "VLYS"),
+                        origin, clientId, version,
+                        if (clientName == "ANDROID") "com.google.android.youtube/$version (Linux; U; Android 14) gzip" else UA,
+                    )
+                }.onFailure { AppLog.failure("saved shorts $clientName browse", it) }.getOrNull()
+                if (mobile != null) {
+                    val mobileItems = parsePlaylistVideos(mobile)
+                    AppLog.event("saved shorts client=$clientName items=${mobileItems.size}")
+                    items += mobileItems
+                    if (items.isNotEmpty()) break
+                }
+            }
+        }
+        if (items.isEmpty() && normalizedId == "YS") {
+            val mobileHtml = runCatching { initialData(get("https://m.youtube.com/playlist?list=YS&hl=en")) }
+                .onFailure { AppLog.failure("saved shorts MWEB HTML", it) }.getOrNull()
+            if (mobileHtml != null) {
+                val mobileItems = parsePlaylistVideos(mobileHtml)
+                AppLog.event("saved shorts MWEB HTML items=${mobileItems.size}")
+                items += mobileItems
+            }
+        }
+        if (items.isEmpty()) {
+            val direct = runCatching {
+                post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+                    .put("context", context("WEB", bootstrap.version))
+                    .put("browseId", normalizedId), origin)
+            }.getOrNull()
+            if (direct != null) {
+                val directItems = parsePlaylistVideos(direct)
+                AppLog.event("playlist direct browse id=$normalizedId items=${directItems.size}")
+                items += directItems
+            }
+        }
+        if (items.isEmpty()) {
+            val remixItems = runCatching { musicPlaylistVideos(normalizedId) }
+                .onFailure { AppLog.failure("playlist WEB_REMIX fallback id=$normalizedId", it) }
+                .getOrDefault(emptyList())
+            AppLog.event("playlist WEB_REMIX fallback id=$normalizedId items=${remixItems.size}")
+            items += remixItems
+        }
+        if (items.isEmpty()) {
+            val html = get("$origin/playlist?list=${URLEncoder.encode(normalizedId, "UTF-8")}&hl=en")
+            val htmlData = runCatching { initialData(html) }
+                .onFailure { AppLog.failure("playlist authenticated HTML id=$normalizedId", it) }
+                .getOrNull()
+            if (htmlData != null) {
+                page = htmlData
+                editable = editable || findBoolean(htmlData, "isEditable") == true
+                deletable = deletable || (findBoolean(htmlData, "isEditable") == true && normalizedId.startsWith("PL"))
+                items = parsePlaylistVideos(htmlData).toMutableList()
+                AppLog.event("playlist authenticated HTML id=$normalizedId bytes=${html.length} items=${items.size} continuation=${findPlaylistContinuationToken(page) != null}")
+            }
+        }
+        while (seen.size < 20) {
+            val token = findPlaylistContinuationToken(page) ?: break
+            if (!seen.add(token)) break
+            page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), origin)
+            val more = parsePlaylistVideos(page)
+            AppLog.event("playlist continuation id=$normalizedId page=${seen.size} items=${more.size}")
+            items += more
+        }
+        // Watch Later is editable even when the current renderer generation omits the
+        // old top-level isEditable bit. Only expose row removal when YouTube supplied
+        // the membership token required by ACTION_REMOVE_VIDEO.
+        editable = editable || normalizedId in accountPlaylistIds || (normalizedId == "WL" && items.any { it.setVideoId.isNotBlank() })
+        deletable = deletable || (editable && normalizedId.startsWith("PL"))
+        return PlaylistPage(items.distinctBy { item -> item.setVideoId.ifBlank { item.id } }, editable, deletable)
+    }
+
+    private fun parsePlaylistVideos(root: Any?): List<FeedItem> {
+        val output = linkedMapOf<String, FeedItem>()
+        walkFeedRenderers(root) { renderer ->
+            val type = renderer.optString("_materialytRendererType")
+            val parsed = parseItems(JSONObject().put(type, renderer)).firstOrNull { !it.playlist && !it.channel && it.id.length == 11 }
+                ?: return@walkFeedRenderers
+            val short = type == "reelItemRenderer" || renderer.optString("contentType") == "LOCKUP_CONTENT_TYPE_SHORT" ||
+                findStringNearKey(renderer, "url", "/shorts/") != null || findObject(renderer, "reelWatchEndpoint") != null ||
+                findStringNearKey(renderer, "webPageType", "SHORTS") != null || findStringNearKey(renderer, "iconType", "SHORTS") != null
+            val candidate = parsed.copy(
+                short = short,
+                setVideoId = renderer.optString("setVideoId")
+                    .ifBlank { findString(renderer, "setVideoId").orEmpty() }
+                    .ifBlank { findString(renderer, "playlistSetVideoId").orEmpty() },
+                url = if (short) "https://www.youtube.com/shorts/${parsed.id}" else parsed.url,
+            )
+            val previous = output[parsed.id]
+            if (previous == null || previous.setVideoId.isBlank() && candidate.setVideoId.isNotBlank()) output[parsed.id] = candidate
+        }
+        return output.values.toList()
+    }
+
+    private fun findPlaylistContinuationToken(value: Any?): String? = when (value) {
+        is JSONObject -> {
+            value.optJSONObject("continuationItemRenderer")
+                ?.optJSONObject("continuationEndpoint")
+                ?.let { endpoint ->
+                    endpoint.optJSONObject("continuationCommand")?.optString("token")
+                        ?.takeIf(String::isNotBlank)
+                        ?: endpoint.optJSONObject("commandExecutorCommand")
+                            ?.let { findString(it, "token") }
+                }
+                ?: value.keys().asSequence().mapNotNull { findPlaylistContinuationToken(value.opt(it)) }.firstOrNull()
+        }
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findPlaylistContinuationToken(value.opt(it)) }.firstOrNull()
+        else -> null
     }
     fun search(query: String): List<FeedItem> {
         val origin = "https://www.youtube.com"
@@ -617,7 +816,215 @@ object YouTubeRepository {
         }
         return null
     }
-    fun music(): List<FeedItem> = musicRequest("browse", JSONObject().put("browseId", "FEmusic_home")).also { activeMusicQuery = null }
+    fun music(): List<FeedItem> {
+        val home = musicHome().sections.flatMap { it.items }
+        val playlists = runCatching {
+            val origin = "https://music.youtube.com"
+            val bootstrap = bootstrap(origin, "WEB_REMIX")
+            parseItems(post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+                .put("context", context("WEB_REMIX", bootstrap.version))
+                .put("browseId", "FEmusic_liked_playlists"), origin))
+        }
+            .onFailure { AppLog.failure("music library playlists", it) }.getOrDefault(emptyList())
+            .filter { it.playlist }
+        activeMusicQuery = null
+        return (playlists + home).distinctBy { "${it.playlist}:${it.id}" }
+    }
+
+    fun musicHome(category: MusicCategory? = null): MusicHomePage {
+        AppLog.event("music home category=${category?.title ?: "All"} started")
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val request = JSONObject().put("context", context("WEB_REMIX", bootstrap.version))
+            .put("browseId", category?.browseId?.ifBlank { "FEmusic_home" } ?: "FEmusic_home")
+        category?.params?.takeIf(String::isNotBlank)?.let { request.put("params", it) }
+        val response = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", request, origin)
+        musicHomeToken = findNextContinuationToken(response, null)
+        activeMusicQuery = null
+        val categories = parseMusicCategories(response)
+        val homeSections = parseMusicHomeSections(response).mapNotNull { section ->
+            audioOnlyMusicItems(section.items).takeIf { it.isNotEmpty() }?.let { section.copy(items = it) }
+        }.ifEmpty {
+            audioOnlyMusicItems(parseItems(response)).takeIf { it.isNotEmpty() }
+                ?.let { listOf(MusicHomeSection("For you", items = it)) }.orEmpty()
+        }
+        val historyItems = if (category == null && signedIn()) runCatching {
+            val historyResponse = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+                .put("context", context("WEB_REMIX", bootstrap.version))
+                .put("browseId", "FEmusic_history"), origin)
+            parseItems(historyResponse)
+                .filter { !it.playlist && !it.channel && !it.musicVideo && it.id.length == 11 }
+                .distinctBy { it.id }
+                .take(30)
+        }.onFailure { AppLog.failure("music native history", it) }.getOrDefault(emptyList()) else emptyList()
+        val sections = if (historyItems.isEmpty()) homeSections else {
+            val listenAgainStrapline = homeSections.firstOrNull { it.title.contains("listen again", true) }?.strapline.orEmpty()
+            listOf(MusicHomeSection("Listen Again", strapline = listenAgainStrapline, items = historyItems, horizontal = true)) +
+                homeSections.filterNot {
+                    it.title.contains("continue", true) || it.title.contains("listen again", true)
+                }
+        }
+        musicHomeRadioSeed = sections.asReversed().asSequence().flatMap { it.items.asReversed().asSequence() }
+            .firstOrNull { !it.playlist && !it.channel && it.id.length == 11 }?.id
+        musicHomeRadioMode = false
+        AppLog.event("music home categories=${categories.size} sections=${sections.size} items=${sections.sumOf { it.items.size }} nativeHistory=${historyItems.size}")
+        return MusicHomePage(categories, sections, musicHomeToken != null || musicHomeRadioSeed != null)
+    }
+
+    fun musicHomeContinuation(): MusicHomePage {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val token = musicHomeToken
+        val endpoint: String
+        val body = JSONObject().put("context", context("WEB_REMIX", bootstrap.version))
+        if (token != null) {
+            endpoint = if (musicHomeRadioMode) "next" else "browse"
+            body.put("continuation", token)
+        } else {
+            val seed = musicHomeRadioSeed ?: return MusicHomePage(emptyList(), emptyList())
+            musicHomeRadioMode = true
+            endpoint = "next"
+            body.put("videoId", seed)
+                .put("playlistId", "RDAMVM$seed")
+                .put("enablePersistentPlaylistPanel", true)
+                .put("isAudioOnly", true)
+        }
+        val response = post("$origin/youtubei/v1/$endpoint?key=${bootstrap.key}", body, origin)
+        musicHomeToken = if (musicHomeRadioMode) findRadioContinuationToken(response, token)
+            else findNextContinuationToken(response, token)
+        var sections = parseMusicHomeSections(response).mapNotNull { section ->
+            audioOnlyMusicItems(section.items).takeIf { it.isNotEmpty() }?.let { section.copy(items = it) }
+        }
+        if (sections.isEmpty()) {
+            val seed = musicHomeRadioSeed
+            val items = parseItems(response).filter { !it.playlist && !it.channel && !it.musicVideo && it.id.length == 11 && it.id != seed }
+                .distinctBy { it.id }
+            if (items.isNotEmpty()) sections = listOf(MusicHomeSection("More for you", items = items, horizontal = false))
+        }
+        sections.asReversed().asSequence().flatMap { it.items.asReversed().asSequence() }
+            .firstOrNull { !it.playlist && !it.channel && it.id.length == 11 }?.id?.let { musicHomeRadioSeed = it }
+        val hasMore = musicHomeToken != null || musicHomeRadioSeed != null
+        AppLog.event("music home continuation endpoint=$endpoint radio=$musicHomeRadioMode sections=${sections.size} items=${sections.sumOf { it.items.size }} hasMore=$hasMore")
+        return MusicHomePage(emptyList(), sections, hasMore)
+    }
+
+    private fun parseMusicCategories(root: Any): List<MusicCategory> {
+        val result = linkedMapOf<String, MusicCategory>()
+        fun visit(value: Any?) {
+            when (value) {
+                is JSONObject -> {
+                    val categoryButton = value.optJSONObject("musicNavigationButtonRenderer")
+                    val categoryChip = value.optJSONObject("chipCloudChipRenderer")
+                    (categoryButton ?: categoryChip)?.let { button ->
+                        val title = text(button.opt("buttonText")).orEmpty()
+                            .ifBlank { text(button.opt("text")).orEmpty() }.trim()
+                        val endpoint = button.optJSONObject("clickCommand")?.optJSONObject("browseEndpoint")
+                            ?: button.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
+                        val browseId = endpoint?.optString("browseId").orEmpty()
+                        if (title.isNotBlank() && browseId.isNotBlank()) result[title] = MusicCategory(title, browseId, endpoint?.optString("params").orEmpty())
+                    }
+                    value.keys().forEach { visit(value.opt(it)) }
+                }
+                is JSONArray -> for (index in 0 until value.length()) visit(value.opt(index))
+            }
+        }
+        visit(root)
+        return result.values.toList()
+    }
+
+    private fun parseMusicHomeSections(root: Any): List<MusicHomeSection> {
+        val result = mutableListOf<MusicHomeSection>()
+        fun add(renderer: JSONObject, horizontal: Boolean) {
+            val header = renderer.optJSONObject("header")
+            val basic = header?.optJSONObject("musicCarouselShelfBasicHeaderRenderer")
+                ?: header?.optJSONObject("musicShelfHeaderRenderer")
+            val title = text(basic?.opt("title")).orEmpty().trim()
+            val strapline = text(basic?.opt("strapline")).orEmpty().trim()
+            val contents = renderer.optJSONArray("contents") ?: renderer.optJSONArray("items") ?: JSONArray()
+            val items = audioOnlyMusicItems(parseItems(contents)).distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+            if (items.isNotEmpty()) result += MusicHomeSection(
+                title.ifBlank { strapline.ifBlank { "For you" } },
+                if (title.isBlank()) "" else strapline,
+                items,
+                horizontal,
+                findContinuationToken(renderer),
+            )
+        }
+        fun visit(value: Any?) {
+            when (value) {
+                is JSONObject -> {
+                    val carousel = value.optJSONObject("musicCarouselShelfRenderer")
+                        ?: value.optJSONObject("musicImmersiveCarouselShelfRenderer")
+                        ?: value.optJSONObject("gridRenderer")
+                    val shelf = value.optJSONObject("musicShelfRenderer")
+                    when {
+                        carousel != null -> add(carousel, true)
+                        shelf != null -> add(shelf, false)
+                        else -> value.keys().forEach { visit(value.opt(it)) }
+                    }
+                }
+                is JSONArray -> for (index in 0 until value.length()) visit(value.opt(index))
+            }
+        }
+        visit(root)
+        return result.distinctBy { section -> section.title to section.items.joinToString { it.id } }
+    }
+
+    fun musicUpNext(videoId: String): FeedItem? {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val response = post("$origin/youtubei/v1/next?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB_REMIX", bootstrap.version))
+            .put("videoId", videoId)
+            .put("playlistId", "RDAMVM$videoId")
+            .put("enablePersistentPlaylistPanel", true)
+            .put("isAudioOnly", true), origin)
+        val candidates = parseItems(response).filter {
+            it.id.length == 11 && it.id != videoId && !it.channel && !it.playlist && !it.musicVideo
+        }
+        AppLog.event("music up next response video=$videoId candidates=${candidates.size} ids=${candidates.take(4).joinToString { it.id }}")
+        return candidates.firstOrNull()
+    }
+
+    fun musicSectionContinuation(token: String): MusicHomeSection {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val response = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB_REMIX", bootstrap.version))
+            .put("continuation", token), origin)
+        val parsed = parseMusicHomeSections(response)
+        val items = audioOnlyMusicItems(parsed.flatMap { it.items }.ifEmpty { parseItems(response) })
+            .distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+        val next = findNextContinuationToken(response, token)
+        AppLog.event("music shelf continuation items=${items.size} hasMore=${next != null}")
+        return MusicHomeSection("", items = items, horizontal = true, continuation = next)
+    }
+
+    fun musicPlaylistVideos(playlistId: String): List<FeedItem> {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val normalizedId = playlistId.removePrefix("VL")
+        var page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB_REMIX", bootstrap.version))
+            .put("browseId", "VL$normalizedId"), origin)
+        fun shelf(response: JSONObject): JSONObject? =
+            findObject(response, "musicPlaylistShelfRenderer")?.optJSONObject("musicPlaylistShelfRenderer")
+                ?: findObject(response, "musicPlaylistShelfContinuation")?.optJSONObject("musicPlaylistShelfContinuation")
+        fun tracks(response: JSONObject): List<FeedItem> {
+            return shelf(response)?.let(::parsePlaylistVideos).orEmpty()
+        }
+        val output = tracks(page).toMutableList()
+        val seen = mutableSetOf<String>()
+        while (seen.size < 20) {
+            val token = shelf(page)?.let(::findPlaylistContinuationToken) ?: break
+            if (!seen.add(token)) break
+            page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+                .put("context", context("WEB_REMIX", bootstrap.version))
+                .put("continuation", token), origin)
+            output += tracks(page)
+        }
+        return output.filterNot { it.musicVideo }.distinctBy { it.id }
+    }
 
     fun searchSuggestions(query: String, music: Boolean = false): List<String> {
         val clean = query.trim()
@@ -672,7 +1079,7 @@ object YouTubeRepository {
             entries.values.toList()
         }.getOrDefault(emptyList())
         if (fromHistoryPage.isNotEmpty()) return fromHistoryPage
-        return authenticatedYouTubeSuggestions("").map { AccountSearchEntry(it) }
+        return emptyList()
     }
 
     private fun googleActivitySearchHistory(): List<AccountSearchEntry> {
@@ -763,7 +1170,7 @@ object YouTubeRepository {
             when (value) {
                 is JSONObject -> {
                     val renderer = value.optJSONObject("historySuggestionRenderer")
-                        ?: value.optJSONObject("searchSuggestionRenderer")
+                        ?: value.optJSONObject("searchSuggestionRenderer")?.takeIf { query.isNotBlank() }
                     if (renderer != null) {
                         val text = renderer.optJSONObject("navigationEndpoint")?.optJSONObject("searchEndpoint")
                             ?.optString("query").orEmpty().ifBlank { text(renderer.opt("suggestion")).orEmpty() }.trim()
@@ -781,46 +1188,24 @@ object YouTubeRepository {
 
     private fun authenticatedYouTubeSuggestions(query: String): List<String> {
         val origin = "https://www.youtube.com"
-        val bootstrap = bootstrap(origin, "WEB")
-        val guideContext = context("WEB", bootstrap.version).apply {
-            getJSONObject("client")
-                .put("clientScreen", "WATCH")
-                .put("userAgent", UA)
-                .put("acceptLanguage", "en-US")
-                .put("acceptRegion", "US")
-                .put("utcOffsetMinutes", -180)
-            put("user", JSONObject().put("enableSafetyMode", false).put("lockedSafetyMode", false))
-        }
-        val guide = runCatching {
-            post("$origin/youtubei/v1/guide?key=${bootstrap.key}", JSONObject()
-                .put("context", guideContext), origin)
-        }.getOrNull()
-        fun suggestToken(value: Any?): String? = when (value) {
-            is JSONObject -> {
-                if (value.optString("key") == "suggest_token") value.optString("value").takeIf(String::isNotBlank)
-                else value.keys().asSequence().mapNotNull { suggestToken(value.opt(it)) }.firstOrNull()
-            }
-            is JSONArray -> (0 until value.length()).asSequence().mapNotNull { suggestToken(value.opt(it)) }.firstOrNull()
-            else -> null
-        }
-        val token = suggestToken(guide) ?: runCatching {
-            val homeContext = JSONObject(guideContext.toString())
-            val home = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
-                .put("context", homeContext).put("browseId", "FEwhat_to_watch"), origin)
-            suggestToken(home)
-        }.getOrNull()
+        // Regular YouTube serves signed-in history suggestions from its native
+        // suggestions service. Unlike YT Music, it has no equivalent public
+        // /youtubei/v1/get_search_suggestions endpoint.
         val url = buildString {
-            append("https://clients1.google.com/complete/search?client=youtube-lr&ds=yt&xhr=t&oe=utf-8&xssi=t")
+            append("https://suggestqueries-clients6.youtube.com/complete/search")
+            append("?client=youtube&gs_ri=youtube&gs_id=0&cp=0&ds=yt")
+            append("&sugexp=").append(URLEncoder.encode(YOUTUBE_SUGGEST_EXPERIMENTS, "UTF-8"))
             append("&hl=en&gl=US&q=").append(URLEncoder.encode(query, "UTF-8"))
-            token?.let { append("&tok=").append(URLEncoder.encode(it, "UTF-8")) }
         }
         val request = Request.Builder().url(url).header("User-Agent", UA).apply {
             cookies(origin).takeIf(String::isNotBlank)?.let { header("Cookie", it) }
             header("Accept-Language", "en-US,en;q=0.9")
+            header("Origin", origin)
+            header("Referer", "$origin/")
         }.build()
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return emptyList()
-            val raw = response.body?.string().orEmpty().removePrefix(")]}'").trimStart()
+            val raw = response.body?.string().orEmpty().trim()
             val start = raw.indexOf('[')
             val end = raw.lastIndexOf(']')
             if (start < 0 || end <= start) return emptyList()
@@ -834,13 +1219,13 @@ object YouTubeRepository {
                     else -> null
                 }?.trim()?.takeIf(String::isNotBlank)
             }.distinct().take(20).also {
-                AppLog.event("account search suggestions queryBlank=${query.isBlank()} token=${token != null} items=${it.size}")
+                AppLog.event("account search suggestions queryBlank=${query.isBlank()} service=youtube items=${it.size}")
             }
         }
     }
 
-    fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query)
-        .put("params", "EgWKAQIIAWoMEA4QChADEAQQCRAF")).also { activeMusicQuery = query }
+    fun musicSearch(query: String): List<FeedItem> = audioOnlyMusicItems(musicRequest("search", JSONObject().put("query", query)))
+        .also { activeMusicQuery = query }
 
     fun musicContinuation(query: String): List<FeedItem> {
         val searching = query.isNotBlank()
@@ -855,7 +1240,7 @@ object YouTubeRepository {
                 .put("context", context("WEB_REMIX", bootstrap.version)).put("continuation", token), origin)
             val next = findContinuationToken(response).takeIf { it != token }
             if (searching) musicSearchToken = next else musicHomeToken = next
-            parseItems(response).distinctBy { it.id }
+            audioOnlyMusicItems(parseItems(response)).distinctBy { it.id }
         }.onFailure { AppLog.failure("music continuation", it) }.getOrDefault(emptyList())
     }
 
@@ -867,7 +1252,7 @@ object YouTubeRepository {
         val response = post("$origin/youtubei/v1/$endpoint?key=${bootstrap.key}", body, origin)
         val token = findContinuationToken(response)
         if (endpoint == "search") musicSearchToken = token else musicHomeToken = token
-        return parseItems(response).also { AppLog.event("music endpoint=$endpoint items=${it.size}") }
+        return audioOnlyMusicItems(parseItems(response)).also { AppLog.event("music endpoint=$endpoint items=${it.size}") }
     }
 
     private fun feed(name: String, url: String): List<FeedItem> {
@@ -986,7 +1371,7 @@ object YouTubeRepository {
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
 
         val cpn = response.optString("_materialytCpn").takeIf { it.isNotBlank() } ?: java.util.UUID.randomUUID().toString().replace("-", "").take(16)
-        val trackingAsMusic = false
+        val trackingAsMusic = music
         val authenticatedTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, trackingAsMusic) }
             .onFailure { AppLog.failure("authenticated tracking video=$videoId music=$music", it) }.getOrNull()
         (authenticatedTracking ?: response.optJSONObject("playbackTracking"))?.let { tracking ->
@@ -1089,7 +1474,7 @@ object YouTubeRepository {
     }
 
     /** Fetches a native WEB SABR session. Direct URLs are intentionally not required here. */
-    fun sabrPlaybackInfo(videoId: String): SabrPlaybackInfo {
+    fun sabrPlaybackInfo(videoId: String, music: Boolean = false): SabrPlaybackInfo {
         val webResponse = runCatching { webPoPlayer(videoId, remix = false) }
             .onFailure { AppLog.failure("SABR WEB player video=$videoId", it) }
             .getOrDefault(JSONObject())
@@ -1165,10 +1550,10 @@ object YouTubeRepository {
         val cpn = response.optString("_materialytCpn")
             .takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no playback nonce")
         PlaybackLoadStatus.show(videoId, "Preparing history tracking…")
-        val accountTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, false) }
+        val accountTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, music) }
             .onFailure { AppLog.failure("SABR authenticated tracking video=$videoId", it) }
             .getOrNull()
-        cachePlaybackTracking(videoId, accountTracking ?: response.optJSONObject("playbackTracking"), cpn)
+        cachePlaybackTracking(videoId, accountTracking ?: response.optJSONObject("playbackTracking"), cpn, music)
         val webClient = response.optString("_materialytClientName")
         if (!direct && !response.optBoolean("_materialytNResolved")) {
             PlaybackLoadStatus.show(videoId, "Solving media URL…")
@@ -1371,7 +1756,7 @@ object YouTubeRepository {
     fun resolveNewPipeStreamUrl(videoId: String, streamingUrl: String): String =
         solveNChallenge(videoId, streamingUrl)
 
-    fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false) {
+    fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false, ended: Boolean = false) {
         if (!signedIn() || toMs <= fromMs) return
         val tracking = synchronized(playbackTracking) { playbackTracking[videoId] }
         if (tracking == null) {
@@ -1388,47 +1773,62 @@ object YouTubeRepository {
         val fromSec = "%.3f".format(java.util.Locale.US, fromMs / 1000.0)
         val toSec = "%.3f".format(java.util.Locale.US, toMs / 1000.0)
         fun statsUrl(playback: Boolean): okhttp3.HttpUrl {
-            val path = if (playback) "playback" else "watchtime"
-            return "https://www.youtube.com/api/stats/$path".toHttpUrlOrNull()!!.newBuilder()
-                .addQueryParameter("ns", "yt")
-                .addQueryParameter("ver", "2")
-                .addQueryParameter("docid", source.queryParameter("docid") ?: videoId)
-                .apply { source.queryParameter("len")?.let { addQueryParameter("len", it) } }
-                .addQueryParameter("cpn", tracking.cpn)
-                .addQueryParameter("ei", source.queryParameter("ei")!!)
-                .addQueryParameter("vm", source.queryParameter("vm")!!)
-                .addQueryParameter("of", source.queryParameter("of")!!)
+            val rawBase = if (playback) tracking.playbackUrl else tracking.watchtimeUrl
+            val base = (if (tracking.music) rawBase.replace("https://s.youtube.com/", "https://music.youtube.com/") else rawBase).toHttpUrlOrNull()
+                ?: error("Invalid YouTube tracking URL")
+            return base.newBuilder()
+                .setQueryParameter("ns", "yt")
+                .setQueryParameter("ver", "2")
+                .setQueryParameter("docid", source.queryParameter("docid") ?: videoId)
+                .setQueryParameter("cpn", tracking.cpn)
                 .apply {
-                    if (playback) addQueryParameter("cmt", fromSec)
+                    if (tracking.music) {
+                        setQueryParameter("c", "WEB_REMIX")
+                        setQueryParameter("cver", bootstrap("https://music.youtube.com", "WEB_REMIX").version)
+                        setQueryParameter("cplayer", "UNIPLAYER")
+                        setQueryParameter("cplatform", "DESKTOP")
+                    }
+                }
+                .apply {
+                    if (playback) {
+                        setQueryParameter("cmt", fromSec)
+                        setQueryParameter("rtn", "0")
+                        setQueryParameter("rt", "0")
+                        setQueryParameter("fs", "0")
+                        setQueryParameter("state", "paused")
+                        if (ended) setQueryParameter("final", "1")
+                    }
                     else {
-                        addQueryParameter("st", fromSec)
-                        addQueryParameter("et", toSec)
-                        addQueryParameter("cmt", toSec)
+                        setQueryParameter("st", fromSec)
+                        setQueryParameter("et", toSec)
+                        setQueryParameter("cmt", toSec)
+                        if (paused) setQueryParameter("state", "paused") else removeAllQueryParameters("state")
+                        if (ended) setQueryParameter("final", "1") else removeAllQueryParameters("final")
                     }
                 }.build()
         }
         fun send(url: okhttp3.HttpUrl) {
-            val origin = "https://www.youtube.com"
+            val origin = if (tracking.music) "https://music.youtube.com" else "https://www.youtube.com"
             val request = Request.Builder().url(url).apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }.build()
             client.newCall(request).execute().use { response ->
-                AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (paused) "paused" else "playing"} HTTP ${response.code}")
+                AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (ended) "ended" else if (paused) "paused" else "playing"} HTTP ${response.code}")
             }
         }
-        if (first) send(statsUrl(true))
+        if (first || ended) send(statsUrl(true))
         send(statsUrl(false))
     }
 
-    fun preparePlaybackTracking(videoId: String) {
+    fun preparePlaybackTracking(videoId: String, music: Boolean = false) {
         if (!signedIn()) return
-        if (synchronized(playbackTracking) { playbackTracking.containsKey(videoId) }) return
+        if (synchronized(playbackTracking) { playbackTracking[videoId]?.music == music }) return
         val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
-        val tracking = authenticatedPlayerTracking(videoId, cpn, false) ?: return
-        if (cachePlaybackTracking(videoId, tracking, cpn)) {
-            AppLog.event("tracking prepared for standard YouTube history video=$videoId")
+        val tracking = authenticatedPlayerTracking(videoId, cpn, music) ?: return
+        if (cachePlaybackTracking(videoId, tracking, cpn, music)) {
+            AppLog.event("tracking prepared for ${if (music) "YouTube Music" else "standard YouTube"} history video=$videoId")
         }
     }
 
-    private fun cachePlaybackTracking(videoId: String, tracking: JSONObject?, cpn: String): Boolean {
+    private fun cachePlaybackTracking(videoId: String, tracking: JSONObject?, cpn: String, music: Boolean = false): Boolean {
         val playback = tracking?.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl").orEmpty()
         val watchtime = tracking?.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl").orEmpty()
         if (playback.isBlank() || watchtime.isBlank()) {
@@ -1436,7 +1836,7 @@ object YouTubeRepository {
             return false
         }
         synchronized(playbackTracking) {
-            playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, false)
+            playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, music)
         }
         AppLog.event("playback tracking cached video=$videoId source=player_response")
         return true
@@ -1725,14 +2125,15 @@ object YouTubeRepository {
     }
 
     private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
-        val origin = "https://www.youtube.com"
-        val bootstrap = bootstrap(origin, "WEB")
+        val origin = if (music) "https://music.youtube.com" else "https://www.youtube.com"
+        val clientName = if (music) "WEB_REMIX" else "WEB"
+        val bootstrap = bootstrap(origin, clientName)
         val response = post("$origin/youtubei/v1/player?key=${bootstrap.key}&prettyPrint=false",
-            JSONObject().put("context", context("WEB", bootstrap.version))
+            JSONObject().put("context", context(clientName, bootstrap.version))
                 .put("videoId", videoId).put("cpn", cpn)
                 .put("contentCheckOk", true).put("racyCheckOk", true), origin)
         val tracking = response.optJSONObject("playbackTracking")
-        AppLog.event("tracking_fetch WEB_PLAYER video=$videoId status=${response.optJSONObject("playabilityStatus")?.optString("status")} tracking_found=${tracking != null}")
+        AppLog.event("tracking_fetch ${clientName}_PLAYER video=$videoId status=${response.optJSONObject("playabilityStatus")?.optString("status")} tracking_found=${tracking != null}")
         return tracking
     }
 
@@ -2733,6 +3134,24 @@ object YouTubeRepository {
         }
     }
 
+    private fun postAuthenticatedClient(url: String, body: JSONObject, origin: String, clientId: String, version: String, userAgent: String): JSONObject {
+        val request = Request.Builder().url(url).header("Content-Type", "application/json").apply {
+            authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) }
+            header("User-Agent", userAgent)
+            header("X-Youtube-Client-Name", clientId)
+            header("X-Youtube-Client-Version", version)
+            visitorData[origin]?.let { header("X-Goog-Visitor-Id", it) }
+        }.post(body.toString().toRequestBody(jsonType)).build()
+        return client.newCall(request).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                AppLog.event("authenticated client=$clientId HTTP ${response.code} body=${raw.take(400)}")
+                error("YouTube returned HTTP ${response.code}")
+            }
+            JSONObject(raw)
+        }
+    }
+
     private fun postPublic(url: String, body: JSONObject, clientName: String, version: String): JSONObject {
         val request = Request.Builder().url(url).header("User-Agent", UA).header("Content-Type", "application/json")
             .header("X-Youtube-Client-Name", clientName).header("X-Youtube-Client-Version", version)
@@ -2765,16 +3184,34 @@ object YouTubeRepository {
         val output = linkedMapOf<String, FeedItem>()
         walkFeedRenderers(root) { renderer ->
             val rendererType = renderer.optString("_materialytRendererType")
-            val playlistRenderer = rendererType.contains("playlist", true) || (rendererType == "lockupViewModel" && renderer.optString("contentId").startsWith("PL"))
+            val lockupPlaylistId = if (rendererType == "lockupViewModel") {
+                renderer.optString("contentId").removePrefix("VL").takeIf { contentId ->
+                    contentId.isNotBlank() && contentId.length != 11 && (
+                        renderer.optString("contentType").contains("PLAYLIST", true) ||
+                            findString(renderer, "browseId")?.startsWith("VL") == true ||
+                            findString(renderer, "playlistId") != null
+                    )
+                }
+            } else null
+            // playlistVideoRenderer is a video inside a playlist, not a playlist card.
+            val musicPlaylistId = if (rendererType.startsWith("music")) findString(renderer, "browseId")?.takeIf { it.startsWith("VL") } else null
+            val playlistRenderer = rendererType in setOf("playlistRenderer", "gridPlaylistRenderer") || lockupPlaylistId != null || musicPlaylistId != null
             val channelRenderer = rendererType.contains("channel", true)
-            val videoId = if (playlistRenderer || channelRenderer) "" else renderer.optString("videoId").ifBlank { findString(renderer, "videoId").orEmpty() }
+            val lockupVideoId = if (rendererType == "lockupViewModel" && renderer.optString("contentType").let {
+                    it == "LOCKUP_CONTENT_TYPE_VIDEO" || it == "LOCKUP_CONTENT_TYPE_SHORT"
+                }) renderer.optString("contentId").takeIf { it.length == 11 } else null
+            val videoId = if (playlistRenderer || channelRenderer) "" else renderer.optString("videoId")
+                .ifBlank { lockupVideoId.orEmpty() }
+                .ifBlank { findString(renderer, "videoId").orEmpty() }
             val channelId = if (channelRenderer) renderer.optString("channelId")
                 .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("UC") }.orEmpty() } else ""
             val authorChannelId = if (!channelRenderer) findString(renderer, "browseId")
                 ?.takeIf { it.startsWith("UC") }.orEmpty() else ""
             val playlistId = if (playlistRenderer) renderer.optString("playlistId")
                 .ifBlank { findString(renderer, "playlistId").orEmpty() }
-                .ifBlank { renderer.optString("contentId").takeUnless { it.length == 11 }.orEmpty() } else ""
+                .ifBlank { lockupPlaylistId.orEmpty() }
+                .ifBlank { musicPlaylistId.orEmpty() }
+                .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("VL") }?.removePrefix("VL").orEmpty() } else ""
             val isChannel = channelRenderer && channelId.startsWith("UC")
             val isPlaylist = playlistRenderer && playlistId.isNotBlank()
             val id = when { isChannel -> channelId; isPlaylist -> playlistId.removePrefix("VL"); else -> videoId }
@@ -2842,7 +3279,9 @@ object YouTubeRepository {
                 resumePercent >= 99.5 ||
                 (durationMs > 0L && rawResumePositionMs >= durationMs - 1_500L)
             ) 0L else rawResumePositionMs
-            val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel, resumePositionMs = resumePositionMs)
+            val musicVideoType = findString(renderer, "musicVideoType").orEmpty()
+            val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel, resumePositionMs = resumePositionMs,
+                musicVideo = musicVideoType.isNotBlank() && musicVideoType != "MUSIC_VIDEO_TYPE_ATV")
             if (!isPlaylist && !isChannel) synchronized(videoDetailsCache) {
                 videoDetailsCache[id] = (videoDetailsCache[id] ?: VideoDetails(title, subtitle)).copy(
                     title = title,
@@ -2978,7 +3417,7 @@ object YouTubeRepository {
                 if (!blocked) {
                     val supported = setOf(
                         "videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "playlistVideoRenderer", "playlistRenderer", "gridPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
-                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "lockupViewModel"
+                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "playlistPanelVideoRenderer", "lockupViewModel"
                     )
                     keys.forEach { key ->
                         val candidate = value.optJSONObject(key) ?: return@forEach
@@ -3049,10 +3488,16 @@ object YouTubeRepository {
         val parts = value?.split(" • ")?.map(String::trim)?.filter(String::isNotBlank).orEmpty()
         if (parts.isEmpty()) return null
         val leadingType = parts.first().lowercase() in setOf("song", "video", "episode", "album", "playlist")
-        return (if (leadingType) parts.getOrNull(1) else parts.firstOrNull())
-            ?.replace(Regex("\\s+-\\s+Topic$", RegexOption.IGNORE_CASE), "")
-            ?.trim()
-            ?.takeIf { it.isNotBlank() && it != title && !it.matches(Regex("\\d{1,2}:\\d{2}(:\\d{2})?")) }
+        return (if (leadingType) parts.drop(1) else parts).asSequence()
+            .map { it.replace(Regex("\\s+-\\s+Topic$", RegexOption.IGNORE_CASE), "").trim() }
+            .firstOrNull { candidate ->
+                candidate.isNotBlank() && candidate != title &&
+                    !candidate.matches(Regex("\\d{1,2}:\\d{2}(:\\d{2})?")) &&
+                    !candidate.matches(Regex("\\d{4}(-\\d{2}-\\d{2}.*)?")) &&
+                    !candidate.matches(Regex("(?i)(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\s+\\d{1,2},?\\s+\\d{4}")) &&
+                    !candidate.matches(Regex("(?i)\\d+\\s+(second|minute|hour|day|week|month|year)s?\\s+ago")) &&
+                    !candidate.contains(Regex("(?i)\\b(views?|plays?|released|published)\\b"))
+            }
     }
 
     private fun findMusicArtist(value: Any?, title: String): String? {
@@ -3289,9 +3734,43 @@ object YouTubeRepository {
 
     private fun findContinuationToken(value: Any?): String? = when (value) {
         is JSONObject -> value.optJSONObject("continuationCommand")?.optString("token")?.takeIf { it.isNotBlank() }
+            ?: value.optJSONObject("nextContinuationData")?.optString("continuation")?.takeIf { it.isNotBlank() }
+            ?: value.optJSONObject("nextRadioContinuationData")?.optString("continuation")?.takeIf { it.isNotBlank() }
+            ?: value.optJSONObject("reloadContinuationData")?.optString("continuation")?.takeIf { it.isNotBlank() }
             ?: value.keys().asSequence().mapNotNull { findContinuationToken(value.opt(it)) }.firstOrNull()
         is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findContinuationToken(value.opt(it)) }.firstOrNull()
         else -> null
+    }
+
+    private fun findNextContinuationToken(value: Any?, previous: String?): String? {
+        val pageTokens = linkedSetOf<String>()
+        val fallbackTokens = linkedSetOf<String>()
+        fun collect(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    node.optJSONObject("continuationItemRenderer")?.let(::findContinuationToken)
+                        ?.takeIf(String::isNotBlank)?.let(pageTokens::add)
+                    node.optJSONObject("continuationCommand")?.optString("token")?.takeIf(String::isNotBlank)?.let(fallbackTokens::add)
+                    node.optJSONObject("nextContinuationData")?.optString("continuation")?.takeIf(String::isNotBlank)?.let(fallbackTokens::add)
+                    node.optJSONObject("reloadContinuationData")?.optString("continuation")?.takeIf(String::isNotBlank)?.let(fallbackTokens::add)
+                    node.keys().forEach { collect(node.opt(it)) }
+                }
+                is JSONArray -> for (index in 0 until node.length()) collect(node.opt(index))
+            }
+        }
+        collect(value)
+        return pageTokens.firstOrNull { it != previous } ?: fallbackTokens.firstOrNull { it != previous }
+    }
+
+    private fun findRadioContinuationToken(value: Any?, previous: String?): String? {
+        fun find(node: Any?): String? = when (node) {
+            is JSONObject -> node.optJSONObject("nextRadioContinuationData")
+                ?.optString("continuation")?.takeIf { it.isNotBlank() && it != previous }
+                ?: node.keys().asSequence().mapNotNull { find(node.opt(it)) }.firstOrNull()
+            is JSONArray -> (0 until node.length()).asSequence().mapNotNull { find(node.opt(it)) }.firstOrNull()
+            else -> null
+        }
+        return find(value)
     }
 
     private fun findStringNearKey(value: Any?, key: String, hint: String): String? = when (value) {

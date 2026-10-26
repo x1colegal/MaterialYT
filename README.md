@@ -114,6 +114,11 @@ Shorts relies on frequently changing internal Reel endpoints. Temporary feed or 
 
 NewPipe mode may receive `LOGIN_REQUIRED`, bot-verification responses, incomplete format lists, or extractor failures after server changes. Available formats also depend on the video, account, region, playback client, and device decoder support.
 
+> [!WARNING]
+> The embedded NewPipe Extractor version used by MaterialYT retrieves media through YouTube's DASH delivery path. YouTube is gradually deprecating DASH in favor of SABR, so the NewPipe backend may become less reliable or stop working for additional videos over time. The native SABR backend is recommended for normal playback.
+>
+> NewPipe can sometimes start playback faster because its iOS and visionOS client paths do not need to solve YouTube's web `n` challenge. However, those clients use a separate Platform Guard mechanism for PoToken generation that has not yet been publicly reverse-engineered into a usable open-source implementation. Without a valid client PoToken, YouTube may reject the request with `LOGIN_REQUIRED` before playback starts, especially after several playback attempts. If extraction succeeds, playback can still be less reliable because this NewPipe version depends on YouTube's deprecated DASH delivery path. In practice, NewPipe trades faster extraction for two separate risks: pre-playback rejection caused by the missing Platform Guard PoToken, and playback failures caused by DASH deprecation.
+
 ## Account integration
 
 Google sign-in is completed on Google's HTTPS pages inside Android System WebView. MaterialYT then reuses the locally stored YouTube session cookies for authenticated internal requests.

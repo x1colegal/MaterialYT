@@ -72,6 +72,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val duration = androidx.compose.runtime.mutableLongStateOf(0L)
         val availableAudioTracks = androidx.compose.runtime.mutableStateOf<List<PlayableStream>>(emptyList())
         val selectedAudioTrack = androidx.compose.runtime.mutableStateOf<PlayableStream?>(null)
+        val playbackEndedGeneration = androidx.compose.runtime.mutableIntStateOf(0)
         private var instance: AutoMusicService? = null
         private const val ACTION_PLAY = "com.x1colegal.materialyt.PLAY"
         private const val ACTION_KEEP_ALIVE = "com.x1colegal.materialyt.KEEP_ALIVE"
@@ -142,6 +143,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             isActive = true
         }
         sessionToken = session.sessionToken
+        var endReported = false
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 publishState()
@@ -162,6 +164,17 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                         PlaybackLoadStatus.show(id, "Buffering media…")
                     }
                 }
+                if (playbackState == Player.STATE_READY && player.currentPosition < player.duration.coerceAtLeast(0L) - 1_000L) endReported = false
+                if (playbackState == Player.STATE_ENDED && !endReported) {
+                    endReported = true
+                    val endedId = currentTrack?.id
+                    val endedAt = player.currentPosition.coerceAtLeast(0L)
+                    AppLog.event("music playback ended video=$endedId")
+                    if (endedId != null) scope.launch(Dispatchers.IO) {
+                        runCatching { YouTubeRepository.reportPlayback(endedId, maxOf(0L, endedAt - 1_000L), endedAt, ended = true) }
+                    }
+                    playbackEndedGeneration.intValue++
+                }
                 publishState(); publishMetadata()
             }
             override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
@@ -178,6 +191,15 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 position.longValue = player.currentPosition.coerceAtLeast(0L); bufferedPosition.longValue = player.bufferedPosition.coerceAtLeast(position.longValue); duration.longValue = player.duration.coerceAtLeast(0L); publishState()
                 val id = currentTrack?.id
                 if (id != reportedTrackId) { reportedTrackId = id; lastReported = 0L }
+                val knownDuration = duration.longValue
+                if (!endReported && id != null && knownDuration > 0L && position.longValue >= knownDuration - 500L) {
+                    endReported = true
+                    AppLog.event("music playback reached end video=$id position=${position.longValue} duration=$knownDuration")
+                    scope.launch(Dispatchers.IO) {
+                        runCatching { YouTubeRepository.reportPlayback(id, maxOf(0L, position.longValue - 1_000L), position.longValue, ended = true) }
+                    }
+                    playbackEndedGeneration.intValue++
+                }
                 val due = lastReported == 0L && position.longValue >= 1_000L || position.longValue - lastReported >= 10_000L
                 if (id != null && player.isPlaying && due) {
                         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.reportPlayback(id, lastReported, position.longValue) } }
@@ -248,7 +270,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             // keeps Android Auto playback alive when the phone is locked or the UI never opens.
             startForeground(NOTIFICATION_ID, notification())
             scope.launch(Dispatchers.IO) {
-                runCatching { YouTubeRepository.preparePlaybackTracking(track.id) }
+                runCatching { YouTubeRepository.preparePlaybackTracking(track.id, music = true) }
                     .onFailure { AppLog.failure("prepare standard history tracking music=${track.id}", it) }
             }
             currentArtwork = runCatching {
@@ -285,7 +307,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             if (attempt < 2) kotlinx.coroutines.delay((attempt + 1) * 1_000L)
         }
         if (audioStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
-            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(track.id) } }
+            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(track.id, music = true) } }
                 .onFailure { AppLog.failure("music SABR primary video=${track.id}", it) }
                 .getOrNull()?.let { playback ->
                     playback.formats.filter { it.audio }.map { format ->
@@ -360,6 +382,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         } else ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
             .createMediaSource(MediaItem.fromUri(stream.url))
         player.setMediaSource(source)
+        player.seekTo(0L)
         player.prepare()
         player.playWhenReady = true
         session.isActive = true
@@ -455,6 +478,9 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 session.setPlaybackState(PlaybackStateCompat.Builder()
                     .setActions(PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH)
                     .setState(PlaybackStateCompat.STATE_STOPPED, 0L, 0f).build())
+                // Let the active video MediaSession become Android Auto's Now Playing
+                // session when a mixed YT Music playlist advances to a video item.
+                session.isActive = false
                 stopForeground(true)
                 getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
             }.onFailure { AppLog.failure("close music miniplayer", it) }

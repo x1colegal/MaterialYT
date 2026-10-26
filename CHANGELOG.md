@@ -2,12 +2,20 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.5] - 2026-10-26
+
+### Fixed
+- Remove the global black system-bar strip from tablet pages by letting each Scaffold paint and apply its own safe insets.
+- Keep tablet players edge-to-edge so the YT Music navigation no longer overlaps a separately reserved system-bar area.
+
 ## [3.4] - 2026-10-26
 
 ### Fixed
 - Keep the real video title when autoplay opens a normal YouTube Up Next recommendation instead of preserving the `Up Next` section label as video metadata.
 
 ## [3.3] - 2026-10-26
+
+> **Big update:** This release significantly expands YT Music, playlists, autoplay, account-backed search history, and playback integration across MaterialYT.
 
 ### Changed
 - Rebuild the native YT Music home from the actual WEB_REMIX sections, preserving category navigation, section titles, compact song rows, and horizontal album and playlist shelves.

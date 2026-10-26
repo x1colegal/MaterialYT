@@ -718,12 +718,7 @@ private fun AppScaffold(
     }
     Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
     if (tablet) {
-        val tabletViewportModifier = if (!activity.isFullscreen && !activity.pipMode) {
-            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
-        } else {
-            Modifier.fillMaxSize()
-        }
-        Row(tabletViewportModifier) {
+        Row(Modifier.fillMaxSize()) {
             if (!hideNavigation) NavigationRail {
                 Spacer(Modifier.weight(1f))
                 tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
@@ -731,7 +726,14 @@ private fun AppScaffold(
             }
             Scaffold(
                 Modifier.weight(1f),
-                contentWindowInsets = ComposeWindowInsets(0, 0, 0, 0),
+                // Normal tablet pages receive safe insets from their own surface, so the
+                // system-bar area is painted by Scaffold instead of becoming an external
+                // black strip. Players are edge-to-edge and manage their bars themselves.
+                contentWindowInsets = if (hideNavigation || activity.pipMode) {
+                    ComposeWindowInsets(0, 0, 0, 0)
+                } else {
+                    ComposeWindowInsets.safeDrawing
+                },
                 bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ } },
                 content = content,
             )

@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.4] - 2026-10-26
+
+### Fixed
+- Keep the real video title when autoplay opens a normal YouTube Up Next recommendation instead of preserving the `Up Next` section label as video metadata.
+
 ## [3.3] - 2026-10-26
 
 ### Changed

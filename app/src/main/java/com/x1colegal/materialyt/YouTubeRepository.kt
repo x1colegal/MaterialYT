@@ -3217,8 +3217,22 @@ object YouTubeRepository {
             val id = when { isChannel -> channelId; isPlaylist -> playlistId.removePrefix("VL"); else -> videoId }
             if (!isChannel && !isPlaylist && id.length != 11) return@walkFeedRenderers
             val columns = flexColumnTexts(renderer)
-            val title = text(renderer.opt("title")) ?: text(renderer.opt("headline")) ?: columns.firstOrNull()
+            val rawTitle = text(renderer.opt("title")) ?: text(renderer.opt("headline")) ?: columns.firstOrNull()
                 ?: deepText(renderer, "title") ?: deepText(renderer, "headline") ?: return@walkFeedRenderers
+            // Autoplay containers can expose their UI heading ("Up Next") as `title`
+            // while keeping the actual video's title in `videoTitle`. Never let that
+            // heading poison the metadata cache of the video that is about to open.
+            val title = if (rawTitle.trim().equals("Up Next", ignoreCase = true)) {
+                sequenceOf(
+                    text(renderer.opt("videoTitle")),
+                    deepText(renderer, "videoTitle"),
+                    text(renderer.opt("headline")),
+                    deepText(renderer, "headline"),
+                    columns.firstOrNull(),
+                ).filterNotNull().firstOrNull {
+                    it.isNotBlank() && !it.trim().equals("Up Next", ignoreCase = true)
+                } ?: rawTitle
+            } else rawTitle
             val channelSubtitle = if (isChannel) {
                 val subs = text(renderer.opt("subscriberCountText"))
                 val vids = text(renderer.opt("videoCountText"))

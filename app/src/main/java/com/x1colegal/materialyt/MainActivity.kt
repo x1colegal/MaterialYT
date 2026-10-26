@@ -3127,7 +3127,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     fun stableMetadata(latest: VideoDetails?): VideoDetails? {
         latest ?: return videoMetadata
         val current = videoMetadata ?: return latest
-        val stableTitle = current.title.trim().takeIf { it.isNotBlank() && !it.equals("Video", true) }
+        val stableTitle = current.title.trim().takeIf {
+            it.isNotBlank() && !it.equals("Video", true) && !it.equals("Up Next", true)
+        }
         val stableAuthor = cleanChannelDisplayName(current.author)
         return latest.copy(
             title = stableTitle ?: latest.title,

@@ -13,12 +13,12 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
 </p>
 
-MaterialYT combines YouTube, YouTube Music, Shorts, account-aware feeds, native playback, and Android Auto in one Jetpack Compose application. It uses YouTube's internal web responses, a native SABR/UMP transport, an embedded NewPipe Extractor compatibility backend, OkHttp, and ExoPlayer. No YouTube Data API key is required.
+MaterialYT combines YouTube, YouTube Music, Shorts, account-aware feeds, native playback, and Android Auto in one Jetpack Compose application. It uses YouTube's internal web responses, native SABR/UMP transport, OkHttp, and ExoPlayer. No YouTube Data API key is required.
 
 The app renders its own native interface. Only Google sign-in is displayed through Android System WebView.
 
 > [!IMPORTANT]
-> MaterialYT is an independent project. It is not affiliated with, endorsed by, or sponsored by Google, YouTube, or NewPipe. YouTube and YouTube Music are trademarks of Google LLC. YouTube's private interfaces can change without notice and may temporarily break extraction or account features.
+> MaterialYT is an independent project. It is not affiliated with, endorsed by, or sponsored by Google or YouTube. YouTube and YouTube Music are trademarks of Google LLC. YouTube's private interfaces can change without notice and may temporarily break extraction or account features.
 
 ## Highlights
 
@@ -27,7 +27,6 @@ The app renders its own native interface. Only Google sign-in is displayed throu
 - YouTube Music Home, search, foreground playback, synchronized lyrics, comments, and Android Auto
 - Vertical Shorts player with continuation-based recommendations
 - Native SABR/UMP playback with independently selectable audio and video formats
-- Embedded NewPipe Extractor as an optional compatibility backend
 - Signed-in feeds, account actions, and YouTube History reporting without a Data API key
 - Fullscreen, picture-in-picture, persistent miniplayers, and large buffering
 - Responsive phone and tablet layouts, Android Auto, and legacy Android support
@@ -82,7 +81,7 @@ Availability of sideloaded media apps depends on the Android Auto version, phone
 - Comments, channel navigation, playback settings, and video details
 - Authenticated Like actions
 - Audio-track selection and account History reporting
-- The same SABR and compatibility backend infrastructure used by regular playback
+- The same SABR playback infrastructure used by regular playback
 
 Shorts relies on frequently changing internal Reel endpoints. Temporary feed or continuation breakage is possible when YouTube changes those responses.
 
@@ -102,22 +101,6 @@ Shorts relies on frequently changing internal Reel endpoints. Temporary feed or 
 - Automatic PiP when leaving an active regular video
 - Display-aspect-aware PiP windows
 - Disk-backed SABR reassembly and large forward buffering
-
-### Playback backends
-
-| Mode | Behavior |
-| --- | --- |
-| **SABR (Recommended)** | Uses the native WEB + PoToken + SABR path and its client fallbacks. This is the default. |
-| **SABR + NewPipe fallback** | Uses SABR first and tries NewPipe if SABR extraction fails. |
-| **Force NewPipe** | Uses only the embedded NewPipe Extractor path. |
-| **NewPipe + SABR fallback** | Tries NewPipe first and falls back to SABR. |
-
-NewPipe mode may receive `LOGIN_REQUIRED`, bot-verification responses, incomplete format lists, or extractor failures after server changes. Available formats also depend on the video, account, region, playback client, and device decoder support.
-
-> [!WARNING]
-> The embedded NewPipe Extractor version used by MaterialYT retrieves media through YouTube's DASH delivery path. YouTube is gradually deprecating DASH in favor of SABR, so the NewPipe backend may become less reliable or stop working for additional videos over time. The native SABR backend is recommended for normal playback.
->
-> NewPipe can sometimes start playback faster because its iOS and visionOS client paths do not need to solve YouTube's web `n` challenge. However, those clients use a separate Platform Guard mechanism for PoToken generation that has not yet been publicly reverse-engineered into a usable open-source implementation. Without a valid client PoToken, YouTube may reject the request with `LOGIN_REQUIRED` before playback starts, especially after several playback attempts. If extraction succeeds, playback can still be less reliable because this NewPipe version depends on YouTube's deprecated DASH delivery path. In practice, NewPipe trades faster extraction for two separate risks: pre-playback rejection caused by the missing Platform Guard PoToken, and playback failures caused by DASH deprecation.
 
 ## Account integration
 
@@ -152,7 +135,7 @@ MaterialYT uses OkHttp for backend and media traffic. The Settings screen provid
 - **HTTP/1.1** only
 - **HTTP/1.0 compatibility**, using HTTP/1.1 connection-close behavior because OkHttp does not emit HTTP/1.0 request lines
 
-Network protocol selection and playback backend selection are independent settings.
+Network protocol selection applies to backend and media requests.
 
 ## Technology
 
@@ -162,7 +145,6 @@ Network protocol selection and playback backend selection are independent settin
 | Interface | Jetpack Compose and Material 3 |
 | Playback | ExoPlayer 2.19.1 |
 | Primary transport | Native SABR/UMP with disk-backed reassembly |
-| Compatibility extraction | Embedded, modified NewPipe Extractor module |
 | Networking | OkHttp 5 |
 | Images | Coil |
 | JavaScript challenges | yt-dlp EJS solver assets executed through J2V8 |
@@ -178,15 +160,12 @@ app/src/main/java/com/x1colegal/materialyt/
 ├── EjsChallengeSolver.kt     # Signature and n-challenge execution
 ├── HttpBackend.kt            # OkHttp and selectable HTTP modes
 ├── MainActivity.kt           # Compose UI, navigation, feeds, and players
-├── MaterialYtApp.kt          # Application and extractor initialization
-├── NewPipePoTokenProvider.kt # BotGuard WebView and PoToken generation
-├── PlaybackBackend.kt        # Playback backend preferences
+├── MaterialYtApp.kt          # Application initialization
 ├── PlayerFactory.kt          # ExoPlayer and buffering configuration
 ├── SabrMediaFactory.kt       # SABR media sources for ExoPlayer
 ├── YouTubeRepository.kt      # Feeds, account data, metadata, and tracking
 └── sabrmodern/               # UMP parsing, SABR sessions, and buffering
 
-newpipe-extractor/             # Embedded NewPipe Extractor fork
 sabr/                          # SABR protocol module
 ```
 
@@ -213,7 +192,7 @@ Release builds currently use the configured debug signing key. Fork maintainers 
 ## Known limitations
 
 - YouTube's player clients, internal APIs, continuations, BotGuard challenges, and SABR messages are undocumented and can change at any time.
-- Some content may work through one playback client or backend but not another.
+- Some content may depend on the playback client selected by the internal fallback flow.
 - Comments, lyrics, likes, audio tracks, playlists, and account metadata are shown only when YouTube exposes them to the current session.
 - PiP requires Android 8.0 or newer.
 - Codec and hardware-decoder availability depends on the device.
@@ -228,7 +207,7 @@ A useful bug report includes:
 
 - MaterialYT version
 - Android and System WebView versions
-- Selected playback backend and network mode
+- Selected network mode
 - Selected quality, codecs, and decoder mode
 - Sign-in state
 - Reproducible video URL or ID
@@ -236,9 +215,7 @@ A useful bug report includes:
 
 ## License
 
-MaterialYT's original source code is licensed under the [MIT License](LICENSE).
-
-The embedded [NewPipe Extractor](newpipe-extractor/) module is licensed under GPL-3.0-or-later. Distributed binaries and forks must comply with that license and the licenses of all included dependencies.
+MaterialYT is licensed under the [MIT License](LICENSE).
 
 ---
 

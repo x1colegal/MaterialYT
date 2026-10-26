@@ -138,12 +138,6 @@ import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import java.util.concurrent.TimeUnit
-import org.schabi.newpipe.extractor.InfoItem
-import org.schabi.newpipe.extractor.NewPipe
-import org.schabi.newpipe.extractor.comments.CommentsInfo
-import org.schabi.newpipe.extractor.comments.CommentsInfoItem
-import org.schabi.newpipe.extractor.search.SearchInfo
-import org.schabi.newpipe.extractor.stream.StreamInfo
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK, OLED }
 enum class CodecChoice(val label: String, val tokens: List<String>) {
@@ -358,7 +352,24 @@ class MainActivity : ComponentActivity() {
     fun fullscreen(enabled: Boolean) {
         isFullscreen = enabled
         requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        applyFullscreenState()
+        if (enabled) {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            applyFullscreenState()
+        } else {
+            restoreNormalSystemBars()
+            // Orientation/configuration changes can reapply the old fullscreen window flags
+            // after this call. Restore the fitted viewport again on the following frames.
+            window.decorView.post { if (!isFullscreen && !pipMode) restoreNormalSystemBars() }
+            window.decorView.postDelayed({ if (!isFullscreen && !pipMode) restoreNormalSystemBars() }, 300L)
+        }
+    }
+
+    private fun restoreNormalSystemBars() {
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+        window.decorView.requestApplyInsets()
     }
 
     private fun applyFullscreenState() {
@@ -378,7 +389,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && isFullscreen && !pipMode) applyFullscreenState()
+        if (hasFocus && !pipMode) {
+            if (isFullscreen) applyFullscreenState() else restoreNormalSystemBars()
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        window.decorView.post {
+            if (!pipMode) {
+                if (isFullscreen) applyFullscreenState() else restoreNormalSystemBars()
+            }
+        }
     }
 
     override fun onStop() {
@@ -457,7 +479,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         } else {
-            applyFullscreenState()
+            if (isFullscreen) applyFullscreenState() else restoreNormalSystemBars()
         }
     }
 
@@ -726,14 +748,7 @@ private fun AppScaffold(
             }
             Scaffold(
                 Modifier.weight(1f),
-                // Normal tablet pages receive safe insets from their own surface, so the
-                // system-bar area is painted by Scaffold instead of becoming an external
-                // black strip. Players are edge-to-edge and manage their bars themselves.
-                contentWindowInsets = if (hideNavigation || activity.pipMode) {
-                    ComposeWindowInsets(0, 0, 0, 0)
-                } else {
-                    ComposeWindowInsets.safeDrawing
-                },
+                contentWindowInsets = ComposeWindowInsets(0, 0, 0, 0),
                 bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ } },
                 content = content,
             )
@@ -926,12 +941,10 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var results by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
     var homeFeed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
-    var selectedResult by remember { mutableStateOf<InfoItem?>(null) }
     var searchOpen by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
     val initialContentFocus = remember { FocusRequester() }
@@ -943,14 +956,6 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     }
     if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
-    selectedResult?.let { item ->
-        when (item.infoType) {
-            InfoItem.InfoType.CHANNEL -> ChannelScreen(activity, item.url, codec, audioCodec, quality, onPlayer, openVideo) { selectedResult = null }
-            InfoItem.InfoType.PLAYLIST -> PlaylistScreen(activity, item.url, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedResult = null }
-            else -> Unit
-        }
-        return
-    }
     if (searchOpen) {
         DedicatedSearchScreen("Search YouTube", query, false, { searchOpen = false }) { requested ->
             query = requested
@@ -1002,7 +1007,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             Image(painterResource(R.drawable.ic_launcher_foreground), "MaterialYT", Modifier.size(56.dp))
             Spacer(Modifier.weight(1f))
             if (query.isNotBlank()) IconButton(onClick = {
-                scrollHomeToTop(); query = ""; results = emptyList(); error = null; feed = homeFeed
+                scrollHomeToTop(); query = ""; error = null; feed = homeFeed
             }) { Icon(Icons.Default.Close, "Clear search results") }
             IconButton(onClick = { searchOpen = true }) { Icon(Icons.Default.Search, "Search YouTube") }
             IconButton(onClick = {
@@ -1010,7 +1015,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 focusManager.clearFocus()
                 keyboardController?.hide()
                 scope.launch {
-                    loading = true; error = null; results = emptyList()
+                    loading = true; error = null
                     runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.home() }) }
                         .onSuccess { homeFeed = it; feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }
                     loading = false
@@ -1019,7 +1024,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
-        if (!loading && results.isEmpty() && feed.isEmpty()) {
+        if (!loading && feed.isEmpty()) {
             Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) {
                 Icon(Icons.Default.PlayCircle, null, Modifier.size(68.dp), tint = MaterialTheme.colorScheme.primary)
                 Text(if (YouTubeRepository.signedIn()) "Your feed is currently empty" else "Search YouTube", Modifier.padding(16.dp))
@@ -1033,9 +1038,6 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     }
                 }
                 LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(16.dp)) {
-                    if (results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Channels and playlists", Modifier.padding(bottom = 16.dp), style = MaterialTheme.typography.titleLarge) }
-                    gridItems(results, span = { GridItemSpan(maxLineSpan) }) { item -> ResultRow(item) { selectedResult = item } }
-                    if (feed.isNotEmpty() && results.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Videos", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleLarge) }
                     gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } } }
                     if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
@@ -1046,9 +1048,6 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     }
                 }
                 LazyColumn(state = homeListState) {
-                    if (results.isNotEmpty()) item { Text("Channels and playlists", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
-                    items(results) { item -> ResultRow(item) { selectedResult = item } }
-                    if (feed.isNotEmpty() && results.isNotEmpty()) item { Text("Videos", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge) }
                     items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } }
                     if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
@@ -1854,27 +1853,8 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
         onDispose { player.removeListener(listener); activity.stopMusicNotification(); mediaSession.isActive = false; mediaSession.release(); activity.immersive(false); player.release() }
     }
     LaunchedEffect(track.id) {
-        // Match the v1.2.8 video path: NewPipe exposes the full audio format set first.
-        var audioStreams = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
-            .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
-                val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
-                val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
-                PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
-            }.orEmpty() else emptyList()
-        if (audioStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
-            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
-                .getOrNull()?.filter { it.audio }.orEmpty()
-        }
-        if (audioStreams.isEmpty() && PlaybackBackendPreferences.useNewPipeWhenWebFails()) {
-            audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(track.id) } }
-                .onFailure { AppLog.failure("music NewPipe fallback video=${track.id}", it) }
-                .getOrNull()?.audioStreams?.filter { it.content.startsWith("http") }?.map {
-                    val name = it.audioTrackName?.takeIf { n -> n.isNotBlank() }
-                        ?: it.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
-                    val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
-                    PlayableStream(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, true, false, original, name, it.audioTrackId.orEmpty())
-                }.orEmpty()
-        }
+        val audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
+            .getOrNull()?.filter { it.audio }.orEmpty()
         val audio = audioStreams.maxByOrNull { it.bitrate }
         if (audio != null) {
             val source = ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(YouTubeRepository.mediaHeaders(audio.url)))
@@ -2217,43 +2197,9 @@ private fun TopicChips(labels: List<String>) {
 }
 
 @Composable
-private fun ResultRow(item: InfoItem, showSubtitle: Boolean = true, click: () -> Unit) {
-    val isChannel = item.infoType == InfoItem.InfoType.CHANNEL
-    Row(Modifier.fillMaxWidth().clickable(onClick = click).padding(horizontal = 16.dp, vertical = if (isChannel) 14.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        val thumb = item.thumbnails.firstOrNull()?.url
-        if (isChannel) {
-            if (!thumb.isNullOrBlank()) {
-                AsyncImage(thumb, null, Modifier.size(72.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape), contentScale = ContentScale.Crop)
-            } else {
-                Surface(Modifier.size(72.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
-                    Icon(Icons.Default.Person, null, Modifier.padding(16.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
-                }
-            }
-        } else {
-            AsyncImage(thumb, null, Modifier.size(132.dp, 76.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
-        }
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(item.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (showSubtitle) {
-                Spacer(Modifier.height(2.dp))
-                Text(item.infoType.name.lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        if (isChannel) {
-            Spacer(Modifier.width(8.dp))
-            FilledTonalButton(onClick = click, shape = CircleShape, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)) {
-                Text("Channel", style = MaterialTheme.typography.labelMedium)
-            }
-        }
-    }
-}
-
-@Composable
 private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit = {}, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val playlistId = remember(url) { (Regex("[?&]list=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')).removePrefix("VL") }
-    var playlist by remember { mutableStateOf<org.schabi.newpipe.extractor.playlist.PlaylistInfo?>(null) }
     var playlistItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var editable by remember { mutableStateOf(false) }
     var deletable by remember { mutableStateOf(false) }
@@ -2270,8 +2216,6 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
             .onSuccess { page -> playlistItems = page.items; editable = page.editable; deletable = page.deletable }
             .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
         loading = false
-        runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.playlist.PlaylistInfo.getInfo("https://www.youtube.com/playlist?list=$playlistId") } }
-            .onSuccess { playlist = it }
     }
     Box(Modifier.fillMaxSize()) {
       Column(Modifier.fillMaxSize()) {
@@ -2283,11 +2227,10 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
                 Modifier.widthIn(min = 300.dp, max = 380.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                (playlist?.thumbnails?.lastOrNull()?.url ?: playlistItems.firstOrNull()?.thumbnail)?.let {
+                playlistItems.firstOrNull()?.thumbnail?.let {
                     AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
                 }
-                Text(playlist?.name ?: "YouTube playlist", style = MaterialTheme.typography.headlineMedium)
-                playlist?.uploaderName?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Text("YouTube playlist", style = MaterialTheme.typography.headlineMedium)
                 Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodyMedium)
                 if (playlistItems.isNotEmpty()) Button(onClick = { selectedIndex = 0 }, Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play all")
@@ -2310,8 +2253,8 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
             }
         } else if (!loading) LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
             item { Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                (playlist?.thumbnails?.lastOrNull()?.url ?: playlistItems.firstOrNull()?.thumbnail)?.let { AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(24.dp)), contentScale = ContentScale.Crop) }
-                Text(playlist?.name ?: "YouTube playlist", style = MaterialTheme.typography.headlineMedium); playlist?.uploaderName?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                playlistItems.firstOrNull()?.thumbnail?.let { AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(24.dp)), contentScale = ContentScale.Crop) }
+                Text("YouTube playlist", style = MaterialTheme.typography.headlineMedium)
                 Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodyMedium)
                 if (playlistItems.isNotEmpty()) Button(onClick = { selectedIndex = 0 }, Modifier.fillMaxWidth()) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play") }
             } }
@@ -2372,62 +2315,37 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
 
 @Composable
 private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onBack: () -> Unit) {
-    var channel by remember { mutableStateOf<org.schabi.newpipe.extractor.channel.ChannelInfo?>(null) }
-    var channelItems by remember { mutableStateOf<List<InfoItem>>(emptyList()) }
+    var channel by remember { mutableStateOf<NativeChannelPage?>(null) }
+    var channelItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
     var selectedTab by remember { mutableStateOf("videos") }
     var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
-    var tabHandler by remember { mutableStateOf<org.schabi.newpipe.extractor.linkhandler.ListLinkHandler?>(null) }
-    var nextPage by remember { mutableStateOf<org.schabi.newpipe.extractor.Page?>(null) }
-    var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var subscribed by remember(url) { mutableStateOf<Boolean?>(null) }
     var subscriptionBusy by remember(url) { mutableStateOf(false) }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     val scope = rememberCoroutineScope()
     BackHandler { if (selectedShort != null) selectedShort = null else onBack() }
-    LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(url) } }
+    LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url) } }
         .onSuccess {
             channel = it
             if (it.id.isNotBlank() && YouTubeRepository.signedIn()) runCatching {
                 withContext(Dispatchers.IO) { YouTubeRepository.channelSubscriptionState(it.id) }
             }.onSuccess { state -> subscribed = state }
         }.onFailure { error = it.message } }
-    LaunchedEffect(channel, selectedTab) {
-        val loaded = channel ?: return@LaunchedEffect
+    LaunchedEffect(selectedTab) {
         error = null
         if (selectedTab == "posts") {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPosts(url) } }
                 .onSuccess { posts = it }.onFailure { error = it.message }
         } else {
             channelItems = emptyList()
-            nextPage = null
-            val handler = loaded.tabs.firstOrNull { it.contentFilters.firstOrNull()?.equals(selectedTab, true) == true }
-                ?: if (selectedTab == "videos") loaded.tabs.firstOrNull() else null
-            tabHandler = handler
-            runCatching { withContext(Dispatchers.IO) { handler?.let { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getInfo(NewPipe.getService(0), it) } } }
-                .onSuccess { info -> channelItems = info?.relatedItems.orEmpty(); nextPage = info?.nextPage }
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url, selectedTab) } }
+                .onSuccess { page -> channel = page; channelItems = page.items }
                 .onFailure { error = it.message }
-        }
-    }
-    fun loadMore() {
-        val handler = tabHandler ?: return
-        val page = nextPage?.takeIf { org.schabi.newpipe.extractor.Page.isValid(it) } ?: return
-        if (loadingMore || selectedTab == "posts") return
-        loadingMore = true
-        scope.launch {
-            runCatching { withContext(Dispatchers.IO) { org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo.getMoreItems(NewPipe.getService(0), handler, page) } }
-                .onSuccess { result -> channelItems = (channelItems + result.items).distinctBy { it.url }; nextPage = result.nextPage }
-                .onFailure { error = it.message }
-            loadingMore = false
         }
     }
     val listState = rememberLazyListState()
-    LaunchedEffect(listState, channelItems.size, selectedTab) {
-        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
-            if (last >= listState.layoutInfo.totalItemsCount - 4) loadMore()
-        }
-    }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
     LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
         item { Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } } }
@@ -2436,7 +2354,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         channel?.let { data ->
             item {
                 Column(Modifier.fillMaxWidth()) {
-                    data.banners.lastOrNull()?.url?.let {
+                    data.banner.takeIf(String::isNotBlank)?.let {
                         AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(if (tablet) 6f else 4f), contentScale = ContentScale.Crop)
                     }
                     val subscriptionButton: @Composable () -> Unit = {
@@ -2462,11 +2380,11 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                         Modifier.fillMaxWidth().padding(horizontal = 40.dp, vertical = 20.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(120.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
+                        data.avatar.takeIf(String::isNotBlank)?.let { AsyncImage(it, null, Modifier.size(120.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
                         Column(Modifier.padding(start = 20.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(data.name, style = MaterialTheme.typography.headlineMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(data.description.orEmpty(), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            if (data.subscribers.isNotBlank()) Text(data.subscribers, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(data.description, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
                         }
                         Spacer(Modifier.width(20.dp))
                         subscriptionButton()
@@ -2475,10 +2393,10 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        data.avatars.lastOrNull()?.url?.let { AsyncImage(it, null, Modifier.size(88.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
+                        data.avatar.takeIf(String::isNotBlank)?.let { AsyncImage(it, null, Modifier.size(88.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
                         Text(data.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-                        if (data.subscriberCount >= 0) Text("${formatCount(data.subscriberCount)} subscribers", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(data.description.orEmpty(), Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        if (data.subscribers.isNotBlank()) Text(data.subscribers, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(data.description, Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                         subscriptionButton()
                     }
                 }
@@ -2506,38 +2424,19 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                 if (tablet) items(channelItems.chunked(2)) { rowItems ->
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         rowItems.forEach { item -> ChannelTabletItem(item, Modifier.weight(1f)) {
-                            if (item.infoType == InfoItem.InfoType.STREAM) {
-                                if (selectedTab == "shorts") {
-                                    val id = item.url.substringAfterLast('/').substringBefore('?').takeIf { it.length == 11 }
-                                        ?: Regex("[?&]v=([^&]+)").find(item.url)?.groupValues?.getOrNull(1)
-                                    if (id != null) selectedShort = FeedItem(id, item.name, channel?.name.orEmpty(), item.thumbnails.firstOrNull()?.url.orEmpty(), 9, 16, channel?.avatars?.lastOrNull()?.url.orEmpty(), "https://www.youtube.com/shorts/$id", channelUrl = url)
-                                } else {
-                                    val videoId = Regex("[?&]v=([^&]+)").find(item.url)?.groupValues?.getOrNull(1) ?: item.url.substringAfterLast('/')
-                                    YouTubeRepository.seedVideoDetails(videoId, item.name, channel?.name.orEmpty(), url, channel?.avatars?.lastOrNull()?.url.orEmpty())
-                                    openVideo(item.url)
-                                }
+                            if (selectedTab == "shorts") selectedShort = item else {
+                                YouTubeRepository.seedVideoDetails(item.id, item.title, channel?.name.orEmpty(), url, channel?.avatar.orEmpty())
+                                openVideo(item.url)
                             }
                         } }
                         if (rowItems.size == 1) Spacer(Modifier.weight(1f))
                     }
-                } else items(channelItems) { item -> ResultRow(item, showSubtitle = false) {
-                    if (item.infoType == InfoItem.InfoType.STREAM) {
-                        if (selectedTab == "shorts") {
-                            val id = item.url.substringAfterLast('/').substringBefore('?').takeIf { it.length == 11 }
-                                ?: Regex("[?&]v=([^&]+)").find(item.url)?.groupValues?.getOrNull(1)
-                            if (id != null) selectedShort = FeedItem(
-                                id, item.name, channel?.name.orEmpty(), item.thumbnails.firstOrNull()?.url.orEmpty(),
-                                9, 16, channel?.avatars?.lastOrNull()?.url.orEmpty(), "https://www.youtube.com/shorts/$id",
-                                channelUrl = url,
-                            )
-                        } else {
-                            val videoId = Regex("[?&]v=([^&]+)").find(item.url)?.groupValues?.getOrNull(1) ?: item.url.substringAfterLast('/')
-                            YouTubeRepository.seedVideoDetails(videoId, item.name, channel?.name.orEmpty(), url, channel?.avatars?.lastOrNull()?.url.orEmpty())
-                            openVideo(item.url)
-                        }
+                } else items(channelItems) { item -> FeedRow(item) {
+                    if (selectedTab == "shorts") selectedShort = item else {
+                        YouTubeRepository.seedVideoDetails(item.id, item.title, channel?.name.orEmpty(), url, channel?.avatar.orEmpty())
+                        openVideo(item.url)
                     }
                 } }
-                if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         }
     }
@@ -2550,15 +2449,15 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
 }
 
 @Composable
-private fun ChannelTabletItem(item: InfoItem, modifier: Modifier = Modifier, click: () -> Unit) {
+private fun ChannelTabletItem(item: FeedItem, modifier: Modifier = Modifier, click: () -> Unit) {
     Column(modifier.clickable(onClick = click)) {
         AsyncImage(
-            item.thumbnails.firstOrNull()?.url,
+            item.thumbnail,
             null,
             Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(MaterialTheme.colorScheme.surfaceVariant),
             contentScale = ContentScale.Crop,
         )
-        Text(item.name, Modifier.padding(horizontal = 4.dp, vertical = 10.dp), style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(item.title, Modifier.padding(horizontal = 4.dp, vertical = 10.dp), style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -2666,7 +2565,6 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var audioTracks by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var sabrPlayback by remember(item.id) { mutableStateOf<SabrPlaybackInfo?>(null) }
     val preferredAudioCodec = audioCodec
-    var shortInfo by remember(item.id) { mutableStateOf<StreamInfo?>(null) }
     var shortMetadata by remember(item.id) { mutableStateOf<VideoDetails?>(YouTubeRepository.videoDetails(item.id)) }
     var speed by remember { mutableFloatStateOf(1f) }
     var expandedTitle by remember { mutableStateOf(false) }
@@ -2734,23 +2632,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             return@LaunchedEffect
         }
         streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; sabrPlayback = null; error = null
-        val infoResult = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(item.id) } }
-            else Result.failure(IllegalStateException("NewPipe disabled by playback backend setting"))
-        infoResult.onSuccess { 
-            shortInfo = it 
-            audioTracks = it.audioStreams.filter { track -> track.content.startsWith("http") }.map { track ->
-                val trackName = track.audioTrackName?.takeIf { n -> n.isNotBlank() } ?: track.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
-                val original = track.audioTrackType?.name?.contains("ORIGINAL", true) == true || trackName.contains("original", true)
-                PlayerChoice(track.content, track.codec.orEmpty(), 0, 0, track.bitrate, false, trackName, track.audioTrackId.orEmpty(), original)
-            }
-            audio = selectAudioStream(audioTracks, preferredAudioCodec)
-            streams = (it.videoOnlyStreams + it.videoStreams).filter { v -> v.content.startsWith("http") }
-                .map { v -> PlayerChoice(v.content, v.codec.orEmpty(), v.height, v.fps, v.bitrate, v.isVideoOnly) }
-                .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { s -> s.height }
-            selectVideoStream(streams, codec, quality)?.let { stream -> play(stream); error = null }
-            AppLog.event("shorts NewPipe primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
-        }.onFailure { AppLog.failure("shorts NewPipe primary video=${item.id}", it) }
-        if (streams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+        if (streams.isEmpty()) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(item.id) } }.onSuccess { playback ->
                 sabrPlayback = playback
                 audioTracks = playback.formats.filter { it.audio }.map {
@@ -2767,7 +2649,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 AppLog.event("shorts SABR primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
             }.onFailure { AppLog.failure("shorts SABR primary video=${item.id}", it) }
         }
-        if (streams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+        if (streams.isEmpty()) {
             val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(item.id) } }
             extracted.onSuccess { result ->
                 audioTracks = result.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
@@ -2776,26 +2658,6 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
                 selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
             }.onFailure { if (streams.isEmpty()) error = it.message }
-        }
-        if (streams.isEmpty() && PlaybackBackendPreferences.useNewPipeWhenWebFails()) {
-            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(item.id) } }.onSuccess {
-                shortInfo = it
-                audioTracks = it.audioStreams.filter { track -> track.content.startsWith("http") }.map { track ->
-                    val trackName = track.audioTrackName?.takeIf { n -> n.isNotBlank() }
-                        ?: track.audioLocale?.displayName?.takeIf { n -> n.isNotBlank() }.orEmpty()
-                    val original = track.audioTrackType?.name?.contains("ORIGINAL", true) == true || trackName.contains("original", true)
-                    PlayerChoice(track.content, track.codec.orEmpty(), 0, 0, track.bitrate, false, trackName, track.audioTrackId.orEmpty(), original)
-                }
-                audio = selectAudioStream(audioTracks, preferredAudioCodec)
-                streams = (it.videoOnlyStreams + it.videoStreams).filter { stream -> stream.content.startsWith("http") }
-                    .map { stream -> PlayerChoice(stream.content, stream.codec.orEmpty(), stream.height, stream.fps, stream.bitrate, stream.isVideoOnly) }
-                    .distinctBy { stream -> "${stream.height}-${stream.fps}-${stream.codec}" }.sortedByDescending { stream -> stream.height }
-                selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
-                AppLog.event("shorts NewPipe fallback video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
-            }.onFailure {
-                AppLog.failure("shorts NewPipe fallback video=${item.id}", it)
-                if (streams.isEmpty()) error = it.message
-            }
         }
     }
     LaunchedEffect(active, selected) {
@@ -2926,19 +2788,19 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable {
-                                val target = item.channelUrl.ifBlank { shortInfo?.uploaderUrl.orEmpty() }
+                                val target = item.channelUrl.ifBlank { shortMetadata?.authorUrl.orEmpty() }
                                 if (target.isNotBlank()) onOpenChannel(target)
                             }
                             .padding(vertical = 4.dp, horizontal = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val shortAvatar = shortInfo?.uploaderAvatars?.lastOrNull()?.url ?: item.channelThumbnail
+                        val shortAvatar = shortMetadata?.authorAvatar.orEmpty().ifBlank { item.channelThumbnail }
                         if (shortAvatar.isNotBlank()) AsyncImage(shortAvatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                         Spacer(Modifier.width(10.dp))
-                        Text(displayChannelName(shortInfo?.uploaderName, shortMetadata?.author, item.subtitle), color = ComposeColor.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(displayChannelName(shortMetadata?.author, item.subtitle), color = ComposeColor.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(Modifier.height(10.dp))
-                    Text(shortMetadata?.title?.takeIf { it.isNotBlank() } ?: shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
+                    Text(shortMetadata?.title?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     IconButton(onClick = { toggleLike() }, enabled = !interactionBusy) {
@@ -2953,16 +2815,16 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 }
             }
             if (expandedTitle) Surface(Modifier.fillMaxSize(), color = ComposeColor.Black.copy(alpha = .94f)) {
-                val views = shortInfo?.viewCount?.takeIf { it >= 0 } ?: shortMetadata?.viewCount ?: -1L
-                val likes = interactions.likeText.ifBlank { shortInfo?.likeCount?.takeIf { it >= 0 }?.let(::formatCount) ?: shortMetadata?.likeText.orEmpty().ifBlank { "—" } }
-                val published = displayPublishedDate(shortInfo?.textualUploadDate ?: shortMetadata?.publishedDate)
-                val description = descriptionText(shortMetadata?.description.orEmpty().ifBlank { shortInfo?.description?.content.orEmpty() })
+                val views = shortMetadata?.viewCount ?: -1L
+                val likes = interactions.likeText.ifBlank { shortMetadata?.likeText.orEmpty().ifBlank { "—" } }
+                val published = displayPublishedDate(shortMetadata?.publishedDate)
+                val description = descriptionText(shortMetadata?.description.orEmpty())
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("Details", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall)
                         IconButton(onClick = { expandedTitle = false }) { Icon(Icons.Default.Close, "Close details", tint = ComposeColor.White) }
                     }
-                    Text(shortMetadata?.title?.takeIf { it.isNotBlank() } ?: shortInfo?.name?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                    Text(shortMetadata?.title?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
                     Row(Modifier.padding(vertical = 18.dp), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                         Column { Text(if (views >= 0) formatCount(views) else "—", color = ComposeColor.White, style = MaterialTheme.typography.titleLarge); Text("Views", color = ComposeColor.LightGray) }
                         Column { Text(likes, color = ComposeColor.White, style = MaterialTheme.typography.titleLarge); Text("Likes", color = ComposeColor.LightGray) }
@@ -3082,7 +2944,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     val requestedStartMs = Regex("[?&]t=(\\d+)").find(url)?.groupValues?.getOrNull(1)?.toLongOrNull()?.times(1_000L) ?: 0L
     val autoplayRequest = Regex("[?&]autoplay=1(?:&|$)").containsMatchIn(url)
     var resumeStartMs by remember(videoId, requestedStartMs) { mutableLongStateOf(requestedStartMs) }
-    var info by remember { mutableStateOf<StreamInfo?>(null) }
     var videoMetadata by remember(videoId) { mutableStateOf(YouTubeRepository.videoDetails(videoId)) }
     var channelInfo by remember { mutableStateOf<ChannelInfo?>(null) }
     var interactions by remember(videoId) { mutableStateOf(VideoInteractionState()) }
@@ -3120,12 +2981,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var initialStartApplied by remember(videoId) { mutableStateOf(false) }
     val player = remember(videoId, playerGeneration) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
     var isMinimized by remember { mutableStateOf(false) }
-    LaunchedEffect(isMinimized) {
-        if (isMinimized) {
-            // Minimizing keeps VideoScreen composed for the miniplayer, so onDispose does
-            // not run. Restore the normal window bars here before returning to the page.
-            activity.fullscreen(false)
-        }
+    LaunchedEffect(isMinimized, fullscreen) {
+        if (!fullscreen) activity.fullscreen(false)
         onPlayerMode?.invoke(!isMinimized)
     }
     var miniplayerDismissed by remember { mutableStateOf(false) }
@@ -3180,11 +3037,11 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         selectedStream = stream
     }
     val mediaSession = remember(player) { MediaSessionCompat(context, "MaterialYT Video") }
-    LaunchedEffect(info, videoMetadata, channelInfo) {
-        if (info != null || videoMetadata != null) {
-            val title = videoMetadata?.title ?: info?.name ?: "Video"
-            val author = displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name)
-            val thumb = info?.thumbnails?.lastOrNull()?.url ?: videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
+    LaunchedEffect(videoMetadata, channelInfo) {
+        if (videoMetadata != null) {
+            val title = videoMetadata?.title ?: "Video"
+            val author = displayChannelName(videoMetadata?.author, channelInfo?.name)
+            val thumb = videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
             activity.showPlaybackNotification(mediaSession, title, author, thumb, player.isPlaying)
         }
     }
@@ -3227,9 +3084,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     val pos = player.currentPosition
                     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { YouTubeRepository.reportPlayback(videoId, maxOf(0, pos - 1000L), pos, paused = true) } }
                 }
-                val title = videoMetadata?.title ?: info?.name ?: "Video"
-                val author = displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name)
-                val thumb = info?.thumbnails?.lastOrNull()?.url ?: videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
+                val title = videoMetadata?.title ?: "Video"
+                val author = displayChannelName(videoMetadata?.author, channelInfo?.name)
+                val thumb = videoMetadata?.let { "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" }
                 activity.showPlaybackNotification(mediaSession, title, author, thumb, isPlaying)
                 mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
                     .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO)
@@ -3360,30 +3217,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 .getOrDefault(0L)
                 .also { position -> AppLog.event("history resume video=$videoId positionMs=$position") }
         }
-        // v1.2.8 behavior: NewPipe is the primary source because it exposes the complete
-        // adaptive format set (AVC, VP9 and AV1). The authenticated player path remains a
-        // fallback only; accepting its combined WEB format first collapses the UI to 360p.
         player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; sabrPlayback = null; error = null
-        val newPipeResult = if (PlaybackBackendPreferences.useNewPipe()) runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(videoId) } }
-            else Result.failure(IllegalStateException("NewPipe disabled by playback backend setting"))
-        newPipeResult.onSuccess { stream ->
-            info = stream
-            audioStreams = stream.audioStreams.filter { it.content.startsWith("http") }.map {
-                val name = it.audioTrackName?.takeIf(String::isNotBlank) ?: it.audioLocale?.displayName?.takeIf(String::isNotBlank).orEmpty()
-                val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
-                PlayerChoice(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, false, name, it.audioTrackId.orEmpty(), original)
-            }
-            selectedAudio = selectAudioStream(audioStreams, audioCodec)
-            availableStreams = (stream.videoOnlyStreams + stream.videoStreams)
-                .filter { it.content.startsWith("http") }
-                .map { PlayerChoice(it.content, it.codec.orEmpty(), it.height, it.fps, it.bitrate, it.isVideoOnly) }
-                .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-            selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
-            AppLog.event("player NewPipe primary video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
-        }.onFailure { e ->
-            AppLog.failure("player NewPipe primary video=$videoId", e)
-        }
-        if (availableStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+        if (availableStreams.isEmpty()) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(videoId) } }.onSuccess { extracted ->
                 sabrPlayback = extracted
                 audioStreams = extracted.formats.filter { it.audio }.map {
@@ -3400,7 +3235,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 AppLog.event("player SABR primary video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
             }.onFailure { AppLog.failure("player SABR primary video=$videoId", it) }
         }
-        if (availableStreams.isEmpty() && PlaybackBackendPreferences.useWebWhenNewPipeFails()) {
+        if (availableStreams.isEmpty()) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
                 audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
                 selectedAudio = selectAudioStream(audioStreams, audioCodec)
@@ -3411,27 +3246,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
             }.onFailure { e ->
                 AppLog.failure("player repository fallback video=$videoId", e)
-                if (availableStreams.isEmpty()) error = e.message.orEmpty()
-            }
-        }
-        if (availableStreams.isEmpty() && PlaybackBackendPreferences.useNewPipeWhenWebFails()) {
-            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.newPipeStreamInfo(videoId) } }.onSuccess { stream ->
-                info = stream
-                audioStreams = stream.audioStreams.filter { it.content.startsWith("http") }.map {
-                    val name = it.audioTrackName?.takeIf(String::isNotBlank)
-                        ?: it.audioLocale?.displayName?.takeIf(String::isNotBlank).orEmpty()
-                    val original = it.audioTrackType?.name?.contains("ORIGINAL", true) == true || name.contains("original", true)
-                    PlayerChoice(it.content, it.codec.orEmpty(), 0, 0, it.bitrate, false, name, it.audioTrackId.orEmpty(), original)
-                }
-                selectedAudio = selectAudioStream(audioStreams, audioCodec)
-                availableStreams = (stream.videoOnlyStreams + stream.videoStreams)
-                    .filter { it.content.startsWith("http") }
-                    .map { PlayerChoice(it.content, it.codec.orEmpty(), it.height, it.fps, it.bitrate, it.isVideoOnly) }
-                    .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
-                AppLog.event("player NewPipe fallback video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
-            }.onFailure { e ->
-                AppLog.failure("player NewPipe fallback video=$videoId", e)
                 if (availableStreams.isEmpty()) error = e.message.orEmpty()
             }
         }
@@ -3650,8 +3464,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         )
                     }
                     Column(Modifier.padding(horizontal = 10.dp).weight(1f)) {
-                        Text(videoMetadata?.title ?: info?.name ?: "Video", Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
-                        Text(displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name), Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.bodySmall)
+                        Text(videoMetadata?.title ?: "Video", Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
+                        Text(displayChannelName(videoMetadata?.author, channelInfo?.name), Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.bodySmall)
                     }
                     var playing by remember { mutableStateOf(player.isPlaying) }
                     DisposableEffect(player) {
@@ -3724,9 +3538,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     } else {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             if (tablet) {
-                // Paint edge-to-edge with Surface, but keep the non-fullscreen player UI
-                // inside the tablet's visible system-bar viewport.
-                Row(Modifier.fillMaxSize().windowInsetsPadding(ComposeWindowInsets.safeDrawing)) {
+                Row(Modifier.fillMaxSize()) {
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                             AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
@@ -3743,14 +3555,14 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
                         }
                         Text(
-                            videoMetadata?.title ?: info?.name ?: "Video",
+                            videoMetadata?.title ?: "Video",
                             Modifier.fillMaxWidth().clickable { phonePanel = VideoPhonePanel.DETAILS }.padding(horizontal = 16.dp, vertical = 12.dp),
                             style = MaterialTheme.typography.titleLarge,
                         )
                         Text(
-                            if (info == null && videoMetadata == null) "" else listOfNotNull(
-                                "${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views",
-                                displayPublishedDate(info?.textualUploadDate ?: videoMetadata?.publishedDate),
+                            if (videoMetadata == null) "" else listOfNotNull(
+                                "${formatCount(videoMetadata?.viewCount ?: 0)} views",
+                                displayPublishedDate(videoMetadata?.publishedDate),
                             ).joinToString(" • "),
                             Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
                             style = MaterialTheme.typography.bodySmall,
@@ -3764,17 +3576,15 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             item { VideoActionButton(Icons.Default.PlaylistAdd, "Save") { showSavePlaylist = true } }
                         }
                         HorizontalDivider()
-                        Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) {
-                            val target = info?.uploaderUrl ?: videoMetadata?.authorUrl
+                        Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !videoMetadata?.authorUrl.isNullOrBlank()) {
+                            val target = videoMetadata?.authorUrl
                             if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) }
                         }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
+                            val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: videoMetadata?.authorAvatar
                             if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                             else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
                             Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                                Text(displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name), style = MaterialTheme.typography.titleMedium)
-                                val subscribers = info?.uploaderSubscriberCount ?: -1
-                                if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(displayChannelName(videoMetadata?.author, channelInfo?.name), style = MaterialTheme.typography.titleMedium)
                             }
                             Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
                         }
@@ -3833,18 +3643,17 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             }
                         }
                         VideoPhonePanel.DETAILS -> Column(Modifier.weight(0.85f).fillMaxHeight()) {
-                            val views = info?.viewCount ?: videoMetadata?.viewCount ?: -1L
-                            val likes = info?.likeCount ?: -1L
-                            val likesText = if (likes >= 0) formatCount(likes) else interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "—" } }
-                            val published = displayPublishedDate(info?.textualUploadDate ?: videoMetadata?.publishedDate)
-                            val description = descriptionText(videoMetadata?.description.orEmpty().ifBlank { info?.description?.content.orEmpty() })
+                            val views = videoMetadata?.viewCount ?: -1L
+                            val likesText = interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "—" } }
+                            val published = displayPublishedDate(videoMetadata?.publishedDate)
+                            val description = descriptionText(videoMetadata?.description.orEmpty())
                             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("Description", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
                                 IconButton(onClick = { phonePanel = VideoPhonePanel.MAIN }) { Icon(Icons.Default.Close, "Close details") }
                             }
                             HorizontalDivider()
                             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                                Text(videoMetadata?.title ?: info?.name ?: "Video", style = MaterialTheme.typography.titleMedium)
+                                Text(videoMetadata?.title ?: "Video", style = MaterialTheme.typography.titleMedium)
                                 Row(Modifier.padding(vertical = 18.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                                     Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium) }
                                     Column { Text(likesText, style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
@@ -3882,16 +3691,15 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     }
                     when (phonePanel) {
                         VideoPhonePanel.DETAILS -> {
-                            val views = info?.viewCount ?: videoMetadata?.viewCount ?: -1L
-                            val likes = info?.likeCount ?: -1L
-                            val likesText = if (likes >= 0) formatCount(likes) else interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "—" } }
-                            val published = displayPublishedDate(info?.textualUploadDate ?: videoMetadata?.publishedDate)
-                            val description = descriptionText(videoMetadata?.description.orEmpty().ifBlank { info?.description?.content.orEmpty() })
+                            val views = videoMetadata?.viewCount ?: -1L
+                            val likesText = interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "—" } }
+                            val published = displayPublishedDate(videoMetadata?.publishedDate)
+                            val description = descriptionText(videoMetadata?.description.orEmpty())
                             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("Description", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
                                 IconButton(onClick = { phonePanel = VideoPhonePanel.MAIN }) { Icon(Icons.Default.Close, "Close details") }
                             }
-                            Text(videoMetadata?.title ?: info?.name ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleMedium)
+                            Text(videoMetadata?.title ?: "Video", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleMedium)
                             Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                                 Column { Text(if (views >= 0) formatCount(views) else "—", style = MaterialTheme.typography.titleLarge); Text("Views", style = MaterialTheme.typography.labelMedium) }
                                 Column { Text(likesText, style = MaterialTheme.typography.titleLarge); Text("Likes", style = MaterialTheme.typography.labelMedium) }
@@ -3932,8 +3740,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             }
                         }
                         VideoPhonePanel.MAIN -> {
-                            Text(videoMetadata?.title ?: info?.name ?: "Video", Modifier.fillMaxWidth().clickable { phonePanel = VideoPhonePanel.DETAILS }.padding(horizontal = 16.dp, vertical = 12.dp), style = MaterialTheme.typography.titleLarge)
-                            Text(if (info == null && videoMetadata == null) "" else listOfNotNull("${formatCount(info?.viewCount ?: videoMetadata?.viewCount ?: 0)} views", displayPublishedDate(info?.textualUploadDate ?: videoMetadata?.publishedDate)).joinToString(" • "), Modifier.padding(horizontal = 16.dp, vertical = 2.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(videoMetadata?.title ?: "Video", Modifier.fillMaxWidth().clickable { phonePanel = VideoPhonePanel.DETAILS }.padding(horizontal = 16.dp, vertical = 12.dp), style = MaterialTheme.typography.titleLarge)
+                            Text(if (videoMetadata == null) "" else listOfNotNull("${formatCount(videoMetadata?.viewCount ?: 0)} views", displayPublishedDate(videoMetadata?.publishedDate)).joinToString(" • "), Modifier.padding(horizontal = 16.dp, vertical = 2.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
                             LazyRow(Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 item { VideoActionButton(Icons.Default.ThumbUp, interactions.likeText.ifBlank { videoMetadata?.likeText.orEmpty().ifBlank { "Like" } }, interactions.rating == VideoRating.LIKE, !interactionBusy) { updateRating(VideoRating.LIKE) } }
@@ -3942,10 +3750,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                 item { VideoActionButton(Icons.Default.PlaylistAdd, "Save") { showSavePlaylist = true } }
                             }
                             HorizontalDivider()
-                            Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !(info?.uploaderUrl.isNullOrBlank() && videoMetadata?.authorUrl.isNullOrBlank())) { val target = info?.uploaderUrl ?: videoMetadata?.authorUrl; if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) } }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: info?.uploaderAvatars?.lastOrNull()?.url ?: videoMetadata?.authorAvatar
+                            Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !videoMetadata?.authorUrl.isNullOrBlank()) { val target = videoMetadata?.authorUrl; if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) } }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: videoMetadata?.authorAvatar
                                 if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop) else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
-                                Column(Modifier.padding(horizontal = 12.dp).weight(1f)) { Text(displayChannelName(videoMetadata?.author, info?.uploaderName, channelInfo?.name), style = MaterialTheme.typography.titleMedium); val subscribers = info?.uploaderSubscriberCount ?: -1; if (subscribers >= 0) Text("${formatCount(subscribers)} subscribers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                Column(Modifier.padding(horizontal = 12.dp).weight(1f)) { Text(displayChannelName(videoMetadata?.author, null, channelInfo?.name), style = MaterialTheme.typography.titleMedium) }
                                 Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
                             }
                             HorizontalDivider()
@@ -3992,14 +3800,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         confirmButton = { TextButton(onClick = { showVideoDetails = false }) { Text("Close") } },
         title = { Text("Video details") },
         text = {
-            val views = info?.viewCount ?: videoMetadata?.viewCount ?: -1L
-            val likes = info?.likeCount ?: -1L
-            val likesText = if (likes >= 0) formatCount(likes) else videoMetadata?.likeText?.takeIf { it.isNotBlank() } ?: "—"
-            val publishedDate = info?.uploadDate?.localDateTime?.toLocalDate()?.let { date ->
-                java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.LONG)
-                    .withLocale(java.util.Locale.getDefault()).format(date)
-            } ?: displayPublishedDate(info?.textualUploadDate ?: videoMetadata?.publishedDate)
-            val rawDescription = videoMetadata?.description.orEmpty().ifBlank { info?.description?.content.orEmpty() }
+            val views = videoMetadata?.viewCount ?: -1L
+            val likesText = videoMetadata?.likeText?.takeIf { it.isNotBlank() } ?: "—"
+            val publishedDate = displayPublishedDate(videoMetadata?.publishedDate)
+            val rawDescription = videoMetadata?.description.orEmpty()
             val description = descriptionText(rawDescription)
             Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -4120,7 +3924,6 @@ private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCo
 private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, onAuth: (Boolean) -> Unit) {
     var destination by remember { mutableStateOf("account") }
     var signedIn by remember { mutableStateOf(YouTubeRepository.signedIn()) }
-    var playbackBackend by remember { mutableStateOf(PlaybackBackendPreferences.backend) }
     if (destination == "login") { LoginScreen({ destination = "account" }) { signedIn = true; onAuth(true); destination = "account" }; return }
     if (destination == "your_account") { OwnAccountScreen(activity, codec, audioCodec, quality, onPlayer, openVideo) { destination = "account" }; return }
     if (destination == "playlists") { NativeFeedScreen(activity, "Playlists", Icons.Default.PlaylistPlay, codec, audioCodec, quality, onPlayer, onPlayerMode, openVideo, onBack = { destination = "account" }, allowCreatePlaylist = true) { YouTubeRepository.library() }; return }
@@ -4160,11 +3963,6 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
         item { ChoiceSection("Default video quality", QualityChoice.entries, quality, { it.label }, onQuality) }
         item { ChoiceSection("Video decoder", DecoderMode.entries, videoDecoderMode, { it.label }, onVideoDecoderMode) }
         item { ChoiceSection("Audio decoder", DecoderMode.entries, audioDecoderMode, { it.label }, onAudioDecoderMode) }
-        item { ChoiceSection("Playback backend", PlaybackBackend.entries, playbackBackend, { it.label }) {
-            playbackBackend = it
-            PlaybackBackendPreferences.set(activity, it)
-        } }
-        item { Text("SABR is the default and recommended backend. It uses WEB + PoToken + SABR playback with adaptive audio and video, plus internal client fallbacks when required. SABR + NewPipe fallback only tries NewPipe if SABR fails. Force NewPipe is kept for compatibility, but YouTube may reject it with LOGIN_REQUIRED, bot verification, missing formats, or extractor breakage. NewPipe + SABR fallback uses the opposite order.", style = MaterialTheme.typography.bodySmall) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }
         item { Text("HTTP/1.0 compatibility disables connection reuse but uses an HTTP/1.1 request line because OkHttp intentionally cannot emit HTTP/1.0. The HTTP/2 mode advertises HTTP/2 with HTTP/1.1 fallback.", style = MaterialTheme.typography.bodySmall) }
     }
@@ -4474,51 +4272,4 @@ private fun CommentActions(videoId: String, comment: VideoComment, onChanged: (V
             if (working) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Delete")
         } },
     )
-}
-
-@Composable
-fun CommentNode(comment: CommentsInfoItem) {
-    var showReplies by remember { mutableStateOf(false) }
-    var replies by remember { mutableStateOf<List<CommentsInfoItem>?>(null) }
-    var loading by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    Column(Modifier.padding(16.dp, 10.dp)) {
-        Text(comment.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge)
-        Text((if (android.os.Build.VERSION.SDK_INT >= 24) android.text.Html.fromHtml(comment.commentText.content, android.text.Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") android.text.Html.fromHtml(comment.commentText.content)).toString())
-        Text(comment.textualLikeCount ?: "", style = MaterialTheme.typography.bodySmall)
-
-        if (comment.replyCount > 0) {
-            TextButton(onClick = {
-                showReplies = !showReplies
-                if (showReplies && replies == null) {
-                    loading = true
-                    scope.launch {
-                        replies = runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            val repliesPage = comment.replies ?: return@withContext emptyList()
-                            org.schabi.newpipe.extractor.comments.CommentsInfo.getMoreItems(
-                                org.schabi.newpipe.extractor.NewPipe.getService(comment.serviceId),
-                                comment.url,
-                                repliesPage
-                            ).items
-                        } }.getOrNull()
-                        loading = false
-                    }
-                }
-            }) {
-                Text(if (showReplies) "Hide replies" else "View ${comment.replyCount} replies")
-            }
-        }
-
-        if (showReplies) {
-            if (loading) CircularProgressIndicator(Modifier.padding(16.dp).size(24.dp))
-            replies?.forEach { reply ->
-                Column(Modifier.padding(start = 32.dp, top = 8.dp, bottom = 8.dp)) {
-                    Text(reply.uploaderName ?: "YouTube user", style = MaterialTheme.typography.labelLarge)
-                    Text((if (android.os.Build.VERSION.SDK_INT >= 24) android.text.Html.fromHtml(reply.commentText.content, android.text.Html.FROM_HTML_MODE_LEGACY) else @Suppress("DEPRECATION") android.text.Html.fromHtml(reply.commentText.content)).toString())
-                    Text(reply.textualLikeCount ?: "", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-    }
 }

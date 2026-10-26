@@ -1,16 +1,11 @@
 package com.x1colegal.materialyt
 
 import android.content.Context
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.schabi.newpipe.extractor.downloader.Downloader
-import org.schabi.newpipe.extractor.downloader.Request
-import org.schabi.newpipe.extractor.downloader.Response
 import java.util.concurrent.TimeUnit
 
-object HttpBackend : Downloader() {
+object HttpBackend {
     enum class Mode(val label: String) { HTTP_1_0("HTTP/1.0"), HTTP_1_1("HTTP/1.1"), HTTP_2("HTTP/2") }
 
     private lateinit var context: Context
@@ -53,44 +48,4 @@ object HttpBackend : Downloader() {
     }
 
     fun playbackClient(): OkHttpClient = client
-
-    override fun execute(request: Request): Response {
-        val url = request.url()
-        val bytes = request.dataToSend()
-        val builder = okhttp3.Request.Builder().url(url)
-        request.headers().forEach { (name, values) -> values.forEach { builder.addHeader(name, it) } }
-
-        val isYouTube = url.contains("youtube.com") || url.contains("googlevideo.com") || url.contains("youtubei")
-        if (isYouTube) {
-            val origin = if (url.contains("music.youtube.com")) "https://music.youtube.com" else "https://www.youtube.com"
-            val accountCookies = YouTubeRepository.cookies(origin)
-
-            // Only inject cookies globally for googlevideo.com (ExoPlayer). 
-            // YouTubeRepository handles its own cookies, and injecting into youtubei ruins NewPipe's anonymous requests.
-            if (url.contains("googlevideo.com") && accountCookies.isNotBlank()) {
-                val existingCookie = builder.build().header("Cookie")
-                val mergedCookie = if (existingCookie.isNullOrBlank()) accountCookies else "$existingCookie; $accountCookies"
-                builder.header("Cookie", mergedCookie)
-            }
-
-            if (url.contains("googlevideo.com")) {
-                YouTubeRepository.authorization(origin)?.let { builder.header("Authorization", it) }
-                builder.header("Origin", origin)
-                builder.header("X-Origin", origin)
-                builder.header("X-Goog-AuthUser", "0")
-                builder.header("X-Youtube-Bootstrap-Logged-In", YouTubeRepository.signedIn().toString())
-            }
-
-            if (builder.build().header("User-Agent").isNullOrBlank()) {
-                builder.header("User-Agent", YouTubeRepository.UA)
-            }
-        }
-
-        val body = bytes?.toRequestBody(builder.build().header("Content-Type")?.toMediaTypeOrNull())
-        builder.method(request.httpMethod(), if (request.httpMethod() in listOf("GET", "HEAD")) null else body ?: ByteArray(0).toRequestBody())
-        client.newCall(builder.build()).execute().use { response ->
-            val headers = response.headers.toMultimap()
-            return Response(response.code, response.message, headers, response.body?.string(), response.request.url.toString())
-        }
-    }
 }

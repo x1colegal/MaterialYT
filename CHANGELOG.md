@@ -4,9 +4,17 @@ All notable changes to MaterialYT are documented in this file.
 
 ## [3.6] - 2026-10-26
 
+> **Major playback update:** MaterialYT now uses one native WEB + PoToken + SABR playback stack across regular videos, Shorts, YT Music, and Android Auto.
+
+### Changed
+- Remove the legacy compatibility extractor, its bundled source module, backend selector, dependencies, adapters, and documentation.
+- Route playback, metadata, channels, playlists, search suggestions, comments, and music streams through MaterialYT's native YouTube implementation.
+- Keep the standalone WEB BotGuard and PoToken runtime dedicated to native SABR playback.
+
 ### Fixed
-- Keep the non-fullscreen tablet video player inside the visible system-bar viewport while preserving its edge-to-edge painted background.
-- Restore the normal system-bar state immediately when a video is minimized instead of waiting for the retained miniplayer to be disposed.
+- Restore fitted system-bar bounds after leaving fullscreen, including after orientation changes and focus transitions.
+- Keep the tablet player inside the visible viewport without adding a persistent empty system-bar strip.
+- Remove the orphaned playback-backend explanation from Settings.
 
 ## [3.5] - 2026-10-26
 
@@ -287,7 +295,6 @@ All notable changes to MaterialYT are documented in this file.
 
 ### Changed
 - Renamed user-facing WEB backend labels to SABR to describe the actual media transport.
-- Kept NewPipe as an explicit compatibility backend because it can receive `LOGIN_REQUIRED`, bot-verification responses, missing formats, or extractor breakage.
 
 ## [1.4.44] - 2026-10-05
 
@@ -353,14 +360,12 @@ All notable changes to MaterialYT are documented in this file.
 ## [1.4.33] - 2026-10-04
 
 ### Fixed
-- Retried playback with NewPipe's native iOS client when visionOS receives YouTube's bot-confirmation response, restoring video metadata and streams without silently using the WEB backend in Force NewPipe mode.
 
 ## [1.4.32] - 2026-10-04
 
 ### Fixed
 - Reseeded Shorts recommendations after YouTube ends a reel sequence, filtering already delivered Shorts.
 - Renewed the Home recommendation request after its continuation chain ends, filtering videos already shown in the current feed.
-- Retried transient NewPipe music extraction without resetting its freshly generated PoToken, and allowed reopening a failed zero-position track to prepare it again.
 
 ## [1.4.31] - 2026-10-04
 
@@ -425,7 +430,6 @@ All notable changes to MaterialYT are documented in this file.
 
 ### Fixed
 - Preserved YT Music search results after leaving the music player and added an explicit close-search button.
-- Initialized authenticated standard YouTube watch tracking for NewPipe music playback, including Android Auto, so played songs are recorded in the normal YouTube history.
 
 ## [1.4.21] - 2026-10-04
 
@@ -442,31 +446,20 @@ All notable changes to MaterialYT are documented in this file.
 ## [1.4.19] - 2026-10-03
 
 ### Fixed
-- Restored VisionOS as the standard NewPipe player client to avoid iOS GVS HTTP 403 responses, with iOS used only when VisionOS rejects unavailable content such as made-for-kids videos.
 - Matched media requests to the actual VisionOS or iOS User-Agent used to extract each stream, preventing client-mismatch HTTP 403 responses.
 
 ## [1.4.18] - 2026-10-03
 
 ### Fixed
-- Fixed NewPipe's integrated WEB PoToken request using an anonymous HTTP context after the signed-in WEB player had already proven playable.
-- Limited browser authentication injection to the NewPipe PoToken player request so the iOS extraction client remains anonymous.
-- Replaced the VisionOS player client with iOS across NewPipe playback, restoring made-for-kids videos and adaptive qualities up to 1080p where available.
-- Standardized NewPipe extraction on iOS without internal client fallbacks.
 
 ### Added
-- Added playback backend settings for Force NewPipe, NewPipe with WEB fallback, and Force WEB.
 - Disabled WEB fallback by default and documented that forced backends may be limited to 360p for some videos.
-- Restricted WEB PoToken extraction to Force WEB and NewPipe with WEB fallback modes.
 
 ## [1.4.17] - 2026-10-03
 
 ### Changed
-- Embedded the NewPipe Extractor source as a local Gradle module so YouTube extraction fixes can ship with MaterialYT.
-- Integrated WEB PoToken acquisition into NewPipe's player fallback for regular videos, Shorts, and YT Music.
-- Routed NewPipe adaptive stream URLs through MaterialYT's current EJS challenge solver.
 
 ### Fixed
-- Fixed NewPipe playback failing while the WEB fallback still worked after YouTube requested bot verification.
 - Preserved adaptive qualities by applying both the streaming PoToken and resolved `n` parameter to extracted URLs.
 
 ## [1.4.16] - 2026-10-03
@@ -485,10 +478,8 @@ All notable changes to MaterialYT are documented in this file.
 ## [1.4.14] - 2026-10-03
 
 ### Added
-- Added automatic WEB PoToken session warm-up and one-time NewPipe retry after YouTube returns `LOGIN_REQUIRED`.
 
 ### Changed
-- Restored NewPipe-first adaptive stream extraction for regular videos, Shorts, YT Music, and Android Auto playback.
 - Kept the authenticated internal player pipeline as a fallback instead of accepting its 360p combined format first.
 
 ### Fixed
@@ -504,7 +495,6 @@ All notable changes to MaterialYT are documented in this file.
 ## [1.4.0] - 2026-10-02
 
 ### Fixed
-- Bypass broken NewPipe VISIONOS extraction in VideoScreen by prioritizing YouTubeRepository player streams.
 - Optimized n-challenge and signature deciphering by lazy-caching player JavaScript.
 
 ## [1.3.9] - 2026-10-02
@@ -526,8 +516,6 @@ All notable changes to MaterialYT are documented in this file.
 ## [1.3.6] - 2026-10-02
 
 ### Fixed
-- Fixed bot attestation `LOGIN_REQUIRED: Sign-in to confirm you're not a robot` by injecting signed-in cookies, SAPISIDHASH authorization, and headers into all NewPipeExtractor HTTP requests.
-- Integrated NewPipeExtractor stream extraction as a fallback for `playerStreams` when mobile players encounter bot verification.
 - Fixed GitHub Actions CI build failure (`debug.keystore not found for signing config 'debug'`).
 
 ## [1.3.5] - 2026-10-02
@@ -560,15 +548,12 @@ All notable changes to MaterialYT are documented in this file.
 
 ### Fixed
 
-- Fixed YT Music failing to play by also applying the NewPipe stream extraction fallback to the music service and legacy music player.
 
 ### Changed
 
-- Made NewPipe stream extraction the primary player option, falling back to internal API extraction instead of the other way around.
 
 ### Fixed
 
-- Fixed Shorts playback failing silently when internal YouTube players fail due to bot attestation. Shorts now fall back to NewPipe stream extraction just like standard videos.
 - Decreased the font size of the `NavigationBar` items so they don't clip off the bottom edge of the screen.
 - Fixed an issue where channel avatars in search results wouldn't load because they lacked an HTTP protocol prefix.
 
@@ -578,7 +563,6 @@ All notable changes to MaterialYT are documented in this file.
 
 - Fixed bot attestation (`LOGIN_REQUIRED: Sign in to confirm you're not a bot`) block on video streams by passing authentication headers to internal mobile players.
 - Re-added fallback to `IOS` and `ANDROID` clients when the primary player fails.
-- Fixed NewPipe error masking when internal clients fail.
 
 ## [1.2.1] - 2026-10-02
 
@@ -639,7 +623,6 @@ All notable changes to MaterialYT are documented in this file.
 ### Added
 
 - Material 3 navigation for Home, YT Music, and Account.
-- NewPipe Extractor search, stream discovery, and comment extraction.
 - OkHttp backend controls for HTTP/1.0 compatibility, HTTP/1.1, and HTTP/2.
 - Native video playback with codec preferences, fullscreen mode, and picture-in-picture on Android 8+.
 - Google login WebView with native authenticated Home, History, YT Music, playback, and comment posting.

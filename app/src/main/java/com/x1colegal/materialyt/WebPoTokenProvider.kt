@@ -11,8 +11,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.schabi.newpipe.extractor.services.youtube.PoTokenProvider
-import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
@@ -23,7 +21,7 @@ data class WebPoTokenSession(
     val streamingDataPoToken: String
 )
 
-/** Standalone WEB PoToken session. It has no dependency on NewPipe's player implementation. */
+/** Standalone WEB PoToken session used by native SABR playback. */
 object WebPoTokenProvider {
     private val lock = Any()
     private var runtime: BotGuardRuntime? = null
@@ -70,19 +68,6 @@ object WebPoTokenProvider {
         val streamingToken = current!!.mint(videoId)
         AppLog.event("WEB PoToken ready visitor=${requestedVisitorData.length} player=${playerRequestToken?.length ?: 0} streaming=${streamingToken.length}")
         WebPoTokenSession(requestedVisitorData, playerRequestToken!!, streamingToken)
-    }
-}
-
-/** Adapter used only when the explicitly selected NewPipe backend asks for a PoToken. */
-object NewPipePoTokenProvider : PoTokenProvider {
-    override fun getWebClientPoToken(videoId: String): PoTokenResult? = runCatching {
-        val visitor = YouTubeRepository.standaloneWebVisitorData()
-        val token = WebPoTokenProvider.get(videoId, visitor)
-        PoTokenResult(token.visitorData, token.playerRequestPoToken, token.streamingDataPoToken)
-    }.onFailure { AppLog.failure("NewPipe PoToken adapter", it) }.getOrNull()
-
-    fun reset() {
-        WebPoTokenProvider.reset()
     }
 }
 
@@ -197,12 +182,12 @@ private class BotGuardRuntime(
         val raw = parseLooseJson(payload).optString("R")
             .takeIf { it.contains("bgChallenge") && it.contains("program") && it.contains("interpreterUrl") }
             ?: return@runCatching null
-        AppLog.event("NewPipe PoToken using homepage challenge eventId=${ytcfg?.contains("EVENT_ID") == true}")
+        AppLog.event("WEB PoToken using homepage challenge eventId=${ytcfg?.contains("EVENT_ID") == true}")
         Challenge(parseDescrambledChallenge(raw), ytcfg)
-    }.onFailure { AppLog.failure("NewPipe PoToken homepage challenge", it) }.getOrNull()
+    }.onFailure { AppLog.failure("WEB PoToken homepage challenge", it) }.getOrNull()
 
     private fun legacyChallenge(): Challenge {
-        AppLog.event("NewPipe PoToken using legacy Create challenge")
+        AppLog.event("WEB PoToken using legacy Create challenge")
         return Challenge(parseChallenge(request(CREATE_URL, "[\"$REQUEST_KEY\"]")), null)
     }
 

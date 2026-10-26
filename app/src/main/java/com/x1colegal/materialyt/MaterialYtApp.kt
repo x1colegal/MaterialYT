@@ -1,8 +1,6 @@
 package com.x1colegal.materialyt
 
 import android.app.Application
-import org.schabi.newpipe.extractor.NewPipe
-import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 
 class MaterialYtApp : Application() {
     companion object { lateinit var instance: MaterialYtApp }
@@ -15,10 +13,6 @@ class MaterialYtApp : Application() {
             kotlin.system.exitProcess(10)
         }
         HttpBackend.initialize(this)
-        PlaybackBackendPreferences.initialize(this)
-        NewPipe.init(HttpBackend)
-        YoutubeStreamExtractor.setPoTokenProvider(NewPipePoTokenProvider)
-        YoutubeStreamExtractor.setStreamUrlResolver(YouTubeRepository::resolveNewPipeStreamUrl)
         EjsChallengeSolver.initialize(this)
     }
 }

@@ -12,8 +12,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import org.schabi.newpipe.extractor.stream.StreamInfo
-import org.schabi.newpipe.extractor.services.youtube.YoutubeJavaScriptPlayerManager
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -67,6 +65,15 @@ data class SabrPlaybackInfo(
     val formats: List<SabrFormat>
 )
 data class ChannelInfo(val name: String, val thumbnail: String)
+data class NativeChannelPage(
+    val id: String,
+    val name: String,
+    val avatar: String,
+    val banner: String,
+    val description: String,
+    val subscribers: String,
+    val items: List<FeedItem>,
+)
 data class AccountSearchEntry(val text: String, val feedbackToken: String? = null)
 data class DescriptionLinkTarget(val start: Int, val end: Int, val target: String)
 data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "", val descriptionLinks: List<DescriptionLinkTarget> = emptyList())
@@ -721,6 +728,36 @@ object YouTubeRepository {
         return posts.values.toList()
     }
 
+    fun channelPage(channelUrl: String, tab: String = "videos"): NativeChannelPage {
+        val base = channelUrl.substringBefore('?').trimEnd('/').removeSuffix("/videos").removeSuffix("/shorts")
+        val pageUrl = "$base/${if (tab == "shorts") "shorts" else "videos"}?hl=en"
+        val root = initialData(get(pageUrl))
+        val metadata = findObject(root, "channelMetadataRenderer")?.optJSONObject("channelMetadataRenderer")
+        val header = findObject(root, "pageHeaderRenderer")?.optJSONObject("pageHeaderRenderer")
+            ?: findObject(root, "c4TabbedHeaderRenderer")?.optJSONObject("c4TabbedHeaderRenderer")
+        val id = metadata?.optString("externalId").orEmpty()
+            .ifBlank { findString(root, "channelId").orEmpty() }
+        val name = metadata?.optString("title").orEmpty()
+            .ifBlank { text(header?.opt("title")) ?: "YouTube channel" }
+        val avatar = metadata?.optJSONObject("avatar")?.let(::findLargestAvatar).orEmpty()
+            .ifBlank { header?.let(::findLargestAvatar).orEmpty() }
+        val banner = findObject(root, "banner")?.let(::findLargestAvatar).orEmpty()
+            .ifBlank { findObject(root, "bannerImage")?.let(::findLargestAvatar).orEmpty() }
+        val description = metadata?.optString("description").orEmpty()
+        val subscribers = findString(root, "subscriberCountText").orEmpty()
+            .ifBlank { text(findObject(root, "subscriberCountText")) ?: "" }
+        val items = parseItems(root).filter { !it.channel && !it.playlist }.map { item ->
+            item.copy(
+                subtitle = item.subtitle.takeUnless { it == "Unknown channel" }.orEmpty().ifBlank { name },
+                channelThumbnail = item.channelThumbnail.ifBlank { avatar },
+                channelUrl = base,
+                short = tab == "shorts",
+                url = if (tab == "shorts") "https://www.youtube.com/shorts/${item.id}" else item.url,
+            )
+        }.distinctBy { it.id }
+        return NativeChannelPage(id, name, avatar, banner, description, subscribers, items)
+    }
+
     fun communityPostComments(postId: String): List<CommunityComment> {
         var data = initialData(get("https://www.youtube.com/post/$postId"))
         val comments = linkedMapOf<String, CommunityComment>()
@@ -1298,7 +1335,6 @@ object YouTubeRepository {
     }
 
     fun playerStreams(videoId: String, music: Boolean = false): List<PlayableStream> {
-        val allowNewPipeFallback = PlaybackBackendPreferences.backend != PlaybackBackend.WEB_ONLY
         runCatching { bootstrap("https://www.youtube.com/watch?v=$videoId", "WEB") }
             .onFailure { AppLog.failure("player account bootstrap video=$videoId", it) }
         var response = runCatching { webPoPlayer(videoId) }
@@ -1381,11 +1417,6 @@ object YouTubeRepository {
         }
 
         if (finalStatus != "OK") {
-            val npStreams = if (allowNewPipeFallback) runCatching { newPipeStreams(videoId) }.getOrNull() else null
-            if (!npStreams.isNullOrEmpty()) {
-                AppLog.event("player fallback to newPipeStreams video=$videoId streams=${npStreams.size}")
-                return npStreams
-            }
             error(firstError)
         }
         val detailsObj = response.optJSONObject("videoDetails")
@@ -1407,11 +1438,6 @@ object YouTubeRepository {
         }
         val data = response.optJSONObject("streamingData")
         if (data == null) {
-            val npStreams = if (allowNewPipeFallback) runCatching { newPipeStreams(videoId) }.getOrNull() else null
-            if (!npStreams.isNullOrEmpty()) {
-                AppLog.event("player fallback to newPipeStreams (missing streamingData) video=$videoId streams=${npStreams.size}")
-                return npStreams
-            }
             error("YouTube returned no playable streams")
         }
         val formats = mutableListOf<JSONObject>()
@@ -1432,11 +1458,7 @@ object YouTubeRepository {
                 val signature = cipher["s"]?.takeIf { it.isNotBlank() }?.let { sig ->
                     runCatching {
                         playerJsLazy?.let { js -> EjsChallengeSolver.solveSignature(js, sig) }
-                    }.getOrElse {
-                        runCatching {
-                            YoutubeJavaScriptPlayerManager.deobfuscateSignature(videoId, sig)
-                        }.getOrNull()
-                    }
+                    }.getOrNull()
                 }
                 if (signature == null) baseUrl else {
                     val separator = if ('?' in baseUrl) '&' else '?'
@@ -1463,11 +1485,6 @@ object YouTubeRepository {
         }
         AppLog.event("player streams=${streams.size} formats=${formats.size} video=$videoId")
         if (streams.isEmpty()) {
-            val npStreams = if (allowNewPipeFallback) runCatching { newPipeStreams(videoId) }.getOrNull() else null
-            if (!npStreams.isNullOrEmpty()) {
-                AppLog.event("player fallback to newPipeStreams (empty streams) video=$videoId streams=${npStreams.size}")
-                return npStreams
-            }
             error("YouTube returned only protected stream URLs")
         }
         return streams
@@ -1642,32 +1659,6 @@ object YouTubeRepository {
             durationMs, formats)
     }
 
-    fun newPipeStreamInfo(videoId: String): StreamInfo {
-        val url = "https://www.youtube.com/watch?v=$videoId"
-        return try {
-            StreamInfo.getInfo(url)
-        } catch (first: Throwable) {
-            if (!isLoginRequired(first)) throw first
-            AppLog.event("NewPipe LOGIN_REQUIRED; refreshing integrated PoToken video=$videoId")
-            NewPipePoTokenProvider.reset()
-            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
-                .setWebPoTokenFallbackEnabled(true)
-            try {
-                StreamInfo.getInfo(url).also {
-                    AppLog.event("NewPipe retry after integrated PoToken refresh succeeded video=$videoId")
-                }
-            } finally {
-                org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
-                    .setWebPoTokenFallbackEnabled(PlaybackBackendPreferences.useWebWhenNewPipeFails())
-            }
-        }
-    }
-
-    private fun isLoginRequired(error: Throwable): Boolean = generateSequence(error) { it.cause }.any {
-        val text = "${it.javaClass.simpleName}: ${it.message}".lowercase()
-        "login_required" in text || "login required" in text || "sign in to confirm" in text || "not a bot" in text
-    }
-
     private fun playerJavaScript(videoId: String): String {
         // The cipher must come from the same desktop WEB identity that issued the SABR URL.
         val watchHtml = get("https://www.youtube.com/watch?v=$videoId", WEB_PLAYER_UA)
@@ -1752,9 +1743,6 @@ object YouTubeRepository {
         synchronized(nChallengeCache) { nChallengeCache[cacheKey] = solved }
         return parsed.newBuilder().setQueryParameter("n", solved).build().toString()
     }
-
-    fun resolveNewPipeStreamUrl(videoId: String, streamingUrl: String): String =
-        solveNChallenge(videoId, streamingUrl)
 
     fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false, ended: Boolean = false) {
         if (!signedIn() || toMs <= fromMs) return
@@ -2061,7 +2049,7 @@ object YouTubeRepository {
         return url to refreshedConfig
     }
 
-    /** Gets the visitor id used by the standalone WEB player, without NewPipe helpers. */
+    /** Gets the visitor id used by the standalone WEB player. */
     fun standaloneWebVisitorData(remix: Boolean = false): String {
         val origin = if (remix) "https://music.youtube.com" else "https://www.youtube.com"
         val clientName = if (remix) "WEB_REMIX" else "WEB"
@@ -2504,40 +2492,6 @@ object YouTubeRepository {
             }
             JSONObject(raw).put("_materialytCpn", cpn).put("_materialytClientName", name)
         }
-    }
-
-    private fun newPipeStreams(videoId: String): List<PlayableStream> {
-        val info = newPipeStreamInfo(videoId)
-        
-        synchronized(videoDetailsCache) {
-            if (!videoDetailsCache.containsKey(videoId)) {
-                videoDetailsCache[videoId] = VideoDetails(
-                    title = info.name.orEmpty(),
-                    author = info.uploaderName.orEmpty(),
-                    authorUrl = info.uploaderUrl.orEmpty(),
-                    viewCount = info.viewCount,
-                    durationSeconds = info.duration
-                )
-            }
-        }
-
-        val result = mutableListOf<PlayableStream>()
-        info.videoStreams.filter { it.isUrl }.forEach { stream ->
-            result += PlayableStream(stream.content, stream.codec.orEmpty(), stream.height,
-                stream.fps, stream.bitrate, false, stream.isVideoOnly)
-        }
-        info.videoOnlyStreams.filter { it.isUrl }.forEach { stream ->
-            result += PlayableStream(stream.content, stream.codec.orEmpty(), stream.height,
-                stream.fps, stream.bitrate, false, true)
-        }
-        info.audioStreams.filter { it.isUrl }.forEach { stream ->
-            val trackName = stream.audioTrackName?.takeIf { it.isNotBlank() }
-                ?: stream.audioLocale?.displayName?.takeIf { it.isNotBlank() }.orEmpty()
-            val original = stream.audioTrackType?.name?.contains("ORIGINAL", true) == true || trackName.contains("original", true)
-            result += PlayableStream(stream.content, stream.codec.orEmpty(), 0, 0,
-                stream.bitrate, true, false, original, trackName, stream.audioTrackId.orEmpty())
-        }
-        return result.distinctBy { it.url }
     }
 
     fun lyrics(videoId: String): List<LyricLine> {

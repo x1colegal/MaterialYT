@@ -3120,7 +3120,14 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var initialStartApplied by remember(videoId) { mutableStateOf(false) }
     val player = remember(videoId, playerGeneration) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
     var isMinimized by remember { mutableStateOf(false) }
-    LaunchedEffect(isMinimized) { onPlayerMode?.invoke(!isMinimized) }
+    LaunchedEffect(isMinimized) {
+        if (isMinimized) {
+            // Minimizing keeps VideoScreen composed for the miniplayer, so onDispose does
+            // not run. Restore the normal window bars here before returning to the page.
+            activity.fullscreen(false)
+        }
+        onPlayerMode?.invoke(!isMinimized)
+    }
     var miniplayerDismissed by remember { mutableStateOf(false) }
     var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(true) }

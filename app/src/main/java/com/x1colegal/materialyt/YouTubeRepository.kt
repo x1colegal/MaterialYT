@@ -88,8 +88,9 @@ data class VideoInteractionState(
 )
 data class RelatedVideoPage(val items: List<FeedItem>, val continuation: String? = null)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
-data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "")
-data class CommunityComment(val id: String, val author: String, val text: String, val published: String, val likes: String)
+data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "", val avatar: String = "")
+data class CommunityComment(val id: String, val author: String, val text: String, val published: String, val likes: String, val avatar: String = "")
+data class CommunityPostThread(val comments: List<CommunityComment>, val createCommentParams: String? = null)
 data class VideoComment(
     val id: String,
     val author: String,
@@ -132,6 +133,7 @@ object YouTubeRepository {
     private val sessionOwnedCommentAuthors = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val accountPlaylistIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     @Volatile private var signedInCommentChannelId: String? = null
+    @Volatile private var signedInChannelInfo: ChannelInfo? = null
     private val activeFeedCall = AtomicReference<Call?>(null)
     private val playerJavaScriptCache = mutableMapOf<String, String>()
     private val nChallengeCache = mutableMapOf<String, String>()
@@ -710,13 +712,19 @@ object YouTubeRepository {
                         val id = renderer.optString("postId").ifBlank { content.hashCode().toString() }
                         val commentCount = nestedText(renderer, setOf("replyCount", "replyCountText", "commentCount", "commentCountText"))
                             ?: buttonText(renderer, setOf("replyButton", "commentButton"))
+                        val attachment = renderer.opt("backstageAttachment")
+                            ?: renderer.opt("attachment")
                         if (content.isNotBlank()) posts.putIfAbsent(id, CommunityPost(
                             id = id,
                             text = content,
                             published = englishRelativeTime(text(renderer.opt("publishedTimeText")).orEmpty()).ifBlank { "Date unavailable" },
                             likes = englishCountLabel(nestedText(renderer, setOf("voteCount", "likeCount", "likeCountText")).orEmpty(), "likes", "0"),
                             comments = englishCountLabel(commentCount.orEmpty(), "comments", "0"),
-                            image = findThumbnail(renderer).orEmpty()
+                            // Do not recursively scan the whole renderer here: the first image is
+                            // commonly the author's avatar, not the post attachment.
+                            image = attachment?.let(::findLargestPostImage).orEmpty(),
+                            avatar = (renderer.opt("authorThumbnail") ?: renderer.opt("authorPhoto"))
+                                ?.let(::findLargestAvatar).orEmpty(),
                         ))
                     }
                     value.keys().forEach { collect(value.opt(it)) }
@@ -758,59 +766,156 @@ object YouTubeRepository {
         return NativeChannelPage(id, name, avatar, banner, description, subscribers, items)
     }
 
-    fun communityPostComments(postId: String): List<CommunityComment> {
-        var data = initialData(get("https://www.youtube.com/post/$postId"))
+    fun communityPostComments(postId: String): List<CommunityComment> = communityPostThread(postId).comments
+
+    fun communityPostThread(postId: String): CommunityPostThread {
+        val postUrl = "https://www.youtube.com/post/$postId"
+        val authenticatedData = initialData(get(postUrl))
+        var createCommentParams = findString(authenticatedData, "createCommentParams")
+        // Public and signed-in post pages issue different continuation tokens. Reusing the
+        // signed-in token without account headers still requests the entity-less response.
+        val publicHtml = getPublicHtml("$postUrl?hl=en")
+        var data = initialData(publicHtml)
+        val publicKey = Regex("\"INNERTUBE_API_KEY\":\"([^\"]+)").find(publicHtml)?.groupValues?.get(1)
+            ?: error("Unable to discover YouTube's public API key")
+        val publicVersion = Regex("\"INNERTUBE_CLIENT_VERSION\":\"([^\"]+)").find(publicHtml)?.groupValues?.get(1)
+            ?: error("Unable to discover YouTube's public client version")
         val comments = linkedMapOf<String, CommunityComment>()
-        fun collect(value: Any?) {
-            when (value) {
+        fun collectParsed(value: JSONObject) {
+            // A Community BROWSE response already carries complete comments in entity
+            // mutations. Parse those directly: authenticated responses do not always keep the
+            // commentViewModel -> entityKey association used by watch-page comment rendering.
+            var directItems = 0
+            var entityCandidates = 0
+            var firstEntityShape: String? = null
+            fun scalar(node: Any?, key: String): String? = when (node) {
                 is JSONObject -> {
-                    value.optJSONObject("commentEntityPayload")?.let { entity ->
-                        val properties = entity.optJSONObject("properties") ?: JSONObject()
-                        val author = entity.optJSONObject("author") ?: JSONObject()
-                        val toolbar = entity.optJSONObject("toolbar") ?: JSONObject()
-                        val body = properties.optJSONObject("content")?.optString("content").orEmpty()
-                        val id = properties.optString("commentId")
-                        if (id.isNotBlank() && body.isNotBlank()) {
-                            comments.putIfAbsent(id, CommunityComment(
-                                id,
-                                author.optString("displayName").ifBlank { "YouTube user" },
-                                body,
-                                properties.optString("publishedTime"),
-                                toolbar.optString("likeCountA11y")
-                                    .ifBlank { toolbar.optString("likeCountNotliked") }
-                            ))
-                        }
-                    }
-                    value.optJSONObject("commentRenderer")?.let { renderer ->
-                        val body = text(renderer.opt("contentText")).orEmpty()
-                        if (body.isNotBlank()) {
-                            val id = renderer.optString("commentId").ifBlank { body.hashCode().toString() }
-                            comments.putIfAbsent(id, CommunityComment(id,
-                                text(renderer.opt("authorText")).orEmpty().ifBlank { "YouTube user" }, body,
-                                text(renderer.opt("publishedTimeText")).orEmpty(),
-                                text(renderer.opt("voteCount")).orEmpty()))
-                        }
-                    }
-                    value.keys().forEach { collect(value.opt(it)) }
+                    (node.opt(key) as? String)?.takeIf(String::isNotBlank)
+                        ?: node.keys().asSequence().mapNotNull { scalar(node.opt(it), key) }.firstOrNull()
                 }
-                is JSONArray -> for (index in 0 until value.length()) collect(value.opt(index))
+                is JSONArray -> (0 until node.length()).asSequence().mapNotNull { scalar(node.opt(it), key) }.firstOrNull()
+                is String -> node.trim().takeIf { it.startsWith("{") || it.startsWith("[") }?.let { raw ->
+                    runCatching {
+                        if (raw.startsWith("{")) scalar(JSONObject(raw), key) else scalar(JSONArray(raw), key)
+                    }.getOrNull()
+                }
+                else -> null
+            }
+            fun addEntity(entity: JSONObject) {
+                entityCandidates++
+                val properties = entity.opt("properties")
+                val author = entity.opt("author")
+                val toolbar = entity.opt("toolbar")
+                val id = scalar(properties, "commentId").orEmpty()
+                val body = scalar(properties, "content").orEmpty()
+                if (firstEntityShape == null) firstEntityShape = "entityKeys=${entity.keys().asSequence().joinToString(",")} properties=${properties?.javaClass?.simpleName} author=${author?.javaClass?.simpleName} toolbar=${toolbar?.javaClass?.simpleName} id=${id.length} body=${body.length}"
+                if (id.isBlank() || body.isBlank()) return
+                comments[id] = CommunityComment(
+                    id = id,
+                    author = scalar(author, "displayName")
+                        ?: scalar(properties, "authorButtonA11y")
+                        ?: "YouTube user",
+                    text = body,
+                    published = scalar(properties, "publishedTime").orEmpty(),
+                    likes = scalar(toolbar, "likeCountNotliked")
+                        ?: scalar(toolbar, "likeCountA11y").orEmpty(),
+                    avatar = highResolutionAvatarUrl(scalar(author, "avatarThumbnailUrl").orEmpty()),
+                )
+                directItems++
+            }
+            fun visit(node: Any?) {
+                when (node) {
+                    is JSONObject -> {
+                        when (val rawEntity = node.opt("commentEntityPayload")) {
+                            is JSONObject -> addEntity(rawEntity)
+                            is String -> runCatching { JSONObject(rawEntity) }.getOrNull()?.let(::addEntity)
+                        }
+                        node.keys().forEach { visit(node.opt(it)) }
+                    }
+                    is JSONArray -> for (index in 0 until node.length()) visit(node.opt(index))
+                }
+            }
+            visit(value)
+            val parsed = parseVideoCommentPage(value)
+            parsed.items.forEach { comment ->
+                comments.putIfAbsent(comment.id, CommunityComment(
+                    comment.id, comment.author, comment.text, comment.published, comment.likes,
+                    highResolutionAvatarUrl(comment.avatar),
+                ))
+            }
+            createCommentParams = createCommentParams ?: parsed.createCommentParams
+            AppLog.event("community comment payloads candidates=$entityCandidates direct=$directItems rendered=${parsed.items.size} total=${comments.size} shape=${firstEntityShape ?: "none"}")
+        }
+        // Community post pages use the same comments-section bootstrap and current entity
+        // renderers as watch pages. Using arbitrary page continuations can select a post/feed
+        // continuation instead, yielding empty comments or author-less placeholder entities.
+        var continuation = findCommentsSectionToken(data)
+        if (createCommentParams == null && YouTubeRepository.signedIn()) {
+            findCommentsSectionToken(authenticatedData)?.let { signedToken ->
+                val signedBootstrap = bootstrap("https://www.youtube.com", "WEB")
+                val signedPage = runCatching {
+                    post("https://www.youtube.com/youtubei/v1/browse?key=${signedBootstrap.key}",
+                        JSONObject().put("context", context("WEB", signedBootstrap.version)).put("continuation", signedToken), signedBootstrap.origin)
+                }.getOrNull()
+                createCommentParams = signedPage?.let { findString(it, "createCommentParams") }
             }
         }
-        collect(data)
         val seen = mutableSetOf<String>()
         repeat(4) { page ->
-            val continuation = if (page == 0) findCommunityCommentsContinuation(data)
-                else findTopLevelCommentsContinuation(data)
-            if (continuation == null) return@repeat
-            if (!seen.add(continuation.token)) return@repeat
-            val bootstrap = bootstrap("https://www.youtube.com", "WEB")
-            AppLog.event("community comments post=$postId page=$page endpoint=${continuation.apiPath}")
-            data = post("https://www.youtube.com${continuation.apiPath}?key=${bootstrap.key}",
-                JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", continuation.token), bootstrap.origin)
-            collect(data)
+            val token = continuation ?: return@repeat
+            if (!seen.add(token)) return@repeat
+            // Community post continuations are CONTINUATION_REQUEST_TYPE_BROWSE. Unlike
+            // watch-page comments, sending this token to /next returns no usable thread.
+            AppLog.event("community comments post=$postId page=$page endpoint=/youtubei/v1/browse")
+            // Signed-in BROWSE currently returns commentViewModels without their backing
+            // commentEntityPayload mutations. Read this public thread without account headers;
+            // writes still use the authenticated createCommentParams path below.
+            val publicContext = JSONObject().put("client", JSONObject()
+                .put("clientName", "WEB").put("clientVersion", publicVersion)
+                .put("hl", "en").put("gl", "US"))
+            data = postPublicCommunity("https://www.youtube.com/youtubei/v1/browse?key=$publicKey",
+                JSONObject().put("context", publicContext).put("continuation", token), publicVersion, postUrl)
+            createCommentParams = createCommentParams ?: findString(data, "createCommentParams")
+            collectParsed(data)
+            continuation = parseVideoCommentPage(data).continuation
         }
         AppLog.event("community comments post=$postId items=${comments.size}")
-        return comments.values.toList()
+        return CommunityPostThread(comments.values.toList(), createCommentParams)
+    }
+
+    fun postCommunityComment(params: String, text: String): CommunityComment {
+        val comment = postCommentWithParams(params, text)
+        val identity = if (comment.author == "You" || comment.avatar.isBlank()) runCatching { signedInChannelInfo() }.getOrNull() else null
+        return CommunityComment(
+            comment.id,
+            identity?.name ?: comment.author,
+            comment.text,
+            comment.published,
+            comment.likes,
+            highResolutionAvatarUrl(identity?.thumbnail ?: comment.avatar),
+        )
+    }
+
+    private fun signedInChannelInfo(): ChannelInfo {
+        signedInChannelInfo?.let { return it }
+        val page = channelPage(ownChannelUrl())
+        return ChannelInfo(page.name, page.avatar).also { signedInChannelInfo = it }
+    }
+
+    fun loadArtwork(url: String): android.graphics.Bitmap? {
+        val normalized = when {
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("http://") || url.startsWith("https://") -> url
+            else -> return null
+        }
+        val request = Request.Builder().url(normalized)
+            .header("User-Agent", UA)
+            .header("Referer", "https://music.youtube.com/")
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@use null
+            response.body?.byteStream()?.use(android.graphics.BitmapFactory::decodeStream)
+        }
     }
 
     private data class InternalContinuation(val token: String, val apiPath: String)
@@ -830,7 +935,11 @@ object YouTubeRepository {
             if (value.optString("targetId") == "comments-section" ||
                 value.optString("sectionIdentifier") == "comment-item-section") {
                 findObject(value, "continuationEndpoint")?.let(::continuationRequest)
-            } else value.keys().asSequence().mapNotNull { findCommunityCommentsContinuation(value.opt(it)) }.firstOrNull()
+            } else {
+                value.optJSONObject("continuationEndpoint")?.let(::continuationRequest)
+                    ?.takeIf { it.apiPath.contains("/next") }
+                    ?: value.keys().asSequence().mapNotNull { findCommunityCommentsContinuation(value.opt(it)) }.firstOrNull()
+            }
         }
         is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findCommunityCommentsContinuation(value.opt(it)) }.firstOrNull()
         else -> null
@@ -2583,10 +2692,33 @@ object YouTubeRepository {
             }
         }
         visit(value)
-        // Owner renderers occasionally expose only a 48 px avatar even though the same
-        // image endpoint supports larger sizes. 176 px stays small on the wire but is
-        // sharp for the 42 dp player avatar on high-density displays.
-        return bestUrl?.replace(Regex("=s\\d+(?=-|$)"), "=s176")
+        return bestUrl?.let(::highResolutionAvatarUrl)
+    }
+
+    private fun highResolutionAvatarUrl(url: String): String = normalizeImageUrl(url)
+        .replace(Regex("=s\\d+(?=-|$)"), "=s512")
+        .replace(Regex("=w\\d+-h\\d+(?=-|$)"), "=w512-h512")
+
+    private fun findLargestPostImage(value: Any?): String? {
+        var best: JSONObject? = null
+        var bestPixels = -1L
+        fun visit(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    val url = node.optString("url")
+                    if (isYouTubeImageUrl(url)) {
+                        val width = node.optLong("width").coerceAtLeast(1L)
+                        val height = node.optLong("height").coerceAtLeast(1L)
+                        if (width * height > bestPixels) { bestPixels = width * height; best = node }
+                    }
+                    node.keys().forEach { visit(node.opt(it)) }
+                }
+                is JSONArray -> for (index in 0 until node.length()) visit(node.opt(index))
+            }
+        }
+        visit(value)
+        val candidate = best ?: return null
+        return highResolutionArtworkUrl(candidate.optString("url"), candidate.optInt("width"), candidate.optInt("height"))
     }
 
     fun authenticatedHeaders(origin: String): Map<String, String> = buildMap {
@@ -3117,6 +3249,32 @@ object YouTubeRepository {
         }
     }
 
+    private fun postPublicCommunity(url: String, body: JSONObject, version: String, referer: String): JSONObject {
+        val request = Request.Builder().url(url)
+            .header("User-Agent", WEB_PLAYER_UA)
+            .header("Content-Type", "application/json")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Origin", "https://www.youtube.com")
+            .header("Referer", referer)
+            .header("X-Youtube-Client-Name", "1")
+            .header("X-Youtube-Client-Version", version)
+            .post(body.toString().toRequestBody(jsonType)).build()
+        return client.newCall(request).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) error("YouTube returned HTTP ${response.code}")
+            JSONObject(raw)
+        }
+    }
+
+    private fun getPublicHtml(url: String): String {
+        val request = Request.Builder().url(url).header("User-Agent", WEB_PLAYER_UA)
+            .header("Accept-Language", "en-US,en;q=0.9").build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) error("YouTube returned HTTP ${response.code}")
+            response.body?.string().orEmpty()
+        }
+    }
+
     fun cookies(url: String): String = CookieManager.getInstance().getCookie(url).orEmpty()
 
     fun authorization(origin: String): String? {
@@ -3248,7 +3406,9 @@ object YouTubeRepository {
                 (durationMs > 0L && rawResumePositionMs >= durationMs - 1_500L)
             ) 0L else rawResumePositionMs
             val musicVideoType = findString(renderer, "musicVideoType").orEmpty()
-            val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel, resumePositionMs = resumePositionMs,
+            val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel,
+                channelUrl = authorChannelId.takeIf { it.startsWith("UC") }?.let { "https://www.youtube.com/channel/$it" }.orEmpty(),
+                resumePositionMs = resumePositionMs,
                 musicVideo = musicVideoType.isNotBlank() && musicVideoType != "MUSIC_VIDEO_TYPE_ATV")
             if (!isPlaylist && !isChannel) synchronized(videoDetailsCache) {
                 videoDetailsCache[id] = (videoDetailsCache[id] ?: VideoDetails(title, subtitle)).copy(

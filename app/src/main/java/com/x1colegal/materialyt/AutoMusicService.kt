@@ -47,6 +47,9 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private var extractionRetryCount = 0
     private var playGeneration = 0
     private var preferredAudioCodec = AudioCodecChoice.MP4A
+    private var playbackQueue = emptyList<FeedItem>()
+    private var playbackQueueIndex = -1
+    private var autoplayTrack: FeedItem? = null
     private lateinit var playbackWakeLock: PowerManager.WakeLock
     private lateinit var playbackWifiLock: WifiManager.WifiLock
 
@@ -72,16 +75,23 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val duration = androidx.compose.runtime.mutableLongStateOf(0L)
         val availableAudioTracks = androidx.compose.runtime.mutableStateOf<List<PlayableStream>>(emptyList())
         val selectedAudioTrack = androidx.compose.runtime.mutableStateOf<PlayableStream?>(null)
-        val playbackEndedGeneration = androidx.compose.runtime.mutableIntStateOf(0)
         private var instance: AutoMusicService? = null
         private const val ACTION_PLAY = "com.x1colegal.materialyt.PLAY"
         private const val ACTION_KEEP_ALIVE = "com.x1colegal.materialyt.KEEP_ALIVE"
 
-        fun play(context: Context, track: FeedItem, codec: AudioCodecChoice) {
+        fun play(context: Context, track: FeedItem, codec: AudioCodecChoice, queue: List<FeedItem> = emptyList(), queueIndex: Int = -1) {
             val intent = Intent(context, AutoMusicService::class.java).setAction(ACTION_PLAY)
                 .putExtra("id", track.id).putExtra("title", track.title).putExtra("subtitle", track.subtitle)
                 .putExtra("thumbnail", track.thumbnail).putExtra("thumbnailWidth", track.thumbnailWidth)
                 .putExtra("thumbnailHeight", track.thumbnailHeight).putExtra("codec", codec.name)
+                .putStringArrayListExtra("queueIds", ArrayList(queue.map { it.id }))
+                .putStringArrayListExtra("queueTitles", ArrayList(queue.map { it.title }))
+                .putStringArrayListExtra("queueSubtitles", ArrayList(queue.map { it.subtitle }))
+                .putStringArrayListExtra("queueThumbnails", ArrayList(queue.map { it.thumbnail }))
+                .putStringArrayListExtra("queueUrls", ArrayList(queue.map { it.url }))
+                .putExtra("queueWidths", queue.map { it.thumbnailWidth }.toIntArray())
+                .putExtra("queueHeights", queue.map { it.thumbnailHeight }.toIntArray())
+                .putExtra("queueIndex", queueIndex)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
         }
         fun pause() { instance?.player?.let { if (it.isPlaying) it.pause() } }
@@ -128,7 +138,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 override fun onPlayFromSearch(query: String?, extras: Bundle?) {
                     scope.launch {
                         val result = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicSearch(query.orEmpty()) } }.getOrDefault(emptyList())
-                        result.firstOrNull()?.let(::play)
+                        result.firstOrNull()?.let { play(it, preferredAudioCodec, result, 0) }
                     }
                 }
                 override fun onPlay() {
@@ -173,7 +183,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                     if (endedId != null) scope.launch(Dispatchers.IO) {
                         runCatching { YouTubeRepository.reportPlayback(endedId, maxOf(0L, endedAt - 1_000L), endedAt, ended = true) }
                     }
-                    playbackEndedGeneration.intValue++
+                    advanceAfterEnd()
                 }
                 publishState(); publishMetadata()
             }
@@ -198,7 +208,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                     scope.launch(Dispatchers.IO) {
                         runCatching { YouTubeRepository.reportPlayback(id, maxOf(0L, position.longValue - 1_000L), position.longValue, ended = true) }
                     }
-                    playbackEndedGeneration.intValue++
+                    advanceAfterEnd()
                 }
                 val due = lastReported == 0L && position.longValue >= 1_000L || position.longValue - lastReported >= 10_000L
                 if (id != null && player.isPlaying && due) {
@@ -213,18 +223,33 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_PLAY) {
             val id = intent.getStringExtra("id").orEmpty()
-            if (id.isNotBlank()) play(FeedItem(id, intent.getStringExtra("title").orEmpty(), intent.getStringExtra("subtitle").orEmpty(),
-                intent.getStringExtra("thumbnail").orEmpty(), intent.getIntExtra("thumbnailWidth", 1), intent.getIntExtra("thumbnailHeight", 1), "", "https://www.youtube.com/watch?v=$id"),
-                runCatching { AudioCodecChoice.valueOf(intent.getStringExtra("codec") ?: "MP4A") }.getOrDefault(AudioCodecChoice.MP4A))
+            if (id.isNotBlank()) {
+                val ids = intent.getStringArrayListExtra("queueIds").orEmpty()
+                val titles = intent.getStringArrayListExtra("queueTitles").orEmpty()
+                val subtitles = intent.getStringArrayListExtra("queueSubtitles").orEmpty()
+                val thumbnails = intent.getStringArrayListExtra("queueThumbnails").orEmpty()
+                val urls = intent.getStringArrayListExtra("queueUrls").orEmpty()
+                val widths = intent.getIntArrayExtra("queueWidths") ?: intArrayOf()
+                val heights = intent.getIntArrayExtra("queueHeights") ?: intArrayOf()
+                val queue = ids.indices.map { index ->
+                    FeedItem(ids[index], titles.getOrElse(index) { "" }, subtitles.getOrElse(index) { "" },
+                        thumbnails.getOrElse(index) { "" }, widths.getOrElse(index) { 1 }, heights.getOrElse(index) { 1 }, "",
+                        urls.getOrElse(index) { "https://www.youtube.com/watch?v=${ids[index]}" })
+                }
+                play(FeedItem(id, intent.getStringExtra("title").orEmpty(), intent.getStringExtra("subtitle").orEmpty(),
+                    intent.getStringExtra("thumbnail").orEmpty(), intent.getIntExtra("thumbnailWidth", 1), intent.getIntExtra("thumbnailHeight", 1), "", "https://www.youtube.com/watch?v=$id"),
+                    runCatching { AudioCodecChoice.valueOf(intent.getStringExtra("codec") ?: "MP4A") }.getOrDefault(AudioCodecChoice.MP4A),
+                    queue, intent.getIntExtra("queueIndex", -1))
+            }
         }
         return START_STICKY
     }
 
     private fun playMediaId(mediaId: String?) {
         if (mediaId == null) return
-        tracks.firstOrNull { it.id == mediaId }?.let(::play) ?: scope.launch {
+        tracks.indexOfFirst { it.id == mediaId }.takeIf { it >= 0 }?.let { index -> play(tracks[index], preferredAudioCodec, tracks, index) } ?: scope.launch {
             tracks = runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.getOrDefault(emptyList())
-            tracks.firstOrNull { it.id == mediaId }?.let(::play)
+            tracks.indexOfFirst { it.id == mediaId }.takeIf { it >= 0 }?.let { index -> play(tracks[index], preferredAudioCodec, tracks, index) }
         }
     }
 
@@ -244,7 +269,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         }
     }
 
-    private fun play(track: FeedItem, preferredCodec: AudioCodecChoice = AudioCodecChoice.MP4A) {
+    private fun play(track: FeedItem, preferredCodec: AudioCodecChoice = AudioCodecChoice.MP4A, queue: List<FeedItem> = emptyList(), queueIndex: Int = -1) {
         // Android Auto normally binds MediaBrowserService without starting it. A bound-only
         // service can be suspended as soon as the screen turns off; playback launched from the
         // app did not have this problem because ACTION_PLAY starts the foreground service first.
@@ -257,6 +282,9 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             acquirePlaybackLocks()
             currentTrack = track
             preferredAudioCodec = preferredCodec
+            playbackQueue = queue
+            playbackQueueIndex = queueIndex
+            autoplayTrack = null
             audioCandidates = emptyList()
             audioCandidateIndex = -1
             availableAudioTracks.value = emptyList()
@@ -273,23 +301,49 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 runCatching { YouTubeRepository.preparePlaybackTracking(track.id, music = true) }
                     .onFailure { AppLog.failure("prepare standard history tracking music=${track.id}", it) }
             }
-            currentArtwork = runCatching {
-                withContext(Dispatchers.IO) {
-                    if (track.thumbnail.isNotBlank()) {
-                        val conn = java.net.URL(track.thumbnail).openConnection()
-                        conn.connectTimeout = 5000
-                        conn.readTimeout = 5000
-                        android.graphics.BitmapFactory.decodeStream(conn.getInputStream())
-                    } else null
+            scope.launch {
+                autoplayTrack = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicUpNext(track.id) } }
+                    .onFailure { AppLog.failure("music service up next video=${track.id}", it) }
+                    .getOrNull()
+                AppLog.event("music service up next video=${track.id} next=${autoplayTrack?.id ?: "none"}")
+            }
+            // Artwork belongs to the playback service, not to the Compose screen. Fetch it in
+            // parallel so Android Auto/lock-screen metadata is complete even when the UI never
+            // opens, without delaying stream extraction or the beginning of playback.
+            scope.launch {
+                val artwork = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.loadArtwork(track.thumbnail) } }
+                    .onFailure { AppLog.failure("music artwork video=${track.id}", it) }
+                    .getOrNull()
+                if (currentTrack?.id == track.id && generation == playGeneration) {
+                    currentArtwork = artwork
+                    publishMetadata()
+                    getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+                    AppLog.event("music artwork video=${track.id} loaded=${artwork != null}")
                 }
-            }.getOrNull()
-            publishMetadata()
-            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+            }
             val audioStreams = extractAudioStreams(track)
             if (currentTrack?.id != track.id || generation != playGeneration) return@launch
             availableAudioTracks.value = audioStreams.distinctBy(::audioStreamKey)
             setAudioCandidates(audioStreams, preferredCodec)
             playNextAudioCandidate(track, generation)
+        }
+    }
+
+    private fun advanceAfterEnd() {
+        val endedTrack = currentTrack ?: return
+        val nextIndex = playbackQueueIndex + 1
+        val next = if (playbackQueueIndex >= 0) playbackQueue.getOrNull(nextIndex) else null
+        when {
+            next != null -> {
+                AppLog.event("music service advancing queue from=${endedTrack.id} to=${next.id} index=$nextIndex")
+                play(next, preferredAudioCodec, playbackQueue, nextIndex)
+            }
+            autoplayTrack != null -> {
+                val autoplay = autoplayTrack ?: return
+                AppLog.event("music service advancing autoplay from=${endedTrack.id} to=${autoplay.id}")
+                play(autoplay, preferredAudioCodec)
+            }
+            else -> AppLog.event("music service has no next track after=${endedTrack.id}")
         }
     }
 

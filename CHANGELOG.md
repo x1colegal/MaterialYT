@@ -2,6 +2,28 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.8] - 2026-10-27
+
+### Fixed
+- Advance YT Music queues and Up Next directly inside the foreground playback service so the next track prepares and starts while the app is in the background or the screen is locked.
+- Preserve Android Auto browse and search queues inside the playback service instead of depending on the activity UI to advance them.
+- Load music artwork in the playback service so notifications and Android Auto receive it without opening the app UI.
+- Keep Community post media separate from author avatars and load existing post comments through YouTube's current comment renderers.
+- Show the signed-in channel identity for newly published Community comments.
+- Load Community threads through their dedicated BROWSE continuation and request high-resolution post and profile images.
+- Parse Community comment entity payloads directly so authenticated threads retain author names, avatars, and comment text.
+- Support nested authenticated Community comment payloads instead of falling back to empty renderer placeholders.
+- Discover Community comment entities anywhere in authenticated BROWSE responses instead of assuming a fixed mutation path.
+- Decode nested serialized JSON fields in authenticated Community comment entities.
+- Load public Community threads without account headers when signed-in BROWSE omits comment entity data, while keeping comment publishing authenticated.
+- Bootstrap Community reading from a fully public post page so its continuation token does not inherit the signed-in entity-less response mode.
+- Match Community BROWSE requests to the desktop WEB client with Origin and Referer headers so YouTube includes framework entity updates.
+- Keep Community comment metadata concise by showing its publication time without an unlabeled raw like count.
+
+### Added
+- Add a dedicated Community post screen with post media, author details, comments, reload support, and authenticated comment publishing.
+- Open a video's channel when its avatar is selected in the Home feed.
+
 ## [3.7] - 2026-10-26
 
 ### Fixed

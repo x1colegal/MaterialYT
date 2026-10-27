@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.7] - 2026-10-26
+
+### Fixed
+- Preserve the YT Music system-bar mode after closing playback settings so the Android navigation bar stays hidden while the status bar remains visible.
+
 ## [3.6] - 2026-10-26
 
 > **Major playback update:** MaterialYT now uses one native WEB + PoToken + SABR playback stack across regular videos, Shorts, YT Music, and Android Auto.

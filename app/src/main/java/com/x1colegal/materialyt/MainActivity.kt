@@ -250,6 +250,8 @@ class MainActivity : ComponentActivity() {
     fun registerCurrentPlayer(p: ExoPlayer) { player = p }
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
+    private var musicSystemBarsActive = false
+    private var immersiveActive = false
     private var suppressNextAutoPip = false
     private var pipAspectRatio = Rational(16, 9)
     var isFullscreen by mutableStateOf(false)
@@ -390,7 +392,12 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus && !pipMode) {
-            if (isFullscreen) applyFullscreenState() else restoreNormalSystemBars()
+            when {
+                isFullscreen -> applyFullscreenState()
+                musicSystemBarsActive -> applyMusicPlayerSystemBars()
+                immersiveActive -> applyImmersiveState()
+                else -> restoreNormalSystemBars()
+            }
         }
     }
 
@@ -398,7 +405,12 @@ class MainActivity : ComponentActivity() {
         super.onConfigurationChanged(newConfig)
         window.decorView.post {
             if (!pipMode) {
-                if (isFullscreen) applyFullscreenState() else restoreNormalSystemBars()
+                when {
+                    isFullscreen -> applyFullscreenState()
+                    musicSystemBarsActive -> applyMusicPlayerSystemBars()
+                    immersiveActive -> applyImmersiveState()
+                    else -> restoreNormalSystemBars()
+                }
             }
         }
     }
@@ -495,22 +507,33 @@ class MainActivity : ComponentActivity() {
     }
 
     fun immersive(enabled: Boolean) {
+        immersiveActive = enabled
+        if (enabled) musicSystemBarsActive = false
+        if (enabled) applyImmersiveState() else restoreNormalSystemBars()
+    }
+
+    private fun applyImmersiveState() {
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
-        if (enabled) {
-            insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            insetsController.hide(WindowInsetsCompat.Type.systemBars())
-        } else {
-            insetsController.show(WindowInsetsCompat.Type.systemBars())
-        }
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        insetsController.hide(WindowInsetsCompat.Type.systemBars())
         @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = if (enabled) View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY else View.SYSTEM_UI_FLAG_VISIBLE
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
     }
 
     fun musicPlayerSystemBars(enabled: Boolean) {
+        musicSystemBarsActive = enabled
         if (!enabled) {
+            immersiveActive = false
             immersive(false)
             return
         }
+        immersiveActive = false
+        applyMusicPlayerSystemBars()
+    }
+
+    private fun applyMusicPlayerSystemBars() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         insetsController.show(WindowInsetsCompat.Type.statusBars())

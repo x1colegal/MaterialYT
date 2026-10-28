@@ -89,8 +89,23 @@ data class VideoInteractionState(
 data class RelatedVideoPage(val items: List<FeedItem>, val continuation: String? = null)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "", val avatar: String = "")
-data class CommunityComment(val id: String, val author: String, val text: String, val published: String, val likes: String, val avatar: String = "")
+data class CommunityComment(
+    val id: String,
+    val author: String,
+    val text: String,
+    val published: String,
+    val likes: String,
+    val avatar: String = "",
+    val replyCount: Int = 0,
+    val repliesContinuation: String? = null,
+    val createReplyParams: String? = null,
+)
 data class CommunityPostThread(val comments: List<CommunityComment>, val createCommentParams: String? = null)
+data class CommunityReplyPage(
+    val replies: List<CommunityComment>,
+    val continuation: String? = null,
+    val createReplyParams: String? = null,
+)
 data class VideoComment(
     val id: String,
     val author: String,
@@ -781,6 +796,7 @@ object YouTubeRepository {
         val publicVersion = Regex("\"INNERTUBE_CLIENT_VERSION\":\"([^\"]+)").find(publicHtml)?.groupValues?.get(1)
             ?: error("Unable to discover YouTube's public client version")
         val comments = linkedMapOf<String, CommunityComment>()
+        val signedCommentActions = mutableMapOf<String, VideoComment>()
         fun collectParsed(value: JSONObject) {
             // A Community BROWSE response already carries complete comments in entity
             // mutations. Parse those directly: authenticated responses do not always keep the
@@ -838,10 +854,19 @@ object YouTubeRepository {
             visit(value)
             val parsed = parseVideoCommentPage(value)
             parsed.items.forEach { comment ->
-                comments.putIfAbsent(comment.id, CommunityComment(
+                val actions = signedCommentActions[comment.id]
+                val rendered = CommunityComment(
                     comment.id, comment.author, comment.text, comment.published, comment.likes,
-                    highResolutionAvatarUrl(comment.avatar),
-                ))
+                    highResolutionAvatarUrl(comment.avatar), maxOf(comment.replyCount, actions?.replyCount ?: 0),
+                    comment.repliesContinuation ?: actions?.repliesContinuation,
+                    comment.createReplyParams ?: actions?.createReplyParams,
+                )
+                val entity = comments[comment.id]
+                comments[comment.id] = if (entity == null) rendered else entity.copy(
+                    replyCount = rendered.replyCount,
+                    repliesContinuation = rendered.repliesContinuation,
+                    createReplyParams = rendered.createReplyParams,
+                )
             }
             createCommentParams = createCommentParams ?: parsed.createCommentParams
             AppLog.event("community comment payloads candidates=$entityCandidates direct=$directItems rendered=${parsed.items.size} total=${comments.size} shape=${firstEntityShape ?: "none"}")
@@ -850,14 +875,20 @@ object YouTubeRepository {
         // renderers as watch pages. Using arbitrary page continuations can select a post/feed
         // continuation instead, yielding empty comments or author-less placeholder entities.
         var continuation = findCommentsSectionToken(data)
-        if (createCommentParams == null && YouTubeRepository.signedIn()) {
+        if (YouTubeRepository.signedIn()) {
             findCommentsSectionToken(authenticatedData)?.let { signedToken ->
                 val signedBootstrap = bootstrap("https://www.youtube.com", "WEB")
                 val signedPage = runCatching {
                     post("https://www.youtube.com/youtubei/v1/browse?key=${signedBootstrap.key}",
                         JSONObject().put("context", context("WEB", signedBootstrap.version)).put("continuation", signedToken), signedBootstrap.origin)
                 }.getOrNull()
-                createCommentParams = signedPage?.let { findString(it, "createCommentParams") }
+                if (signedPage != null) {
+                    createCommentParams = createCommentParams ?: findString(signedPage, "createCommentParams")
+                    val signedItems = parseVideoCommentPage(signedPage).items
+                    val soleReplyParams = findString(signedPage, "createReplyParams").takeIf { signedItems.size == 1 }
+                    signedItems.forEach { signedCommentActions[it.id] = if (it.createReplyParams == null) it.copy(createReplyParams = soleReplyParams) else it }
+                    AppLog.event("community signed comment actions items=${signedCommentActions.size} replyable=${signedCommentActions.values.count { it.createReplyParams != null }}")
+                }
             }
         }
         val seen = mutableSetOf<String>()
@@ -893,6 +924,64 @@ object YouTubeRepository {
             comment.published,
             comment.likes,
             highResolutionAvatarUrl(identity?.thumbnail ?: comment.avatar),
+        )
+    }
+
+    fun communityRepliesPage(continuation: String): CommunityReplyPage {
+        val publicHtml = getPublicHtml("https://www.youtube.com/?hl=en")
+        val key = Regex("\"INNERTUBE_API_KEY\":\"([^\"]+)").find(publicHtml)?.groupValues?.get(1)
+            ?: error("Unable to discover YouTube's public API key")
+        val version = Regex("\"INNERTUBE_CLIENT_VERSION\":\"([^\"]+)").find(publicHtml)?.groupValues?.get(1)
+            ?: error("Unable to discover YouTube's public client version")
+        val publicContext = JSONObject().put("client", JSONObject()
+            .put("clientName", "WEB").put("clientVersion", version)
+            .put("hl", "en").put("gl", "US"))
+        val response = postPublicCommunity(
+            "https://www.youtube.com/youtubei/v1/browse?key=$key",
+            JSONObject().put("context", publicContext).put("continuation", continuation),
+            version,
+            "https://www.youtube.com/",
+        )
+        val publicPage = parseVideoCommentPage(response)
+        val signedBootstrap = bootstrap("https://www.youtube.com", "WEB")
+        val signedResponse = if (signedIn()) runCatching {
+            post(
+                "https://www.youtube.com/youtubei/v1/browse?key=${signedBootstrap.key}",
+                JSONObject().put("context", context("WEB", signedBootstrap.version)).put("continuation", continuation),
+                signedBootstrap.origin,
+            )
+        }.getOrNull() else null
+        val signedPage = signedResponse?.let(::parseVideoCommentPage)
+        val signedItems = signedPage?.items.orEmpty().associateBy { it.id }
+        val createReplyParams = signedResponse?.let { findString(it, "createReplyParams") }
+        val sourceItems = if (publicPage.items.isNotEmpty()) publicPage.items else signedPage?.items.orEmpty()
+        val replies = sourceItems.map { comment ->
+            val signed = signedItems[comment.id]
+            CommunityComment(
+                comment.id, comment.author, comment.text, comment.published, comment.likes,
+                highResolutionAvatarUrl(comment.avatar), maxOf(comment.replyCount, signed?.replyCount ?: 0),
+                comment.repliesContinuation ?: signed?.repliesContinuation,
+                comment.createReplyParams ?: signed?.createReplyParams,
+            )
+        }
+        AppLog.event("community replies items=${replies.size} next=${publicPage.continuation != null || signedPage?.continuation != null} replyable=${createReplyParams != null}")
+        return CommunityReplyPage(
+            replies,
+            publicPage.continuation ?: signedPage?.continuation,
+            createReplyParams,
+        )
+    }
+
+    fun postCommunityReply(params: String, text: String): CommunityComment {
+        val reply = postCommentReply(params, text)
+        val identity = if (reply.author == "You" || reply.avatar.isBlank()) runCatching { signedInChannelInfo() }.getOrNull() else null
+        return CommunityComment(
+            reply.id,
+            identity?.name ?: reply.author,
+            reply.text,
+            reply.published,
+            reply.likes,
+            highResolutionAvatarUrl(identity?.thumbnail ?: reply.avatar),
         )
     }
 
@@ -2392,6 +2481,14 @@ object YouTubeRepository {
         val subscription = subscriptionState(response, response, channelId)
         AppLog.event("channel subscription channel=$channelId source=${subscription.second} subscribed=${subscription.first}")
         return subscription.first ?: error("YouTube did not expose this channel's subscription state")
+    }
+
+    fun isSignedInChannel(channelId: String): Boolean {
+        if (!signedIn() || channelId.isBlank()) return false
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        ensureSignedInCommentChannelId(origin, bootstrap)
+        return signedInCommentChannelId == channelId
     }
 
     /**

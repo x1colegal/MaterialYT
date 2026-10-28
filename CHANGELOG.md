@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.9] - 2026-10-27
+
+### Added
+- Open Community comment replies in a dedicated paginated sheet and publish authenticated replies directly from a post.
+
+### Fixed
+- Hide the Subscribe button when viewing the signed-in account's own channel.
+- Merge authenticated Community reply commands with public comment entities so reply composition remains available without sacrificing complete author and text data.
+- Send Community reply continuations to their declared BROWSE endpoint and accept reply-composition parameters returned when the reply thread opens.
+
 ## [3.8] - 2026-10-27
 
 ### Fixed

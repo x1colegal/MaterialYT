@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.10] - 2026-10-28
+
+### Changed
+- Remove the unstable Community Posts tab and its entry points from channel pages; video, Shorts, and YT Music comments remain available.
+
 ## [3.9] - 2026-10-27
 
 ### Added

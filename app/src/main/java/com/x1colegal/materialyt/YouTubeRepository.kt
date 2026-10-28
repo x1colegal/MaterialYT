@@ -99,6 +99,11 @@ data class CommunityComment(
     val replyCount: Int = 0,
     val repliesContinuation: String? = null,
     val createReplyParams: String? = null,
+    val isOwn: Boolean = false,
+    val updateParams: String? = null,
+    val updateIsReply: Boolean = false,
+    val updateApiUrl: String? = null,
+    val deleteParams: String? = null,
 )
 data class CommunityPostThread(val comments: List<CommunityComment>, val createCommentParams: String? = null)
 data class CommunityReplyPage(
@@ -860,12 +865,22 @@ object YouTubeRepository {
                     highResolutionAvatarUrl(comment.avatar), maxOf(comment.replyCount, actions?.replyCount ?: 0),
                     comment.repliesContinuation ?: actions?.repliesContinuation,
                     comment.createReplyParams ?: actions?.createReplyParams,
+                    (actions?.isOwn == true) || comment.isOwn,
+                    actions?.updateParams ?: comment.updateParams,
+                    actions?.updateIsReply ?: comment.updateIsReply,
+                    actions?.updateApiUrl ?: comment.updateApiUrl,
+                    actions?.deleteParams ?: comment.deleteParams,
                 )
                 val entity = comments[comment.id]
                 comments[comment.id] = if (entity == null) rendered else entity.copy(
                     replyCount = rendered.replyCount,
                     repliesContinuation = rendered.repliesContinuation,
                     createReplyParams = rendered.createReplyParams,
+                    isOwn = rendered.isOwn,
+                    updateParams = rendered.updateParams,
+                    updateIsReply = rendered.updateIsReply,
+                    updateApiUrl = rendered.updateApiUrl,
+                    deleteParams = rendered.deleteParams,
                 )
             }
             createCommentParams = createCommentParams ?: parsed.createCommentParams
@@ -878,6 +893,7 @@ object YouTubeRepository {
         if (YouTubeRepository.signedIn()) {
             findCommentsSectionToken(authenticatedData)?.let { signedToken ->
                 val signedBootstrap = bootstrap("https://www.youtube.com", "WEB")
+                ensureSignedInCommentChannelId(signedBootstrap.origin, signedBootstrap)
                 val signedPage = runCatching {
                     post("https://www.youtube.com/youtubei/v1/browse?key=${signedBootstrap.key}",
                         JSONObject().put("context", context("WEB", signedBootstrap.version)).put("continuation", signedToken), signedBootstrap.origin)
@@ -887,7 +903,7 @@ object YouTubeRepository {
                     val signedItems = parseVideoCommentPage(signedPage).items
                     val soleReplyParams = findString(signedPage, "createReplyParams").takeIf { signedItems.size == 1 }
                     signedItems.forEach { signedCommentActions[it.id] = if (it.createReplyParams == null) it.copy(createReplyParams = soleReplyParams) else it }
-                    AppLog.event("community signed comment actions items=${signedCommentActions.size} replyable=${signedCommentActions.values.count { it.createReplyParams != null }}")
+                    AppLog.event("community signed comment actions items=${signedCommentActions.size} replyable=${signedCommentActions.values.count { it.createReplyParams != null }} own=${signedCommentActions.values.count { it.isOwn }} editable=${signedCommentActions.values.count { it.updateParams != null }} deletable=${signedCommentActions.values.count { it.deleteParams != null }}")
                 }
             }
         }
@@ -924,6 +940,14 @@ object YouTubeRepository {
             comment.published,
             comment.likes,
             highResolutionAvatarUrl(identity?.thumbnail ?: comment.avatar),
+            comment.replyCount,
+            comment.repliesContinuation,
+            comment.createReplyParams,
+            comment.isOwn,
+            comment.updateParams,
+            comment.updateIsReply,
+            comment.updateApiUrl,
+            comment.deleteParams,
         )
     }
 
@@ -944,6 +968,7 @@ object YouTubeRepository {
         )
         val publicPage = parseVideoCommentPage(response)
         val signedBootstrap = bootstrap("https://www.youtube.com", "WEB")
+        ensureSignedInCommentChannelId(signedBootstrap.origin, signedBootstrap)
         val signedResponse = if (signedIn()) runCatching {
             post(
                 "https://www.youtube.com/youtubei/v1/browse?key=${signedBootstrap.key}",
@@ -962,9 +987,14 @@ object YouTubeRepository {
                 highResolutionAvatarUrl(comment.avatar), maxOf(comment.replyCount, signed?.replyCount ?: 0),
                 comment.repliesContinuation ?: signed?.repliesContinuation,
                 comment.createReplyParams ?: signed?.createReplyParams,
+                (signed?.isOwn == true) || comment.isOwn,
+                signed?.updateParams ?: comment.updateParams,
+                signed?.updateIsReply ?: comment.updateIsReply,
+                signed?.updateApiUrl ?: comment.updateApiUrl,
+                signed?.deleteParams ?: comment.deleteParams,
             )
         }
-        AppLog.event("community replies items=${replies.size} next=${publicPage.continuation != null || signedPage?.continuation != null} replyable=${createReplyParams != null}")
+        AppLog.event("community replies items=${replies.size} next=${publicPage.continuation != null || signedPage?.continuation != null} replyable=${createReplyParams != null} own=${replies.count { it.isOwn }} editable=${replies.count { it.updateParams != null }} deletable=${replies.count { it.deleteParams != null }}")
         return CommunityReplyPage(
             replies,
             publicPage.continuation ?: signedPage?.continuation,
@@ -982,7 +1012,41 @@ object YouTubeRepository {
             reply.published,
             reply.likes,
             highResolutionAvatarUrl(identity?.thumbnail ?: reply.avatar),
+            reply.replyCount,
+            reply.repliesContinuation,
+            reply.createReplyParams,
+            reply.isOwn,
+            reply.updateParams,
+            reply.updateIsReply,
+            reply.updateApiUrl,
+            reply.deleteParams,
         )
+    }
+
+    fun updateCommunityComment(comment: CommunityComment, text: String): CommunityComment {
+        val params = comment.updateParams ?: error("YouTube did not provide permission to edit this comment")
+        val updated = updateComment(params, text, comment.updateIsReply, comment.updateApiUrl)
+        return comment.copy(
+            text = text.trim(),
+            published = updated.published.ifBlank { comment.published },
+            updateParams = updated.updateParams ?: comment.updateParams,
+            updateIsReply = updated.updateIsReply || comment.updateIsReply,
+            updateApiUrl = updated.updateApiUrl ?: comment.updateApiUrl,
+            deleteParams = updated.deleteParams ?: comment.deleteParams,
+        )
+    }
+
+    fun deleteCommunityComment(postId: String, comment: CommunityComment) {
+        deleteComment("", VideoComment(
+            id = comment.id,
+            author = comment.author,
+            text = comment.text,
+            published = comment.published,
+            likes = comment.likes,
+            avatar = comment.avatar,
+            isOwn = comment.isOwn,
+            deleteParams = comment.deleteParams ?: deleteCommentParams(postId, comment.id),
+        ))
     }
 
     private fun signedInChannelInfo(): ChannelInfo {
@@ -3193,7 +3257,13 @@ object YouTubeRepository {
                 ?: value.optJSONObject("menuNavigationItemRenderer")
             val itemLabel = renderer?.optString("label").orEmpty()
                 .ifBlank { text(renderer?.opt("text")).orEmpty() }
-            if (renderer != null && itemLabel.equals(label, ignoreCase = true)) {
+            val normalizedLabel = itemLabel.trim().lowercase()
+            val expectedLabels = when (label.lowercase()) {
+                "edit" -> setOf("edit", "editar")
+                "delete" -> setOf("delete", "remove", "excluir", "remover")
+                else -> setOf(label.lowercase())
+            }
+            if (renderer != null && normalizedLabel in expectedLabels) {
                 findString(renderer, commandKey)
             } else value.keys().asSequence().mapNotNull { findMenuCommand(value.opt(it), label, commandKey) }.firstOrNull()
         }

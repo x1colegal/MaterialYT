@@ -2326,8 +2326,6 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
 private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onBack: () -> Unit) {
     var channel by remember { mutableStateOf<NativeChannelPage?>(null) }
     var channelItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
-    var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
-    var selectedPost by remember { mutableStateOf<CommunityPost?>(null) }
     var selectedTab by remember { mutableStateOf("videos") }
     var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -2338,7 +2336,6 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
     val scope = rememberCoroutineScope()
     BackHandler {
         when {
-            selectedPost != null -> selectedPost = null
             selectedShort != null -> selectedShort = null
             else -> onBack()
         }
@@ -2355,24 +2352,10 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         }.onFailure { error = it.message } }
     LaunchedEffect(selectedTab) {
         error = null
-        if (selectedTab == "posts") {
-            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPosts(url) } }
-                .onSuccess { posts = it }.onFailure { error = it.message }
-        } else {
-            channelItems = emptyList()
-            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url, selectedTab) } }
-                .onSuccess { page -> channel = page; channelItems = page.items }
-                .onFailure { error = it.message }
-        }
-    }
-    selectedPost?.let { post ->
-        CommunityPostScreen(
-            post = post,
-            channelName = channel?.name.orEmpty(),
-            channelAvatar = channel?.avatar.orEmpty(),
-            onBack = { selectedPost = null },
-        )
-        return
+        channelItems = emptyList()
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url, selectedTab) } }
+            .onSuccess { page -> channel = page; channelItems = page.items }
+            .onFailure { error = it.message }
     }
     val listState = rememberLazyListState()
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -2434,37 +2417,9 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                 LazyRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item { FilterChip(selectedTab == "videos", { selectedTab = "videos" }, { Text("Videos") }) }
                     item { FilterChip(selectedTab == "shorts", { selectedTab = "shorts" }, { Text("Shorts") }) }
-                    item { FilterChip(selectedTab == "posts", { selectedTab = "posts" }, { Text("Posts") }) }
                 }
             }
-            if (selectedTab == "posts") {
-                if (posts.isEmpty() && error == null) item { Text("No community posts were found.", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                items(posts, key = { it.id }) { post ->
-                    ElevatedCard(
-                        onClick = { selectedPost = post },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                    ) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                post.avatar.ifBlank { channel?.avatar.orEmpty() }.takeIf(String::isNotBlank)?.let { AsyncImage(it, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
-                                Column {
-                                    Text(channel?.name.orEmpty().ifBlank { "YouTube channel" }, style = MaterialTheme.typography.titleSmall)
-                                    Text(post.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                            Text(post.text, style = MaterialTheme.typography.bodyLarge)
-                            if (post.image.isNotBlank()) AsyncImage(post.image, null, Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Fit)
-                            Text(listOf(post.likes, post.comments).filter(String::isNotBlank).joinToString(" • "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Comment, null, tint = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.width(8.dp))
-                                Text("Open post", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
-                            }
-                        }
-                    }
-                }
-            } else {
-                if (tablet) items(channelItems.chunked(2)) { rowItems ->
+            if (tablet) items(channelItems.chunked(2)) { rowItems ->
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         rowItems.forEach { item -> ChannelTabletItem(item, Modifier.weight(1f)) {
                             if (selectedTab == "shorts") selectedShort = item else {
@@ -2474,13 +2429,12 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                         } }
                         if (rowItems.size == 1) Spacer(Modifier.weight(1f))
                     }
-                } else items(channelItems) { item -> FeedRow(item) {
+            } else items(channelItems) { item -> FeedRow(item) {
                     if (selectedTab == "shorts") selectedShort = item else {
                         YouTubeRepository.seedVideoDetails(item.id, item.title, channel?.name.orEmpty(), url, channel?.avatar.orEmpty())
                         openVideo(item.url)
                     }
-                } }
-            }
+            } }
         }
     }
     selectedShort?.let { selected ->
@@ -2506,6 +2460,7 @@ private fun ChannelTabletItem(item: FeedItem, modifier: Modifier = Modifier, cli
 
 @Composable
 private fun CommunityPostScreen(post: CommunityPost, channelName: String, channelAvatar: String, onBack: () -> Unit) {
+    val communityCommentsEnabled = false
     var thread by remember(post.id) { mutableStateOf<CommunityPostThread?>(null) }
     var loading by remember(post.id) { mutableStateOf(true) }
     var posting by remember(post.id) { mutableStateOf(false) }
@@ -2514,6 +2469,10 @@ private fun CommunityPostScreen(post: CommunityPost, channelName: String, channe
     var error by remember(post.id) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     LaunchedEffect(post.id, refreshKey) {
+        if (!communityCommentsEnabled) {
+            loading = false
+            return@LaunchedEffect
+        }
         loading = true
         error = null
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.communityPostThread(post.id) } }
@@ -2544,7 +2503,7 @@ private fun CommunityPostScreen(post: CommunityPost, channelName: String, channe
         ) {
             IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
             Text("Community post", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-            IconButton(onClick = { refreshKey++ }, enabled = !loading) { Icon(Icons.Default.Refresh, "Reload comments") }
+            if (communityCommentsEnabled) IconButton(onClick = { refreshKey++ }, enabled = !loading) { Icon(Icons.Default.Refresh, "Reload comments") }
         }
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 16.dp)) {
             item {
@@ -2563,14 +2522,21 @@ private fun CommunityPostScreen(post: CommunityPost, channelName: String, channe
                     Text("Comments", style = MaterialTheme.typography.titleMedium)
                 }
             }
-            if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-            error?.let { message -> item { Text(message, Modifier.padding(18.dp), color = MaterialTheme.colorScheme.error) } }
-            if (!loading && thread?.comments?.isEmpty() == true) item { Text("No comments were returned.", Modifier.padding(18.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            items(thread?.comments.orEmpty(), key = { it.id }) { comment ->
-                CommunityCommentNode(comment)
+            if (!communityCommentsEnabled) {
+                item { Text("Disabled temporarily", Modifier.padding(horizontal = 18.dp, vertical = 10.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            } else {
+                if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                error?.let { message -> item { Text(message, Modifier.padding(18.dp), color = MaterialTheme.colorScheme.error) } }
+                if (!loading && thread?.comments?.isEmpty() == true) item { Text("No comments were returned.", Modifier.padding(18.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                items(thread?.comments.orEmpty(), key = { it.id }) { comment ->
+                    CommunityCommentNode(post.id, comment) { changed ->
+                        thread = thread?.copy(comments = if (changed == null) thread!!.comments.filterNot { it.id == comment.id }
+                        else thread!!.comments.map { if (it.id == comment.id) changed else it })
+                    }
+                }
             }
         }
-        if (YouTubeRepository.signedIn()) {
+        if (communityCommentsEnabled && YouTubeRepository.signedIn()) {
             Surface(tonalElevation = 3.dp) {
                 Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
@@ -2594,28 +2560,40 @@ private fun CommunityPostScreen(post: CommunityPost, channelName: String, channe
 }
 
 @Composable
-private fun CommunityCommentNode(comment: CommunityComment) {
+private fun CommunityCommentNode(postId: String, comment: CommunityComment, onChanged: (CommunityComment?) -> Unit) {
     var showReplies by remember(comment.id) { mutableStateOf(false) }
+    var visibleComment by remember(comment.id) { mutableStateOf(comment) }
+    LaunchedEffect(comment) { visibleComment = comment }
     Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+        if (visibleComment.avatar.isNotBlank()) AsyncImage(visibleComment.avatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
         else Icon(Icons.Default.AccountCircle, null, Modifier.size(38.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(comment.author, style = MaterialTheme.typography.labelLarge)
-            Text(comment.text, style = MaterialTheme.typography.bodyMedium)
-            if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (comment.replyCount > 0 || comment.repliesContinuation != null || comment.createReplyParams != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(visibleComment.author, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                CommunityCommentActions(postId, visibleComment) { changed ->
+                    changed?.let { visibleComment = it }
+                    onChanged(changed)
+                }
+            }
+            Text(visibleComment.text, style = MaterialTheme.typography.bodyMedium)
+            if (visibleComment.published.isNotBlank()) Text(visibleComment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (visibleComment.replyCount > 0 || visibleComment.repliesContinuation != null || visibleComment.createReplyParams != null) {
                 TextButton(onClick = { showReplies = true }) {
-                    Text(if (comment.replyCount > 0) "View ${comment.replyCount} replies" else "View replies")
+                    Text(if (visibleComment.replyCount > 0) "View ${visibleComment.replyCount} replies" else "View replies")
                 }
             }
         }
     }
-    if (showReplies) CommunityRepliesSheet(comment, onDismiss = { showReplies = false })
+    if (showReplies) CommunityRepliesSheet(postId, visibleComment, { changed ->
+        changed?.let { visibleComment = it }
+        onChanged(changed)
+    }, onDismiss = { showReplies = false })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CommunityRepliesSheet(parent: CommunityComment, onDismiss: () -> Unit) {
+private fun CommunityRepliesSheet(postId: String, parent: CommunityComment, onParentChanged: (CommunityComment?) -> Unit, onDismiss: () -> Unit) {
+    var parentComment by remember(parent.id) { mutableStateOf(parent) }
     var replies by remember(parent.id) { mutableStateOf<List<CommunityComment>>(emptyList()) }
     var continuation by remember(parent.id) { mutableStateOf(parent.repliesContinuation) }
     var replyParams by remember(parent.id) { mutableStateOf(parent.createReplyParams) }
@@ -2655,7 +2633,15 @@ private fun CommunityRepliesSheet(parent: CommunityComment, onDismiss: () -> Uni
             }, enabled = !loading) { Icon(Icons.Default.Refresh, "Reload replies") }
         }
         HorizontalDivider()
-        CommunityReplyRow(parent)
+        CommunityReplyRow(postId, parentComment) { changed ->
+            if (changed == null) {
+                onParentChanged(null)
+                onDismiss()
+            } else {
+                parentComment = changed
+                onParentChanged(changed)
+            }
+        }
         if (YouTubeRepository.signedIn()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
@@ -2681,7 +2667,12 @@ private fun CommunityRepliesSheet(parent: CommunityComment, onDismiss: () -> Uni
             }
         }
         LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
-            items(replies, key = { it.id }) { CommunityReplyRow(it) }
+            items(replies, key = { it.id }) { reply ->
+                CommunityReplyRow(postId, reply) { changed ->
+                    replies = if (changed == null) replies.filterNot { it.id == reply.id }
+                    else replies.map { if (it.id == reply.id) changed else it }
+                }
+            }
             item {
                 if (continuation != null && error == null && !loading) LaunchedEffect(continuation) { loadMore() }
                 Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
@@ -2697,16 +2688,94 @@ private fun CommunityRepliesSheet(parent: CommunityComment, onDismiss: () -> Uni
 }
 
 @Composable
-private fun CommunityReplyRow(comment: CommunityComment) {
+private fun CommunityReplyRow(postId: String, comment: CommunityComment, onChanged: (CommunityComment?) -> Unit) {
+    var visibleComment by remember(comment.id) { mutableStateOf(comment) }
+    LaunchedEffect(comment) { visibleComment = comment }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(34.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+        if (visibleComment.avatar.isNotBlank()) AsyncImage(visibleComment.avatar, null, Modifier.size(34.dp).clip(CircleShape), contentScale = ContentScale.Crop)
         else Icon(Icons.Default.Person, null, Modifier.size(34.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(comment.author, style = MaterialTheme.typography.labelLarge)
-            Text(comment.text, style = MaterialTheme.typography.bodyMedium)
-            if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(visibleComment.author, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                CommunityCommentActions(postId, visibleComment) { changed ->
+                    changed?.let { visibleComment = it }
+                    onChanged(changed)
+                }
+            }
+            Text(visibleComment.text, style = MaterialTheme.typography.bodyMedium)
+            if (visibleComment.published.isNotBlank()) Text(visibleComment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+@Composable
+private fun CommunityCommentActions(postId: String, comment: CommunityComment, onChanged: (CommunityComment?) -> Unit) {
+    if (!comment.isOwn || comment.id.startsWith("local-")) return
+    var menu by remember(comment.id) { mutableStateOf(false) }
+    var editing by remember(comment.id) { mutableStateOf(false) }
+    var confirmingDelete by remember(comment.id) { mutableStateOf(false) }
+    var editText by remember(comment.id, comment.text) { mutableStateOf(comment.text) }
+    var working by remember(comment.id) { mutableStateOf(false) }
+    var error by remember(comment.id) { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    Box {
+        IconButton(onClick = { menu = true }, enabled = !working) { Icon(Icons.Default.MoreVert, "Comment actions") }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            if (comment.updateParams != null) DropdownMenuItem(
+                text = { Text("Edit") },
+                leadingIcon = { Icon(Icons.Default.Edit, null) },
+                onClick = { menu = false; editText = comment.text; error = null; editing = true },
+            )
+            DropdownMenuItem(
+                text = { Text("Delete") },
+                leadingIcon = { Icon(Icons.Default.Delete, null) },
+                onClick = { menu = false; error = null; confirmingDelete = true },
+            )
+        }
+    }
+
+    if (editing) AlertDialog(
+        onDismissRequest = { if (!working) editing = false },
+        title = { Text(if (comment.updateIsReply) "Edit reply" else "Edit comment") },
+        text = { Column {
+            OutlinedTextField(editText, { editText = it; error = null }, enabled = !working, minLines = 2, maxLines = 6)
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        } },
+        dismissButton = { TextButton(onClick = { editing = false }, enabled = !working) { Text("Cancel") } },
+        confirmButton = { Button(onClick = {
+            working = true
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.updateCommunityComment(comment, editText) } }
+                    .onSuccess { updated -> onChanged(updated); editing = false }
+                    .onFailure { error = it.message ?: "Could not edit comment" }
+                working = false
+            }
+        }, enabled = editText.isNotBlank() && editText.trim() != comment.text && !working) {
+            if (working) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Save")
+        } },
+    )
+
+    if (confirmingDelete) AlertDialog(
+        onDismissRequest = { if (!working) confirmingDelete = false },
+        title = { Text(if (comment.updateIsReply) "Delete reply?" else "Delete comment?") },
+        text = { Column {
+            Text("This permanently removes it from YouTube.")
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        } },
+        dismissButton = { TextButton(onClick = { confirmingDelete = false }, enabled = !working) { Text("Cancel") } },
+        confirmButton = { Button(onClick = {
+            working = true
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.deleteCommunityComment(postId, comment) } }
+                    .onSuccess { confirmingDelete = false; onChanged(null) }
+                    .onFailure { error = it.message ?: "Could not delete comment" }
+                working = false
+            }
+        }, enabled = !working) {
+            if (working) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Delete")
+        } },
+    )
 }
 
 @Composable

@@ -23,7 +23,7 @@ The app renders its own native interface. Only Google sign-in is displayed throu
 ## Highlights
 
 - Native Material 3 interface for Android 5.0 and newer
-- YouTube Home, History, search, channels, playlists, comments, and Community Posts
+- YouTube Home, History, search, channels, playlists, and comments
 - YouTube Music Home, search, foreground playback, synchronized lyrics, comments, and Android Auto
 - Vertical Shorts player with continuation-based recommendations
 - Native SABR/UMP playback with independently selectable audio and video formats
@@ -40,10 +40,9 @@ The app renders its own native interface. Only Google sign-in is displayed throu
 - Infinite Home and search pagination while YouTube provides continuations
 - Infinite Recommended pagination in phone and tablet video players
 - Search results for videos, channels, and playlists
-- Channel pages with banners, authenticated Subscribe controls, Videos, Shorts, and Community Posts
+- Channel pages with banners, authenticated Subscribe controls, Videos, and Shorts
 - Responsive playlist pages with playable queues and previous/next controls
 - Native comments and replies with pagination, posting, editing, and deletion when YouTube exposes the required commands
-- Community Post content and comments
 - Video details with description, views, likes, and publication date when available
 - Authenticated Like, Dislike, and Subscribe actions
 - Account channel and playlist access
@@ -111,7 +110,6 @@ A signed-in session enables features such as:
 - Personalized Home and YouTube Music data
 - Reading and updating YouTube History
 - Account channel and playlists
-- Community content and comments
 - Additional metadata exposed only to the active account
 
 MaterialYT does not request or store the Google password in its native UI. Clearing app storage removes local cookies, preferences, and the account session. If the session expires, the app asks the user to refresh sign-in instead of silently treating the account as logged out.

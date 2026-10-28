@@ -889,9 +889,10 @@ object YouTubeRepository {
         // Community post pages use the same comments-section bootstrap and current entity
         // renderers as watch pages. Using arbitrary page continuations can select a post/feed
         // continuation instead, yielding empty comments or author-less placeholder entities.
-        var continuation = findCommentsSectionToken(data)
+        val initialPublicContinuation = findPostCommentsContinuation(data)?.token
+        var continuation = initialPublicContinuation
         if (YouTubeRepository.signedIn()) {
-            findCommentsSectionToken(authenticatedData)?.let { signedToken ->
+            initialPublicContinuation?.let { signedToken ->
                 val signedBootstrap = bootstrap("https://www.youtube.com", "WEB")
                 ensureSignedInCommentChannelId(signedBootstrap.origin, signedBootstrap)
                 val signedPage = runCatching {
@@ -926,6 +927,17 @@ object YouTubeRepository {
             collectParsed(data)
             continuation = parseVideoCommentPage(data).continuation
         }
+        // Authenticated BROWSE can observe a just-created comment before the public thread
+        // cache does. Keep those signed-only rows so optimistic UI entries can be reconciled
+        // immediately with their real ids and mutation commands.
+        signedCommentActions.values.forEach { signed ->
+            if (signed.id !in comments && signed.text.isNotBlank()) comments[signed.id] = CommunityComment(
+                signed.id, signed.author, signed.text, signed.published, signed.likes,
+                highResolutionAvatarUrl(signed.avatar), signed.replyCount, signed.repliesContinuation,
+                signed.createReplyParams, signed.isOwn, signed.updateParams, signed.updateIsReply,
+                signed.updateApiUrl, signed.deleteParams,
+            )
+        }
         AppLog.event("community comments post=$postId items=${comments.size}")
         return CommunityPostThread(comments.values.toList(), createCommentParams)
     }
@@ -943,7 +955,7 @@ object YouTubeRepository {
             comment.replyCount,
             comment.repliesContinuation,
             comment.createReplyParams,
-            comment.isOwn,
+            true,
             comment.updateParams,
             comment.updateIsReply,
             comment.updateApiUrl,
@@ -979,7 +991,10 @@ object YouTubeRepository {
         val signedPage = signedResponse?.let(::parseVideoCommentPage)
         val signedItems = signedPage?.items.orEmpty().associateBy { it.id }
         val createReplyParams = signedResponse?.let { findString(it, "createReplyParams") }
-        val sourceItems = if (publicPage.items.isNotEmpty()) publicPage.items else signedPage?.items.orEmpty()
+        val publicIds = publicPage.items.mapTo(mutableSetOf()) { it.id }
+        val sourceItems = if (publicPage.items.isNotEmpty()) {
+            publicPage.items + signedPage?.items.orEmpty().filterNot { it.id in publicIds }
+        } else signedPage?.items.orEmpty()
         val replies = sourceItems.map { comment ->
             val signed = signedItems[comment.id]
             CommunityComment(
@@ -1015,7 +1030,7 @@ object YouTubeRepository {
             reply.replyCount,
             reply.repliesContinuation,
             reply.createReplyParams,
-            reply.isOwn,
+            true,
             reply.updateParams,
             reply.updateIsReply,
             reply.updateApiUrl,
@@ -1095,6 +1110,30 @@ object YouTubeRepository {
             }
         }
         is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findCommunityCommentsContinuation(value.opt(it)) }.firstOrNull()
+        else -> null
+    }
+
+    /**
+     * Community post detail pages currently expose their initial comments continuation in an
+     * itemSectionRenderer without the comments-section targetId used by watch pages. Select the
+     * BROWSE endpoint from that section instead of applying the watch-page-only target check.
+     */
+    private fun findPostCommentsContinuation(value: Any?): InternalContinuation? = when (value) {
+        is JSONObject -> {
+            val section = value.optJSONObject("itemSectionRenderer")
+            val items = section?.optJSONArray("contents")
+            var match: InternalContinuation? = null
+            if (items != null) for (index in 0 until items.length()) {
+                val renderer = items.optJSONObject(index)?.optJSONObject("continuationItemRenderer") ?: continue
+                val request = renderer.optJSONObject("continuationEndpoint")?.let(::continuationRequest)
+                if (request?.apiPath?.contains("/browse") == true) {
+                    match = request
+                    break
+                }
+            }
+            match ?: value.keys().asSequence().mapNotNull { findPostCommentsContinuation(value.opt(it)) }.firstOrNull()
+        }
+        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findPostCommentsContinuation(value.opt(it)) }.firstOrNull()
         else -> null
     }
 
@@ -2983,9 +3022,7 @@ object YouTubeRepository {
             ?.takeIf(String::isNotBlank)
             ?: if (isReply) "update_comment_reply" else "update_comment"
         val candidates = if (isReply) listOf(
-            suppliedEndpoint to "updateReplyParams",
-            "update_comment" to "updateReplyParams",
-            "update_comment_reply" to "updateCommentParams",
+            suppliedEndpoint to "updateCommentParams",
             "update_comment" to "updateCommentParams",
         ).distinct() else listOf(suppliedEndpoint to "updateCommentParams")
         var lastFailure: Throwable? = null

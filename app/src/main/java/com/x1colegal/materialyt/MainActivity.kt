@@ -2326,6 +2326,8 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
 private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onBack: () -> Unit) {
     var channel by remember { mutableStateOf<NativeChannelPage?>(null) }
     var channelItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
+    var selectedPost by remember { mutableStateOf<CommunityPost?>(null) }
     var selectedTab by remember { mutableStateOf("videos") }
     var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -2336,6 +2338,7 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
     val scope = rememberCoroutineScope()
     BackHandler {
         when {
+            selectedPost != null -> selectedPost = null
             selectedShort != null -> selectedShort = null
             else -> onBack()
         }
@@ -2352,10 +2355,20 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
         }.onFailure { error = it.message } }
     LaunchedEffect(selectedTab) {
         error = null
-        channelItems = emptyList()
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url, selectedTab) } }
-            .onSuccess { page -> channel = page; channelItems = page.items }
-            .onFailure { error = it.message }
+        if (selectedTab == "posts") {
+            posts = emptyList()
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPosts(url) } }
+                .onSuccess { posts = it }.onFailure { error = it.message }
+        } else {
+            channelItems = emptyList()
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url, selectedTab) } }
+                .onSuccess { page -> channel = page; channelItems = page.items }
+                .onFailure { error = it.message }
+        }
+    }
+    selectedPost?.let { post ->
+        CommunityPostScreen(post, channel?.name.orEmpty(), channel?.avatar.orEmpty()) { selectedPost = null }
+        return
     }
     val listState = rememberLazyListState()
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -2417,9 +2430,36 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                 LazyRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item { FilterChip(selectedTab == "videos", { selectedTab = "videos" }, { Text("Videos") }) }
                     item { FilterChip(selectedTab == "shorts", { selectedTab = "shorts" }, { Text("Shorts") }) }
+                    item { FilterChip(selectedTab == "posts", { selectedTab = "posts" }, { Text("Posts") }) }
                 }
             }
-            if (tablet) items(channelItems.chunked(2)) { rowItems ->
+            if (selectedTab == "posts") {
+                if (posts.isEmpty() && error == null) item { Text("No community posts were found.", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                items(posts, key = { it.id }) { post ->
+                    ElevatedCard(
+                        onClick = { selectedPost = post },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    ) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                post.avatar.ifBlank { channel?.avatar.orEmpty() }.takeIf(String::isNotBlank)?.let { AsyncImage(it, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
+                                Column {
+                                    Text(channel?.name.orEmpty().ifBlank { "YouTube channel" }, style = MaterialTheme.typography.titleSmall)
+                                    Text(post.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            Text(post.text, style = MaterialTheme.typography.bodyLarge)
+                            if (post.image.isNotBlank()) AsyncImage(post.image, null, Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Fit)
+                            Text(listOf(post.likes, post.comments).filter(String::isNotBlank).joinToString(" • "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Comment, null, tint = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Open post", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+                    }
+                }
+            } else if (tablet) items(channelItems.chunked(2)) { rowItems ->
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         rowItems.forEach { item -> ChannelTabletItem(item, Modifier.weight(1f)) {
                             if (selectedTab == "shorts") selectedShort = item else {
@@ -2458,25 +2498,40 @@ private fun ChannelTabletItem(item: FeedItem, modifier: Modifier = Modifier, cli
     }
 }
 
+private data class PendingCommunityItem(val comment: CommunityComment, val existingIds: Set<String>)
+
 @Composable
 private fun CommunityPostScreen(post: CommunityPost, channelName: String, channelAvatar: String, onBack: () -> Unit) {
-    val communityCommentsEnabled = false
     var thread by remember(post.id) { mutableStateOf<CommunityPostThread?>(null) }
+    var pendingComments by remember(post.id) { mutableStateOf<List<PendingCommunityItem>>(emptyList()) }
     var loading by remember(post.id) { mutableStateOf(true) }
     var posting by remember(post.id) { mutableStateOf(false) }
     var draft by remember(post.id) { mutableStateOf("") }
     var refreshKey by remember(post.id) { mutableIntStateOf(0) }
     var error by remember(post.id) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    LaunchedEffect(post.id, refreshKey) {
-        if (!communityCommentsEnabled) {
-            loading = false
-            return@LaunchedEffect
+    fun mergeThread(fresh: CommunityPostThread) {
+        fun confirmation(pending: PendingCommunityItem): CommunityComment? = fresh.comments.firstOrNull { remote ->
+            remote.id == pending.comment.id || (pending.comment.id.startsWith("local-") &&
+                remote.id !in pending.existingIds && remote.isOwn && remote.text == pending.comment.text)
         }
+        val confirmations = pendingComments.mapNotNull { pending -> confirmation(pending)?.let { pending.comment.id to it } }.toMap()
+        pendingComments = pendingComments.filterNot { it.comment.id in confirmations }
+        val freshById = fresh.comments.associateBy { it.id }
+        val pendingById = pendingComments.associateBy { it.comment.id }
+        val ordered = thread?.comments.orEmpty().mapNotNull { current ->
+            confirmations[current.id] ?: freshById[current.id] ?: pendingById[current.id]?.comment
+        }.toMutableList()
+        val used = ordered.mapTo(mutableSetOf()) { it.id }
+        fresh.comments.filterTo(ordered) { used.add(it.id) }
+        pendingComments.map { it.comment }.filterTo(ordered) { used.add(it.id) }
+        thread = fresh.copy(comments = ordered)
+    }
+    LaunchedEffect(post.id, refreshKey) {
         loading = true
         error = null
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.communityPostThread(post.id) } }
-            .onSuccess { thread = it }
+            .onSuccess(::mergeThread)
             .onFailure { error = it.message ?: "Could not load this post" }
         loading = false
     }
@@ -2489,8 +2544,20 @@ private fun CommunityPostScreen(post: CommunityPost, channelName: String, channe
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.postCommunityComment(params, text) } }
                 .onSuccess { comment ->
-                    thread = thread?.copy(comments = listOf(comment) + thread!!.comments)
+                    val existingIds = thread?.comments.orEmpty().mapTo(linkedSetOf()) { it.id }
+                    pendingComments = (listOf(PendingCommunityItem(comment, existingIds)) + pendingComments)
+                        .distinctBy { it.comment.id }
+                    thread = thread?.copy(comments = (listOf(comment) + thread!!.comments).distinctBy { it.id })
                     draft = ""
+                    scope.launch {
+                        repeat(2) { attempt ->
+                            delay(900L * (attempt + 1))
+                            val fresh = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.communityPostThread(post.id) } }.getOrNull()
+                                ?: return@repeat
+                            mergeThread(fresh)
+                            if (pendingComments.none { it.comment.id == comment.id }) return@launch
+                        }
+                    }
                 }
                 .onFailure { error = it.message ?: "Could not publish the comment" }
             posting = false
@@ -2503,7 +2570,7 @@ private fun CommunityPostScreen(post: CommunityPost, channelName: String, channe
         ) {
             IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
             Text("Community post", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-            if (communityCommentsEnabled) IconButton(onClick = { refreshKey++ }, enabled = !loading) { Icon(Icons.Default.Refresh, "Reload comments") }
+            IconButton(onClick = { refreshKey++ }, enabled = !loading) { Icon(Icons.Default.Refresh, "Reload comments") }
         }
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 16.dp)) {
             item {
@@ -2522,21 +2589,19 @@ private fun CommunityPostScreen(post: CommunityPost, channelName: String, channe
                     Text("Comments", style = MaterialTheme.typography.titleMedium)
                 }
             }
-            if (!communityCommentsEnabled) {
-                item { Text("Disabled temporarily", Modifier.padding(horizontal = 18.dp, vertical = 10.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            } else {
-                if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-                error?.let { message -> item { Text(message, Modifier.padding(18.dp), color = MaterialTheme.colorScheme.error) } }
-                if (!loading && thread?.comments?.isEmpty() == true) item { Text("No comments were returned.", Modifier.padding(18.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                items(thread?.comments.orEmpty(), key = { it.id }) { comment ->
-                    CommunityCommentNode(post.id, comment) { changed ->
-                        thread = thread?.copy(comments = if (changed == null) thread!!.comments.filterNot { it.id == comment.id }
-                        else thread!!.comments.map { if (it.id == comment.id) changed else it })
-                    }
+            if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+            error?.let { message -> item { Text(message, Modifier.padding(18.dp), color = MaterialTheme.colorScheme.error) } }
+            if (!loading && thread?.comments?.isEmpty() == true) item { Text("No comments were returned.", Modifier.padding(18.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            items(thread?.comments.orEmpty(), key = { it.id }) { comment ->
+                CommunityCommentNode(post.id, comment) { changed ->
+                    thread = thread?.copy(comments = if (changed == null) thread!!.comments.filterNot { it.id == comment.id }
+                    else thread!!.comments.map { if (it.id == comment.id) changed else it })
+                    pendingComments = if (changed == null) pendingComments.filterNot { it.comment.id == comment.id }
+                    else pendingComments.map { if (it.comment.id == comment.id) it.copy(comment = changed) else it }
                 }
             }
         }
-        if (communityCommentsEnabled && YouTubeRepository.signedIn()) {
+        if (YouTubeRepository.signedIn()) {
             Surface(tonalElevation = 3.dp) {
                 Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
@@ -2562,32 +2627,24 @@ private fun CommunityPostScreen(post: CommunityPost, channelName: String, channe
 @Composable
 private fun CommunityCommentNode(postId: String, comment: CommunityComment, onChanged: (CommunityComment?) -> Unit) {
     var showReplies by remember(comment.id) { mutableStateOf(false) }
-    var visibleComment by remember(comment.id) { mutableStateOf(comment) }
-    LaunchedEffect(comment) { visibleComment = comment }
     Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (visibleComment.avatar.isNotBlank()) AsyncImage(visibleComment.avatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+        if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
         else Icon(Icons.Default.AccountCircle, null, Modifier.size(38.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(visibleComment.author, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                CommunityCommentActions(postId, visibleComment) { changed ->
-                    changed?.let { visibleComment = it }
-                    onChanged(changed)
-                }
+                Text(comment.author, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                CommunityCommentActions(postId, comment, onChanged)
             }
-            Text(visibleComment.text, style = MaterialTheme.typography.bodyMedium)
-            if (visibleComment.published.isNotBlank()) Text(visibleComment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (visibleComment.replyCount > 0 || visibleComment.repliesContinuation != null || visibleComment.createReplyParams != null) {
+            Text(comment.text, style = MaterialTheme.typography.bodyMedium)
+            if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (comment.replyCount > 0 || comment.repliesContinuation != null || comment.createReplyParams != null) {
                 TextButton(onClick = { showReplies = true }) {
-                    Text(if (visibleComment.replyCount > 0) "View ${visibleComment.replyCount} replies" else "View replies")
+                    Text(if (comment.replyCount > 0) "View ${comment.replyCount} replies" else "View replies")
                 }
             }
         }
     }
-    if (showReplies) CommunityRepliesSheet(postId, visibleComment, { changed ->
-        changed?.let { visibleComment = it }
-        onChanged(changed)
-    }, onDismiss = { showReplies = false })
+    if (showReplies) CommunityRepliesSheet(postId, comment, onChanged, onDismiss = { showReplies = false })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2595,6 +2652,7 @@ private fun CommunityCommentNode(postId: String, comment: CommunityComment, onCh
 private fun CommunityRepliesSheet(postId: String, parent: CommunityComment, onParentChanged: (CommunityComment?) -> Unit, onDismiss: () -> Unit) {
     var parentComment by remember(parent.id) { mutableStateOf(parent) }
     var replies by remember(parent.id) { mutableStateOf<List<CommunityComment>>(emptyList()) }
+    var sessionReplies by remember(parent.id) { mutableStateOf<List<PendingCommunityItem>>(emptyList()) }
     var continuation by remember(parent.id) { mutableStateOf(parent.repliesContinuation) }
     var replyParams by remember(parent.id) { mutableStateOf(parent.createReplyParams) }
     var loading by remember(parent.id) { mutableStateOf(false) }
@@ -2603,35 +2661,79 @@ private fun CommunityRepliesSheet(postId: String, parent: CommunityComment, onPa
     var posting by remember(parent.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    fun loadMore() {
-        val token = continuation ?: return
+    fun mergeReplyPage(page: CommunityReplyPage, replace: Boolean) {
+        fun confirmation(pending: PendingCommunityItem): CommunityComment? = page.replies.firstOrNull { remote ->
+            pending.comment.id == remote.id || (pending.comment.id.startsWith("local-") &&
+                remote.id !in pending.existingIds && remote.isOwn && pending.comment.text == remote.text)
+        }
+        val confirmations = sessionReplies.mapNotNull { pending -> confirmation(pending)?.let { pending.comment.id to it } }.toMap()
+        sessionReplies = sessionReplies.filterNot { it.comment.id in confirmations }
+        val serverById = page.replies.associateBy { it.id }
+        val pendingById = sessionReplies.associateBy { it.comment.id }
+        val ordered = replies.mapNotNull { current ->
+            confirmations[current.id] ?: serverById[current.id] ?: pendingById[current.id]?.comment
+        }.toMutableList()
+        val used = ordered.mapTo(mutableSetOf()) { it.id }
+        page.replies.filterTo(ordered) { used.add(it.id) }
+        sessionReplies.map { it.comment }.filterTo(ordered) { used.add(it.id) }
+        replies = ordered
+        continuation = page.continuation
+        replyParams = replyParams ?: page.createReplyParams
+    }
+
+    fun loadMore(token: String, replace: Boolean = false) {
         if (loading) return
         loading = true
         error = null
         continuation = null
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.communityRepliesPage(token) } }
-                .onSuccess { page ->
-                    replies = (replies + page.replies).distinctBy { it.id }
-                    continuation = page.continuation
-                    replyParams = replyParams ?: page.createReplyParams
-                }
+                .onSuccess { page -> mergeReplyPage(page, replace) }
                 .onFailure { failure -> continuation = token; error = failure.message ?: "Could not load replies" }
             loading = false
         }
     }
 
-    LaunchedEffect(parent.id) { if (continuation != null) loadMore() }
+    suspend fun fetchFreshThread(): Pair<CommunityComment, CommunityReplyPage?> {
+        val freshParent = withContext(Dispatchers.IO) {
+            YouTubeRepository.communityPostThread(postId).comments.firstOrNull { it.id == parent.id }
+        } ?: error("YouTube did not return this comment")
+        val token = freshParent.repliesContinuation
+        val page = token?.let { withContext(Dispatchers.IO) { YouTubeRepository.communityRepliesPage(it) } }
+        return freshParent to page
+    }
+
+    fun applyFreshThread(freshParent: CommunityComment, page: CommunityReplyPage?) {
+        parentComment = freshParent.copy(
+            replyCount = maxOf(freshParent.replyCount, parentComment.replyCount, replies.size),
+            createReplyParams = freshParent.createReplyParams ?: parentComment.createReplyParams,
+            repliesContinuation = freshParent.repliesContinuation ?: parentComment.repliesContinuation,
+        )
+        replyParams = parentComment.createReplyParams ?: replyParams
+        onParentChanged(parentComment)
+        page?.let { mergeReplyPage(it, replace = true) }
+    }
+
+    fun refreshReplies() {
+        if (loading) return
+        loading = true
+        error = null
+        scope.launch {
+            runCatching { fetchFreshThread() }
+                .onSuccess { (freshParent, page) -> applyFreshThread(freshParent, page) }
+                .onFailure { error = it.message ?: "Could not reload replies" }
+            loading = false
+        }
+    }
+
+    LaunchedEffect(parent.id) { continuation?.let { loadMore(it) } }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close replies") }
             Text("Replies", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-            IconButton(onClick = {
-                replies = emptyList()
-                continuation = parent.repliesContinuation
-                if (continuation != null) loadMore()
-            }, enabled = !loading) { Icon(Icons.Default.Refresh, "Reload replies") }
+            IconButton(onClick = { refreshReplies() }, enabled = !loading) { Icon(Icons.Default.Refresh, "Reload replies") }
         }
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         HorizontalDivider()
         CommunityReplyRow(postId, parentComment) { changed ->
             if (changed == null) {
@@ -2659,7 +2761,26 @@ private fun CommunityRepliesSheet(postId: String, parent: CommunityComment, onPa
                     posting = true
                     scope.launch {
                         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.postCommunityReply(params, text) } }
-                            .onSuccess { reply -> replies = (listOf(reply) + replies).distinctBy { it.id }; draft = "" }
+                            .onSuccess { reply ->
+                                val existingIds = replies.mapTo(linkedSetOf()) { it.id }
+                                sessionReplies = (listOf(PendingCommunityItem(reply, existingIds)) + sessionReplies)
+                                    .distinctBy { it.comment.id }
+                                replies = (listOf(reply) + replies).distinctBy { it.id }
+                                parentComment = parentComment.copy(replyCount = maxOf(parentComment.replyCount + 1, replies.size))
+                                onParentChanged(parentComment)
+                                draft = ""
+                                // Create responses often omit edit/delete commands. Reconcile
+                                // briefly with the authenticated thread until its confirmed row
+                                // replaces the optimistic one; the reply stays visible meanwhile.
+                                scope.launch {
+                                    repeat(2) { attempt ->
+                                        delay(900L * (attempt + 1))
+                                        val fresh = runCatching { fetchFreshThread() }.getOrNull() ?: return@repeat
+                                        applyFreshThread(fresh.first, fresh.second)
+                                        if (replies.any { it.id == reply.id && it.updateParams != null }) return@launch
+                                    }
+                                }
+                            }
                             .onFailure { error = it.message ?: "Could not post reply" }
                         posting = false
                     }
@@ -2671,14 +2792,16 @@ private fun CommunityRepliesSheet(postId: String, parent: CommunityComment, onPa
                 CommunityReplyRow(postId, reply) { changed ->
                     replies = if (changed == null) replies.filterNot { it.id == reply.id }
                     else replies.map { if (it.id == reply.id) changed else it }
+                    sessionReplies = if (changed == null) sessionReplies.filterNot { it.comment.id == reply.id }
+                    else sessionReplies.map { if (it.comment.id == reply.id) it.copy(comment = changed) else it }
                 }
             }
             item {
-                if (continuation != null && error == null && !loading) LaunchedEffect(continuation) { loadMore() }
+                if (continuation != null && error == null && !loading) LaunchedEffect(continuation) { continuation?.let { loadMore(it) } }
                 Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
                     when {
                         loading -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
-                        error != null && continuation != null -> TextButton(onClick = { loadMore() }) { Text("Retry loading replies") }
+                        error != null && continuation != null -> TextButton(onClick = { continuation?.let { loadMore(it) } }) { Text("Retry loading replies") }
                         error != null -> Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                     }
                 }
@@ -2689,28 +2812,24 @@ private fun CommunityRepliesSheet(postId: String, parent: CommunityComment, onPa
 
 @Composable
 private fun CommunityReplyRow(postId: String, comment: CommunityComment, onChanged: (CommunityComment?) -> Unit) {
-    var visibleComment by remember(comment.id) { mutableStateOf(comment) }
-    LaunchedEffect(comment) { visibleComment = comment }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (visibleComment.avatar.isNotBlank()) AsyncImage(visibleComment.avatar, null, Modifier.size(34.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+        if (comment.avatar.isNotBlank()) AsyncImage(comment.avatar, null, Modifier.size(34.dp).clip(CircleShape), contentScale = ContentScale.Crop)
         else Icon(Icons.Default.Person, null, Modifier.size(34.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(visibleComment.author, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                CommunityCommentActions(postId, visibleComment) { changed ->
-                    changed?.let { visibleComment = it }
-                    onChanged(changed)
-                }
+                Text(comment.author, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                CommunityCommentActions(postId, comment, onChanged)
             }
-            Text(visibleComment.text, style = MaterialTheme.typography.bodyMedium)
-            if (visibleComment.published.isNotBlank()) Text(visibleComment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(comment.text, style = MaterialTheme.typography.bodyMedium)
+            if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
 @Composable
 private fun CommunityCommentActions(postId: String, comment: CommunityComment, onChanged: (CommunityComment?) -> Unit) {
-    if (!comment.isOwn || comment.id.startsWith("local-")) return
+    if (!comment.isOwn) return
+    val syncing = comment.id.startsWith("local-")
     var menu by remember(comment.id) { mutableStateOf(false) }
     var editing by remember(comment.id) { mutableStateOf(false) }
     var confirmingDelete by remember(comment.id) { mutableStateOf(false) }
@@ -2722,12 +2841,17 @@ private fun CommunityCommentActions(postId: String, comment: CommunityComment, o
     Box {
         IconButton(onClick = { menu = true }, enabled = !working) { Icon(Icons.Default.MoreVert, "Comment actions") }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            if (syncing) DropdownMenuItem(
+                text = { Text("Syncing with YouTube…") },
+                onClick = {},
+                enabled = false,
+            )
             if (comment.updateParams != null) DropdownMenuItem(
                 text = { Text("Edit") },
                 leadingIcon = { Icon(Icons.Default.Edit, null) },
                 onClick = { menu = false; editText = comment.text; error = null; editing = true },
             )
-            DropdownMenuItem(
+            if (!syncing) DropdownMenuItem(
                 text = { Text("Delete") },
                 leadingIcon = { Icon(Icons.Default.Delete, null) },
                 onClick = { menu = false; error = null; confirmingDelete = true },

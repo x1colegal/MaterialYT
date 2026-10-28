@@ -2,6 +2,21 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.11] - 2026-10-28
+
+### Fixed
+- Restore Community Posts with the current BROWSE continuation used by post detail pages.
+- Load Community comments from item sections that no longer expose the watch-page `comments-section` target identifier.
+- Merge authenticated Community actions from the same public BROWSE continuation that provides complete comment entities.
+- Update newly posted and edited replies immediately without requiring repeated refreshes.
+- Replace optimistic Community replies with YouTube-confirmed rows so refresh and mutation controls update correctly.
+- Refresh the parent Community thread before reloading replies so newly created reply continuations and View replies controls appear immediately.
+- Reconcile optimistic Community comments by ownership and text, preventing duplicate local/server rows and preserving pending comments across refreshes.
+- Show the actions menu immediately for newly posted comments and replies while YouTube confirms their mutation commands.
+- Match optimistic Community items only against newly observed server IDs, preserving repeated comments with identical text.
+- Keep optimistic Community rows in place while replacing them with confirmed server objects, and mark newly published items as owned immediately.
+- Include authenticated Community rows that have not reached the public thread cache yet, exposing their real IDs and mutation commands without waiting.
+
 ## [3.10] - 2026-10-28
 
 ### Changed

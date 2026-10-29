@@ -26,20 +26,19 @@ object WebPoTokenProvider {
     private val lock = Any()
     private var runtime: BotGuardRuntime? = null
     private var visitorData: String? = null
-    private var playerRequestToken: String? = null
     private var sessionKey: String? = null
 
     fun reset() = synchronized(lock) {
         runtime?.close()
         runtime = null
         visitorData = null
-        playerRequestToken = null
         sessionKey = null
     }
 
     fun get(
         videoId: String,
         requestedVisitorData: String,
+        streamingContentBinding: String,
         origin: String = "https://www.youtube.com",
         userAgent: String = YouTubeRepository.WEB_PLAYER_UA,
     ): WebPoTokenSession = synchronized(lock) {
@@ -59,15 +58,19 @@ object WebPoTokenProvider {
                 cookies,
             )
             current.initialize()
-            // The visitor-bound token authenticates /player and the SABR streamerContext.
-            // It must be minted before the per-video streaming token on this runtime.
-            playerRequestToken = current.mint(requestedVisitorData)
             runtime = current
         }
-        // The video-bound token belongs on the media/SABR URL as the pot query parameter.
-        val streamingToken = current!!.mint(videoId)
-        AppLog.event("WEB PoToken ready visitor=${requestedVisitorData.length} player=${playerRequestToken?.length ?: 0} streaming=${streamingToken.length}")
-        WebPoTokenSession(requestedVisitorData, playerRequestToken!!, streamingToken)
+        // Player tokens are always content-bound to the video. GVS/SABR binding is selected from
+        // the current ytcfg experiment: video id when content tokens are enabled, otherwise the
+        // signed-in Data Sync ID (or visitorData for a guest session).
+        val playerToken = current!!.mint(videoId)
+        val streamingToken = if (streamingContentBinding == videoId) playerToken
+            else current.mint(streamingContentBinding)
+        AppLog.event(
+            "WEB PoToken ready visitor=${requestedVisitorData.length} player=${playerToken.length} " +
+                "streaming=${streamingToken.length} sameBinding=${streamingContentBinding == videoId}"
+        )
+        WebPoTokenSession(requestedVisitorData, playerToken, streamingToken)
     }
 }
 

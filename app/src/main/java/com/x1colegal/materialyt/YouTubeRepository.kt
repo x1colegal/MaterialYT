@@ -2194,7 +2194,22 @@ object YouTubeRepository {
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Preparing WEB session…")
         val bootstrap = bootstrap(origin, clientName)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Generating PoToken…")
-        val token = WebPoTokenProvider.get(videoId, standaloneWebVisitorData(remix), origin, WEB_PLAYER_UA)
+        val requestedVisitor = standaloneWebVisitorData(remix)
+        val authenticated = cookies(origin).let { "SAPISID=" in it || "__Secure-3PAPISID=" in it }
+        val streamingBinding = when {
+            bootstrap.gvsBindToVideoId -> videoId
+            authenticated -> bootstrap.dataSyncId.takeIf(String::isNotBlank)
+                ?: error("Signed-in WEB SABR session did not expose DATASYNC_ID")
+            else -> requestedVisitor
+        }
+        AppLog.event(
+            "WEB PoToken binding player=video gvs=${when {
+                bootstrap.gvsBindToVideoId -> "video"
+                authenticated -> "datasync"
+                else -> "visitor"
+            }}"
+        )
+        val token = WebPoTokenProvider.get(videoId, requestedVisitor, streamingBinding, origin, WEB_PLAYER_UA)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Loading player JavaScript…")
         val cpn = cpnOverride?.takeIf(String::isNotBlank)
             ?: UUID.randomUUID().toString().replace("-", "").take(16)
@@ -3314,7 +3329,13 @@ object YouTubeRepository {
         return parseItems(post("$origin/youtubei/v1/browse?key=${bootstrap.key}", body, origin))
     }
 
-    private data class Bootstrap(val key: String, val version: String, val origin: String)
+    private data class Bootstrap(
+        val key: String,
+        val version: String,
+        val origin: String,
+        val dataSyncId: String = "",
+        val gvsBindToVideoId: Boolean = false,
+    )
 
     private fun beginFeedLoad(name: String): Long {
         val generation = feedGeneration.incrementAndGet()
@@ -3335,7 +3356,13 @@ object YouTubeRepository {
             ?: if (clientName == "WEB_REMIX") "1.20260901.01.00" else "2.20260901.00.00"
         clientVersions[baseOrigin] = version
         Regex("\"VISITOR_DATA\":\"([^\"]+)").find(html)?.groupValues?.get(1)?.let { visitorData[baseOrigin] = it }
-        return Bootstrap(key, version, baseOrigin).also { synchronized(bootstrapCache) { bootstrapCache["$baseOrigin:$clientName"] = System.currentTimeMillis() to it } }
+        val dataSyncId = Regex("\"DATASYNC_ID\":\"([^\"]+)").find(html)?.groupValues?.get(1).orEmpty()
+        val gvsBindToVideoId = html.contains("html5_generate_content_po_token=true") ||
+            html.contains("html5_generate_content_po_token%3Dtrue") ||
+            html.contains("html5_generate_content_po_token\\u003dtrue")
+        return Bootstrap(key, version, baseOrigin, dataSyncId, gvsBindToVideoId).also {
+            synchronized(bootstrapCache) { bootstrapCache["$baseOrigin:$clientName"] = System.currentTimeMillis() to it }
+        }
     }
 
     private fun context(name: String, version: String): JSONObject {

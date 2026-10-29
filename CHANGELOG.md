@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [3.12] - 2026-10-28
+
+### Fixed
+- Bind WEB player and SABR PoTokens to the identifiers selected by YouTube's current player configuration, preventing streams from progressing from attestation pending to attestation required.
+
 ## [3.11] - 2026-10-28
 
 ### Fixed

@@ -50,6 +50,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private var playbackQueue = emptyList<FeedItem>()
     private var playbackQueueIndex = -1
     private var autoplayTrack: FeedItem? = null
+    private val browserTracks = mutableMapOf<String, FeedItem>()
+    private val browserQueues = mutableMapOf<String, Pair<List<FeedItem>, Int>>()
     private lateinit var playbackWakeLock: PowerManager.WakeLock
     private lateinit var playbackWifiLock: WifiManager.WifiLock
 
@@ -78,6 +80,18 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         private var instance: AutoMusicService? = null
         private const val ACTION_PLAY = "com.x1colegal.materialyt.PLAY"
         private const val ACTION_KEEP_ALIVE = "com.x1colegal.materialyt.KEEP_ALIVE"
+        private const val ACTION_DISMISS = "com.x1colegal.materialyt.DISMISS_PLAYBACK"
+        private const val ROOT_ID = "materialyt_music"
+        private const val FEED_ID = "materialyt_auto_feed"
+        private const val PLAYLIST_PREFIX = "materialyt_auto_playlist:"
+        private const val STYLE_PLAYABLE = "android.media.browse.CONTENT_STYLE_PLAYABLE_HINT"
+        private const val STYLE_BROWSABLE = "android.media.browse.CONTENT_STYLE_BROWSABLE_HINT"
+        private const val STYLE_SINGLE_ITEM = "android.media.browse.CONTENT_STYLE_SINGLE_ITEM_HINT"
+        private const val STYLE_GROUP_TITLE = "android.media.browse.CONTENT_STYLE_GROUP_TITLE_HINT"
+        private const val LEGACY_STYLE_SUPPORTED = "android.auto.media.CONTENT_STYLE_SUPPORTED"
+        private const val LEGACY_STYLE_PLAYABLE = "android.auto.media.CONTENT_STYLE_PLAYABLE_HINT"
+        private const val LEGACY_STYLE_BROWSABLE = "android.auto.media.CONTENT_STYLE_BROWSABLE_HINT"
+        private const val STYLE_GRID = 2
 
         fun play(context: Context, track: FeedItem, codec: AudioCodecChoice, queue: List<FeedItem> = emptyList(), queueIndex: Int = -1) {
             val intent = Intent(context, AutoMusicService::class.java).setAction(ACTION_PLAY)
@@ -147,8 +161,18 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                     player.play()
                 }
                 override fun onPause() { player.pause(); releasePlaybackLocks() }
-                override fun onStop() { player.stop(); releasePlaybackLocks(); stopForeground(true); isActive = false }
+                override fun onStop() { requestClosePlayback() }
                 override fun onSeekTo(pos: Long) = player.seekTo(pos)
+                override fun onSkipToNext() {
+                    val next = playbackQueue.getOrNull(playbackQueueIndex + 1) ?: autoplayTrack
+                    if (next != null) play(next, preferredAudioCodec, playbackQueue, playbackQueueIndex + 1)
+                }
+                override fun onSkipToPrevious() {
+                    if (player.currentPosition > 5_000L) player.seekTo(0L)
+                    else playbackQueue.getOrNull(playbackQueueIndex - 1)?.let {
+                        play(it, preferredAudioCodec, playbackQueue, playbackQueueIndex - 1)
+                    }
+                }
             })
             isActive = true
         }
@@ -221,6 +245,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_DISMISS) {
+            requestClosePlayback()
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_PLAY) {
             val id = intent.getStringExtra("id").orEmpty()
             if (id.isNotBlank()) {
@@ -247,6 +275,11 @@ class AutoMusicService : MediaBrowserServiceCompat() {
 
     private fun playMediaId(mediaId: String?) {
         if (mediaId == null) return
+        browserTracks[mediaId]?.let { track ->
+            val (queue, index) = browserQueues[mediaId] ?: (listOf(track) to 0)
+            play(track, preferredAudioCodec, queue, index)
+            return
+        }
         tracks.indexOfFirst { it.id == mediaId }.takeIf { it >= 0 }?.let { index -> play(tracks[index], preferredAudioCodec, tracks, index) } ?: scope.launch {
             tracks = runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.getOrDefault(emptyList())
             tracks.indexOfFirst { it.id == mediaId }.takeIf { it >= 0 }?.let { index -> play(tracks[index], preferredAudioCodec, tracks, index) }
@@ -257,16 +290,111 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         BrowserRoot("materialyt_music", null)
 
     override fun onLoadChildren(parentId: String, result: Result<MutableList<MediaBrowserCompat.MediaItem>>) {
-        if (parentId != "materialyt_music") { result.sendResult(mutableListOf()); return }
         result.detach()
         scope.launch {
-            tracks = runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() }) }.getOrDefault(emptyList())
-            result.sendResult(tracks.map { track ->
-                val description = MediaDescriptionCompat.Builder().setMediaId(track.id).setTitle(track.title)
-                    .setSubtitle(track.subtitle).setIconUri(Uri.parse(track.thumbnail)).build()
-                MediaBrowserCompat.MediaItem(description, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE)
-            }.toMutableList())
+            val children = runCatching {
+                when {
+                    parentId == ROOT_ID -> listOf(feedRootItem())
+                    parentId == FEED_ID -> combinedRootItems()
+                    parentId.startsWith(PLAYLIST_PREFIX) -> playlistTracks(parentId)
+                    else -> emptyList()
+                }
+            }.onFailure { AppLog.failure("Android Auto browse parent=$parentId", it) }
+                .getOrDefault(emptyList())
+            result.sendResult(children.toMutableList())
         }
+    }
+
+    private fun feedRootItem(): MediaBrowserCompat.MediaItem {
+        val extras = Bundle().apply {
+            putInt(STYLE_PLAYABLE, STYLE_GRID)
+            putInt(STYLE_BROWSABLE, STYLE_GRID)
+            putBoolean(LEGACY_STYLE_SUPPORTED, true)
+            putInt(LEGACY_STYLE_PLAYABLE, STYLE_GRID)
+            putInt(LEGACY_STYLE_BROWSABLE, STYLE_GRID)
+        }
+        val icon = Uri.parse("android.resource://$packageName/${R.mipmap.ic_launcher}")
+        val description = MediaDescriptionCompat.Builder()
+            .setMediaId(FEED_ID)
+            .setTitle("Home")
+            .setIconUri(icon)
+            .setExtras(extras)
+            .build()
+        return MediaBrowserCompat.MediaItem(description, MediaBrowserCompat.MediaItem.FLAG_BROWSABLE)
+    }
+
+    private suspend fun combinedRootItems(): List<MediaBrowserCompat.MediaItem> {
+        val page = withContext(Dispatchers.IO) { YouTubeRepository.musicHome() }
+        val output = mutableListOf<MediaBrowserCompat.MediaItem>()
+        val visiblePlaylistIds = mutableSetOf<String>()
+        page.sections.forEachIndexed { sectionIndex, section ->
+            val items = originalMetadataItems(section.items)
+            val queue = items.filter { !it.playlist && !it.channel && it.id.length == 11 }
+            items.forEach { item ->
+                val group = section.title.ifBlank { "Music" }
+                if (item.playlist) {
+                    val playlistId = item.id.removePrefix("VL")
+                    if (playlistId.isNotBlank() && visiblePlaylistIds.add(playlistId)) {
+                        output += browserItem("$PLAYLIST_PREFIX${Uri.encode(playlistId)}", item.title, item.subtitle, item.thumbnail, playable = false, groupTitle = group)
+                    }
+                } else if (!item.channel && item.id.length == 11) {
+                    val index = queue.indexOfFirst { it.id == item.id }
+                    if (index >= 0) {
+                        val mediaId = "track:section-$sectionIndex:$index:${item.id}"
+                        browserTracks[mediaId] = item
+                        browserQueues[mediaId] = queue to index
+                        output += browserItem(mediaId, item.title, item.subtitle, item.thumbnail, playable = true, groupTitle = group)
+                    }
+                }
+            }
+        }
+        val playlists = originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.music() })
+            .filter { it.playlist }
+            .distinctBy { it.id.removePrefix("VL") }
+        playlists.forEach { playlist ->
+            val playlistId = playlist.id.removePrefix("VL")
+            if (playlistId.isNotBlank() && visiblePlaylistIds.add(playlistId)) {
+                output += browserItem("$PLAYLIST_PREFIX${Uri.encode(playlistId)}", playlist.title, playlist.subtitle, playlist.thumbnail, playable = false, groupTitle = "Playlists")
+            }
+        }
+        tracks = page.sections.flatMap { it.items }.filter { !it.playlist && !it.channel && it.id.length == 11 }
+        return output
+    }
+
+    private suspend fun playlistTracks(parentId: String): List<MediaBrowserCompat.MediaItem> {
+        val playlistId = Uri.decode(parentId.removePrefix(PLAYLIST_PREFIX)).removePrefix("VL")
+        if (playlistId.isBlank()) return emptyList()
+        val queue = originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.musicPlaylistVideos(playlistId) })
+            .filter { !it.playlist && !it.channel && it.id.length == 11 }
+        if (queue.isEmpty()) return emptyList()
+        val playAllId = "play-all:$playlistId"
+        browserTracks[playAllId] = queue.first()
+        browserQueues[playAllId] = queue to 0
+        return listOf(browserItem(playAllId, "Play playlist", "${queue.size} songs", queue.first().thumbnail, playable = true)) +
+            registerPlayableQueue("playlist-$playlistId", queue)
+    }
+
+    private fun registerPlayableQueue(scopeId: String, queue: List<FeedItem>): List<MediaBrowserCompat.MediaItem> =
+        queue.mapIndexed { index, track ->
+            val mediaId = "track:$scopeId:$index:${track.id}"
+            browserTracks[mediaId] = track
+            browserQueues[mediaId] = queue to index
+            browserItem(mediaId, track.title, track.subtitle, track.thumbnail, playable = true)
+        }
+
+    private fun browserItem(mediaId: String, title: String, subtitle: String, thumbnail: String?, playable: Boolean, groupTitle: String? = null): MediaBrowserCompat.MediaItem {
+        val extras = Bundle().apply {
+            putInt(STYLE_SINGLE_ITEM, STYLE_GRID)
+            groupTitle?.takeIf(String::isNotBlank)?.let { putString(STYLE_GROUP_TITLE, it) }
+        }
+        val description = MediaDescriptionCompat.Builder()
+            .setMediaId(mediaId)
+            .setTitle(title)
+            .setSubtitle(subtitle.takeIf(String::isNotBlank))
+            .apply { thumbnail?.takeIf(String::isNotBlank)?.let { setIconUri(Uri.parse(it)) } }
+            .setExtras(extras)
+            .build()
+        return MediaBrowserCompat.MediaItem(description, if (playable) MediaBrowserCompat.MediaItem.FLAG_PLAYABLE else MediaBrowserCompat.MediaItem.FLAG_BROWSABLE)
     }
 
     private fun play(track: FeedItem, preferredCodec: AudioCodecChoice = AudioCodecChoice.MP4A, queue: List<FeedItem> = emptyList(), queueIndex: Int = -1) {
@@ -462,9 +590,11 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val track = currentTrack
         val launch = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
+        val dismiss = PendingIntent.getService(this, 1, Intent(this, AutoMusicService::class.java).setAction(ACTION_DISMISS),
+            PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
         val builder = NotificationCompat.Builder(this, CHANNEL_ID).setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(track?.title ?: "MaterialYT").setContentText(track?.subtitle ?: "Loading music…")
-            .setContentIntent(launch).setOnlyAlertOnce(true).setOngoing(player.isPlaying)
+            .setContentIntent(launch).setDeleteIntent(dismiss).setOnlyAlertOnce(true).setOngoing(player.isPlaying)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setStyle(MediaStyle().setMediaSession(session.sessionToken))
         currentArtwork?.let { builder.setLargeIcon(it) }
@@ -479,7 +609,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         }
         playing.value = player.isPlaying
         session.setPlaybackState(PlaybackStateCompat.Builder()
-            .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH or PlaybackStateCompat.ACTION_SEEK_TO or PlaybackStateCompat.ACTION_STOP)
+            .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH or PlaybackStateCompat.ACTION_SEEK_TO or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_STOP)
             .setState(state, player.currentPosition.coerceAtLeast(0L), if (player.isPlaying) 1f else 0f).build())
         if (currentTrack != null) getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
     }
@@ -519,4 +649,5 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     override fun onDestroy() { instance = null; nowPlaying.value = null; playing.value = false; availableAudioTracks.value = emptyList(); selectedAudioTrack.value = null; releasePlaybackLocks(); scope.cancel(); player.release(); session.release(); super.onDestroy() }
+
 }

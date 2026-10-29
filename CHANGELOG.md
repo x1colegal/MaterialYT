@@ -2,6 +2,20 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.2] - 2026-10-29
+
+### Added
+- Browse the phone-style music feed, playlists, and individual playlist tracks from one Android Auto screen.
+- Use playlist-aware playback queues with working previous and next controls in Android Auto.
+- Start an entire playlist directly from its Android Auto browse screen.
+
+### Changed
+- Present playlists as browsable collections instead of trying to play them as songs.
+- Keep feed sections as visual groups instead of turning them into navigation folders.
+- Follow Android Auto's root-menu contract with one browsable Home tab and a mixed grid feed beneath it.
+- Prefer large artwork cards through modern, per-item, and legacy Android Auto content-style hints.
+- Stop restoring dismissed Android Now Playing sessions after the user removes them.
+
 ## [4.1] - 2026-10-29
 
 ### Fixed

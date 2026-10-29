@@ -50,6 +50,10 @@ object SabrMediaFactory {
                 })
                 else -> null
             },
+            renewProtection = if (info.clientId == 1 || info.clientId == 67) ({
+                val refreshed = YouTubeRepository.renewWebSabrProtection(info)
+                refreshed.first to decode(refreshed.second)
+            }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, config, null, HttpBackend.playbackClient()))
@@ -81,6 +85,10 @@ object SabrMediaFactory {
                 })
                 else -> null
             },
+            renewProtection = if (info.clientId == 1 || info.clientId == 67) ({
+                val refreshed = YouTubeRepository.renewWebSabrProtection(info)
+                refreshed.first to decode(refreshed.second)
+            }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, null, config, HttpBackend.playbackClient()))

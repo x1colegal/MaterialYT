@@ -36,6 +36,8 @@ internal class SabrVideoConfig(
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
+    /** Re-attest WEB in place: fresh SABR endpoint plus the replacement GVS PoToken. */
+    val renewProtection: (() -> Pair<String, ByteArray>)? = null,
 )
 
 /**
@@ -139,6 +141,7 @@ internal class SabrVideoSession(
         val tracks = mapOf(video.itag to video, audio.itag to audio)
         var url = prepared(config.sabrUrl)
         var ustreamerConfig = config.ustreamerConfig
+        var poToken = config.poToken
         var playerTimeMs = startTimeMs
         var cookie: ByteArray? = null
         val ctxByType = LinkedHashMap<Long, SabrMessages.ContextUpdate>()
@@ -148,7 +151,25 @@ internal class SabrVideoSession(
         var attestationStalls = 0
         var emptySessionRefreshes = 0
         var startupEmptyResponses = 0
+        var protectionRenewals = 0
         var backoffTimeMs = 0L
+
+        fun renewProtection(): Boolean {
+            val renew = config.renewProtection ?: return false
+            if (protectionRenewals >= MAX_PROTECTION_RENEWALS) return false
+            protectionRenewals++
+            AppLog.event("SABR video renewing WEB protection attempt=$protectionRenewals")
+            val refreshed = renew.invoke()
+            url = prepared(refreshed.first)
+            poToken = refreshed.second
+            cookie = null
+            ctxByType.clear()
+            ctxToSend.clear()
+            attestationStalls = 0
+            dry = 0
+            backoffTimeMs = 0
+            return true
+        }
 
         while (!cancelled && iter < maxIter && dry < 6) {
             if (backoffTimeMs > 0) {
@@ -168,7 +189,7 @@ internal class SabrVideoSession(
                 audioFormat = config.audioFormat,
                 video = video.state(),
                 audio = audio.state(),
-                poToken = config.poToken,
+                poToken = poToken,
                 clientInfo = config.clientInfo,
                 playerTimeMs = playerTimeMs,
                 cookie = cookie,
@@ -252,6 +273,7 @@ internal class SabrVideoSession(
                 Timber.tag(TAG).w("SABR_ERROR at iter=$iter (video ${video.lastSeq}, audio ${audio.lastSeq}) — server rejected the request")
                 failStream("SABR_ERROR", stall = true); return
             }
+            if (protStatus >= SabrProtection.ATTESTATION_PENDING && headers.isEmpty() && renewProtection()) continue
             if (!reloadToken.isNullOrBlank() && config.reloadPlayer != null) {
                 AppLog.event("SABR video reloading player iter=$iter token=${reloadToken.length}")
                 val refreshed = config.reloadPlayer.invoke(reloadToken)
@@ -360,6 +382,7 @@ internal class SabrVideoSession(
             // Attestation cap (see SabrSession): a client that can't satisfy stream protection is served a
             // free window then only STREAM_PROTECTION_STATUS>=2 — bail fast so the fallback moves on.
             attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
+            if (protStatus >= SabrProtection.ATTESTATION_PENDING && renewProtection()) continue
             if (SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR video attestation cap (STREAM_PROTECTION_STATUS=$protStatus) — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus)", stall = true); return
@@ -408,6 +431,7 @@ internal class SabrVideoSession(
     companion object {
         private const val TAG = "SabrVideoSession"
         private const val STARTUP_EMPTY_LIMIT = 2
+        private const val MAX_PROTECTION_RENEWALS = 2
         private const val MAX_STARTUP_REFRESHES = 2
     }
 }

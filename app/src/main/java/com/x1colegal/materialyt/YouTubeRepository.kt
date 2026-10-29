@@ -2319,6 +2319,30 @@ object YouTubeRepository {
         return url to config
     }
 
+    /** Rebuilds the WEB BotGuard minter and returns a fresh endpoint + GVS token for the same video. */
+    fun renewWebSabrProtection(info: SabrPlaybackInfo): Pair<String, String> {
+        val remix = info.clientId == 67
+        check(info.clientId == 1 || remix) { "SABR protection renewal is only supported by WEB clients" }
+        val originalCpn = info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
+        WebPoTokenProvider.reset()
+        val response = webPoPlayer(info.videoId, remix, cpnOverride = originalCpn)
+        val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
+        check(status == "OK") { reason.ifBlank { "WEB protection renewal returned $status" } }
+        val rawUrl = response.optJSONObject("streamingData")?.optString("serverAbrStreamingUrl")
+            ?.takeIf(String::isNotBlank) ?: error("WEB protection renewal returned no endpoint")
+        val cpn = response.optString("_materialytCpn").ifBlank { originalCpn.orEmpty() }
+        val pot = response.optString("_materialytStreamingPot")
+            .takeIf(String::isNotBlank) ?: error("WEB protection renewal returned no GVS PoToken")
+        val url = rawUrl.toHttpUrlOrNull()?.newBuilder()
+            ?.setQueryParameter("alr", "yes")
+            ?.apply { if (cpn.isNotBlank()) setQueryParameter("cpn", cpn) }
+            ?.setQueryParameter("pot", pot)
+            ?.build()?.toString() ?: rawUrl
+        AppLog.event("SABR WEB protection renewed video=${info.videoId} token=${pot.length}")
+        return url to pot
+    }
+
     /** Applies a SABR RELOAD_PLAYER_RESPONSE token and returns a fully prepared replacement endpoint. */
     fun reloadSabrPlayback(info: SabrPlaybackInfo, reloadToken: String): Pair<String, String> {
         val vision = info.clientId == 101

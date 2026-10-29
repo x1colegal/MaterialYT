@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.1] - 2026-10-29
+
+### Fixed
+- Replace rejected WEB SABR PoTokens and endpoints inside the active session when stream protection requests re-attestation.
+
 ## [4.0] - 2026-10-29
 
 ### Fixed

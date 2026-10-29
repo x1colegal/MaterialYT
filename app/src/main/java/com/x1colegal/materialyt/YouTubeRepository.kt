@@ -2498,7 +2498,12 @@ object YouTubeRepository {
             .ifBlank { subscribeRenderer?.optString("channelId").orEmpty() }
             .ifBlank { findString(response, "channelId").orEmpty() }
             .takeIf { it.startsWith("UC") }.orEmpty()
-        val subscription = subscriptionState(response, owner, channelId)
+        val nextSubscription = subscriptionState(response, owner, channelId)
+        val subscription = if (nextSubscription.first != null || channelId.isBlank()) nextSubscription else {
+            runCatching { channelSubscriptionState(channelId) to "channel_browse" }
+                .onFailure { AppLog.failure("video subscription fallback channel=$channelId", it) }
+                .getOrDefault(null to "missing")
+        }
         val subscribed = subscription.first ?: false
         AppLog.event("video interactions subscription video=$videoId channel=$channelId source=${subscription.second} subscribed=$subscribed")
         val likeStatus = findString(primary, "likeStatus").orEmpty()
@@ -2636,8 +2641,9 @@ object YouTubeRepository {
         if (namedState.isNotBlank()) return (
             namedState.contains("SUBSCRIBED", true) && !namedState.contains("UNSUBSCRIBED", true)
         ) to "named_state"
-        if (containsString(scope, "/subscription/unsubscribe")) return true to "owner_endpoint"
-        if (containsString(scope, "/subscription/subscribe")) return false to "owner_endpoint"
+        // Modern subscribe view models carry commands for BOTH possible states. Merely finding a
+        // subscribe/unsubscribe endpoint does not identify the active state; callers must use the
+        // channel browse response when neither the renderer nor its keyed state entity resolves it.
         return null to "missing"
     }
 

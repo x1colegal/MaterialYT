@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.0] - 2026-10-29
+
+### Fixed
+- Resolve ambiguous player subscription controls through the authoritative channel state instead of inactive subscribe commands embedded in modern view models.
+
 ## [3.12] - 2026-10-28
 
 ### Fixed

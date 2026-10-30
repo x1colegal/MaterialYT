@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.10] - 2026-10-30
+
+### Fixed
+- Keep only active player content independent from transient navigation-bar insets while preserving normal status-bar padding on every app screen.
+- Block media delivery inside the hidden WEB attestation runtime so pre-roll or video audio cannot leak before playback starts.
+- Keep transparent status and navigation bars continuously visible in the YouTube Music player so system-bar transitions cannot resize its UI.
+- Show the YouTube Music artwork behind the transparent status bar while keeping every player control below its inset.
+- Preserve normal status-bar insets in the regular video player; edge-to-edge transparent bars now apply only to YouTube Music.
+- Keep Android navigation controls visible in the regular video player and restore normal system bars when playback continues only in the Home miniplayer.
+
 ## [4.9] - 2026-10-30
 
 ### Fixed

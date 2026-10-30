@@ -251,7 +251,11 @@ class MainActivity : ComponentActivity() {
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
     private var playerUiActive = false
-    private var musicSystemBarsActive = false
+    private var musicSystemBarsActive by mutableStateOf(false)
+    private var savedStatusBarColor: Int? = null
+    private var savedNavigationBarColor: Int? = null
+    private var savedLightNavigationBars: Boolean? = null
+    private var savedNavigationBarContrast: Boolean? = null
     private var immersiveActive = false
     private var suppressNextAutoPip = false
     private var pipAspectRatio = Rational(16, 9)
@@ -410,7 +414,6 @@ class MainActivity : ComponentActivity() {
             isFullscreen -> "fullscreen"
             musicSystemBarsActive -> "music"
             immersiveActive -> "immersive"
-            videoPlayerActive -> "video"
             playerUiActive -> "player-ui"
             else -> "normal"
         }
@@ -420,7 +423,8 @@ class MainActivity : ComponentActivity() {
         )
         when (state) {
             "fullscreen" -> applyFullscreenState()
-            "music", "video", "player-ui" -> applyMusicPlayerSystemBars()
+            "music" -> applyMusicPlayerSystemBars()
+            "player-ui" -> applyVideoPlayerSystemBars()
             "immersive" -> applyImmersiveState()
             else -> restoreNormalSystemBars()
         }
@@ -492,6 +496,8 @@ class MainActivity : ComponentActivity() {
 
     fun visiblePlayerView(view: PlayerView?) { visiblePlayerView = view }
 
+    val isMusicPlayerActive: Boolean get() = musicSystemBarsActive
+
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         pipMode = isInPictureInPictureMode
@@ -548,9 +554,26 @@ class MainActivity : ComponentActivity() {
     }
 
     fun musicPlayerSystemBars(enabled: Boolean) {
+        if (enabled && !musicSystemBarsActive) {
+            savedStatusBarColor = window.statusBarColor
+            savedNavigationBarColor = window.navigationBarColor
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            savedLightNavigationBars = controller.isAppearanceLightNavigationBars
+            if (Build.VERSION.SDK_INT >= 29) savedNavigationBarContrast = window.isNavigationBarContrastEnforced
+        }
         musicSystemBarsActive = enabled
         if (!enabled) {
             immersiveActive = false
+            savedStatusBarColor?.let { window.statusBarColor = it }
+            savedNavigationBarColor?.let { window.navigationBarColor = it }
+            savedLightNavigationBars?.let {
+                WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = it
+            }
+            if (Build.VERSION.SDK_INT >= 29) savedNavigationBarContrast?.let { window.isNavigationBarContrastEnforced = it }
+            savedStatusBarColor = null
+            savedNavigationBarColor = null
+            savedLightNavigationBars = null
+            savedNavigationBarContrast = null
             immersive(false)
             return
         }
@@ -561,13 +584,23 @@ class MainActivity : ComponentActivity() {
     private fun applyMusicPlayerSystemBars() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
-        insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        insetsController.show(WindowInsetsCompat.Type.statusBars())
-        insetsController.hide(WindowInsetsCompat.Type.navigationBars())
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
+        insetsController.isAppearanceLightStatusBars = false
+        insetsController.isAppearanceLightNavigationBars = false
+        insetsController.show(WindowInsetsCompat.Type.systemBars())
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+    }
+
+    private fun applyVideoPlayerSystemBars() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        insetsController.show(WindowInsetsCompat.Type.systemBars())
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
     }
 
     override fun onDestroy() { runCatching { unregisterReceiver(pipReceiver) }; player?.release(); super.onDestroy() }
@@ -663,6 +696,7 @@ private fun AppScaffold(
     var activeChannelUrl by remember { mutableStateOf<String?>(null) }
     var activePlaylistUrl by remember { mutableStateOf<String?>(null) }
     val hideNavigation = playerMode || activity.isFullscreen
+    val musicPlayerActive = activity.isMusicPlayerActive
     LaunchedEffect(playerMode) { activity.playerUiActive(playerMode) }
     DisposableEffect(Unit) {
         onDispose { activity.playerUiActive(false) }
@@ -807,11 +841,14 @@ private fun AppScaffold(
             )
         }
     } else {
-        Scaffold(bottomBar = {
+        Scaffold(
+            contentWindowInsets = if (musicPlayerActive) ComposeWindowInsets(0, 0, 0, 0)
+                else ScaffoldDefaults.contentWindowInsets,
+            bottomBar = {
             if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
         }, content = content)
     }
-    if (!tablet && !activity.isFullscreen && !activity.pipMode) {
+    if (!tablet && !musicPlayerActive && !activity.isFullscreen && !activity.pipMode) {
         Spacer(
             Modifier.align(Alignment.TopCenter).fillMaxWidth()
                 .height(ComposeWindowInsets.statusBars.asPaddingValues().calculateTopPadding())
@@ -1657,18 +1694,18 @@ private fun MusicPlayer(
                     .padding(horizontal = 10.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onBack, modifier = Modifier.offset(y = (-12).dp)) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
+                IconButton(onClick = onBack) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = { rate(VideoRating.LIKE) }, enabled = !interactionBusy, modifier = Modifier.offset(y = (-12).dp)) {
+                IconButton(onClick = { rate(VideoRating.LIKE) }, enabled = !interactionBusy) {
                     Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
                 }
-                IconButton(onClick = { rate(VideoRating.DISLIKE) }, enabled = !interactionBusy, modifier = Modifier.offset(y = (-12).dp)) {
+                IconButton(onClick = { rate(VideoRating.DISLIKE) }, enabled = !interactionBusy) {
                     Icon(Icons.Default.ThumbDown, "Dislike", tint = if (interactions.rating == VideoRating.DISLIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
                 }
-                IconButton(onClick = { showSavePlaylist = true }, modifier = Modifier.offset(y = (-12).dp)) {
+                IconButton(onClick = { showSavePlaylist = true }) {
                     Icon(Icons.Default.PlaylistAdd, "Save to playlist", tint = ComposeColor.White)
                 }
-                IconButton(onClick = { showSettings = true }, modifier = Modifier.offset(y = (-12).dp)) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
+                IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Playback settings", tint = ComposeColor.White) }
             }
             if (tablet) {
                 Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {

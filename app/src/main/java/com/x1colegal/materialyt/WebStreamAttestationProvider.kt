@@ -5,9 +5,12 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -72,6 +75,24 @@ object WebStreamAttestationProvider {
                 webView.settings.userAgentString = userAgent
                 webView.webChromeClient = WebChromeClient()
                 webView.webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                        val url = request.url
+                        val mediaRequest = url.host?.endsWith(".googlevideo.com", ignoreCase = true) == true ||
+                            url.path?.contains("/videoplayback", ignoreCase = true) == true
+                        if (!mediaRequest) return super.shouldInterceptRequest(view, request)
+                        // The attestation module is activated by the player's playback attempt,
+                        // but it does not need the media bytes. Returning an empty response keeps
+                        // the real watch-page runtime while making pre-roll/video audio impossible.
+                        return WebResourceResponse(
+                            "application/octet-stream",
+                            null,
+                            204,
+                            "No Content",
+                            mapOf("Cache-Control" to "no-store"),
+                            ByteArrayInputStream(ByteArray(0)),
+                        )
+                    }
+
                     override fun onPageFinished(view: WebView, url: String) {
                         view.evaluateJavascript(
                             """

@@ -78,6 +78,7 @@ object WebStreamAttestationProvider {
                             try {
                               const player=document.getElementById('movie_player');
                               if (player) {
+                                if (typeof player.setVolume === 'function') player.setVolume(0);
                                 if (typeof player.mute === 'function') player.mute();
                                 if (typeof player.playVideo === 'function') player.playVideo();
                               }
@@ -102,7 +103,10 @@ object WebStreamAttestationProvider {
                     }
                 }
                 webView.addJavascriptInterface(Bridge(), "MaterialYtAttestation")
-                webView.loadUrl("$origin/watch?v=$initialVideoId&hl=en")
+                // Keep the real watch page stopped until the script above has muted its player.
+                // With autoplay enabled in WebSettings, loading a plain /watch URL can otherwise
+                // leak a fraction of a pre-roll before onPageFinished gets a chance to call mute().
+                webView.loadUrl("$origin/watch?v=$initialVideoId&hl=en&autoplay=0&mute=1&playsinline=1")
             }
             ready.get(12, TimeUnit.SECONDS)
         }

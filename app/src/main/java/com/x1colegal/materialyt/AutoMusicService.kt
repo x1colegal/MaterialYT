@@ -94,6 +94,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         private const val STYLE_GRID = 2
 
         fun play(context: Context, track: FeedItem, codec: AudioCodecChoice, queue: List<FeedItem> = emptyList(), queueIndex: Int = -1) {
+            // Publish the explicit selection before startService crosses the process/main-thread
+            // boundary. MusicPlayer is composed immediately after a tap and must not mistake that
+            // short window for an unowned track and enqueue the same ACTION_PLAY a second time.
+            nowPlaying.value = track
             val intent = Intent(context, AutoMusicService::class.java).setAction(ACTION_PLAY)
                 .putExtra("id", track.id).putExtra("title", track.title).putExtra("subtitle", track.subtitle)
                 .putExtra("thumbnail", track.thumbnail).putExtra("thumbnailWidth", track.thumbnailWidth)

@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.9] - 2026-10-30
+
+### Fixed
+- Prevent the hidden WEB playback-attestation player from leaking pre-roll audio before it is muted.
+- Prevent one explicit YouTube Music selection from starting two concurrent playback sessions.
+
 ## [4.8] - 2026-10-30
 
 ### Fixed

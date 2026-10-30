@@ -2186,13 +2186,13 @@ object YouTubeRepository {
         reloadToken: String? = null,
         cpnOverride: String? = null,
         adPlayback: Boolean = false,
-        playbackAttestation: Boolean = false,
     ): JSONObject {
         val clientName = if (remix) "WEB_REMIX" else "WEB"
         val clientId = if (remix) "67" else "1"
         val origin = if (remix) "https://music.youtube.com" else "https://www.youtube.com"
         val showInitialProgress = reloadToken == null && !adPlayback
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Preparing WEB session…")
+        WebStreamAttestationProvider.prepareAsync(videoId, origin, WEB_PLAYER_UA)
         val bootstrap = bootstrap(origin, clientName)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Generating PoToken…")
         val requestedVisitor = standaloneWebVisitorData(remix)
@@ -2275,15 +2275,11 @@ object YouTubeRepository {
         }
         response.optJSONObject("playbackTracking")?.optJSONObject("atrUrl")
             ?.optString("baseUrl")?.takeIf(String::isNotBlank)?.let { atrUrl ->
-                if (playbackAttestation) {
-                    runCatching {
-                        WebStreamAttestationProvider.attest(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
-                    }.onFailure { AppLog.failure("WEB playback attestation video=$videoId", it) }
-                } else {
-                    // Submit the official playback proof proactively while protection is
-                    // still valid. It must never hold up initial playback.
-                    WebStreamAttestationProvider.attestAsync(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
-                }
+                // Preparation overlaps the other player work, but the first SABR
+                // request must not race ahead of YouTube accepting this proof.
+                runCatching {
+                    WebStreamAttestationProvider.attest(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
+                }.onFailure { AppLog.failure("WEB playback attestation video=$videoId", it) }
             }
         val streaming = response.optJSONObject("streamingData")
         val sabrUrl = streaming?.optString("serverAbrStreamingUrl").orEmpty()
@@ -2338,9 +2334,7 @@ object YouTubeRepository {
         check(info.clientId == 1 || remix) { "SABR protection renewal is only supported by WEB clients" }
         val originalCpn = info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
         WebPoTokenProvider.reset()
-        val response = webPoPlayer(
-            info.videoId, remix, cpnOverride = originalCpn, playbackAttestation = true
-        )
+        val response = webPoPlayer(info.videoId, remix, cpnOverride = originalCpn)
         val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
         check(status == "OK") { reason.ifBlank { "WEB protection renewal returned $status" } }

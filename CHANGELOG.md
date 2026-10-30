@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.5] - 2026-10-30
+
+### Fixed
+- Prepare WEB playback attestation in parallel with player setup and wait for its submission before the first SABR media request, preventing an initial `protection=2` race.
+
 ## [4.4] - 2026-10-30
 
 ### Added

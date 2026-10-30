@@ -21,27 +21,32 @@ object WebStreamAttestationProvider {
     private var runtime: Runtime? = null
     private var sessionKey: String? = null
 
-    fun attestAsync(videoId: String, cpn: String, atrUrl: String, origin: String, userAgent: String) {
+    fun prepareAsync(videoId: String, origin: String, userAgent: String) {
         executor.execute {
-            runCatching { attest(videoId, cpn, atrUrl, origin, userAgent) }
-                .onFailure { AppLog.failure("WEB background playback attestation video=$videoId", it) }
+            runCatching {
+                synchronized(lock) { runtime(origin, userAgent, videoId) }
+            }.onFailure { AppLog.failure("WEB playback attestation preparation video=$videoId", it) }
         }
     }
 
     fun attest(videoId: String, cpn: String, atrUrl: String, origin: String, userAgent: String) {
         if (videoId.isBlank() || cpn.isBlank() || atrUrl.isBlank()) return
         synchronized(lock) {
-            val key = "$origin\u0000$userAgent\u0000${YouTubeRepository.cookies(origin)}"
-            var current = runtime
-            if (current == null || sessionKey != key) {
-                current?.close()
-                current = Runtime(origin, userAgent, videoId)
-                current.initialize()
-                runtime = current
-                sessionKey = key
-            }
-            current.attest(videoId, cpn, atrUrl)
+            runtime(origin, userAgent, videoId).attest(videoId, cpn, atrUrl)
         }
+    }
+
+    private fun runtime(origin: String, userAgent: String, videoId: String): Runtime {
+        val key = "$origin\u0000$userAgent\u0000${YouTubeRepository.cookies(origin)}"
+        var current = runtime
+        if (current == null || sessionKey != key) {
+            current?.close()
+            current = Runtime(origin, userAgent, videoId)
+            current.initialize()
+            runtime = current
+            sessionKey = key
+        }
+        return current ?: error("WEB playback attestation runtime was not created")
     }
 
     @SuppressLint("SetJavaScriptEnabled")

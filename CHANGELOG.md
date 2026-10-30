@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.4] - 2026-10-30
+
+### Added
+- Submit YouTube's official WEB playback attestation asynchronously before SABR stream protection can require it.
+
+### Fixed
+- Support both current `window.attmp` and legacy `yt.aba.att` playback-attestation registrations used by YouTube.
+- Keep initial playback responsive while preparing and submitting attestation in a hidden, muted WebView.
+- Retry attestation synchronously when YouTube requests SABR protection renewal.
+
 ## [4.3] - 2026-10-30
 
 ### Fixed

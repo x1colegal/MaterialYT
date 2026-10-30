@@ -2186,6 +2186,7 @@ object YouTubeRepository {
         reloadToken: String? = null,
         cpnOverride: String? = null,
         adPlayback: Boolean = false,
+        playbackAttestation: Boolean = false,
     ): JSONObject {
         val clientName = if (remix) "WEB_REMIX" else "WEB"
         val clientId = if (remix) "67" else "1"
@@ -2272,6 +2273,18 @@ object YouTubeRepository {
             if (!it.isSuccessful) error("YouTube SABR player returned HTTP ${it.code}")
             JSONObject(raw)
         }
+        response.optJSONObject("playbackTracking")?.optJSONObject("atrUrl")
+            ?.optString("baseUrl")?.takeIf(String::isNotBlank)?.let { atrUrl ->
+                if (playbackAttestation) {
+                    runCatching {
+                        WebStreamAttestationProvider.attest(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
+                    }.onFailure { AppLog.failure("WEB playback attestation video=$videoId", it) }
+                } else {
+                    // Submit the official playback proof proactively while protection is
+                    // still valid. It must never hold up initial playback.
+                    WebStreamAttestationProvider.attestAsync(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
+                }
+            }
         val streaming = response.optJSONObject("streamingData")
         val sabrUrl = streaming?.optString("serverAbrStreamingUrl").orEmpty()
         if (sabrUrl.isNotBlank()) {
@@ -2325,7 +2338,9 @@ object YouTubeRepository {
         check(info.clientId == 1 || remix) { "SABR protection renewal is only supported by WEB clients" }
         val originalCpn = info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
         WebPoTokenProvider.reset()
-        val response = webPoPlayer(info.videoId, remix, cpnOverride = originalCpn)
+        val response = webPoPlayer(
+            info.videoId, remix, cpnOverride = originalCpn, playbackAttestation = true
+        )
         val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
         check(status == "OK") { reason.ifBlank { "WEB protection renewal returned $status" } }

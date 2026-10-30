@@ -1709,7 +1709,7 @@ object YouTubeRepository {
 
         val cpn = response.optString("_materialytCpn").takeIf { it.isNotBlank() } ?: java.util.UUID.randomUUID().toString().replace("-", "").take(16)
         val trackingAsMusic = music
-        val authenticatedTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, trackingAsMusic) }
+        val authenticatedTracking = runCatching { authenticatedPlayerTracking(videoId, cpn) }
             .onFailure { AppLog.failure("authenticated tracking video=$videoId music=$music", it) }.getOrNull()
         (authenticatedTracking ?: response.optJSONObject("playbackTracking"))?.let { tracking ->
             val playback = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl").orEmpty()
@@ -1825,8 +1825,6 @@ object YouTubeRepository {
             "SABR ANDROID_VR status=$vrStatus reason=${vrResponse.optJSONObject("playabilityStatus")?.optString("reason").orEmpty().take(240)} video=$videoId"
         )
         val nativeOk = visionOk || vrOk
-        val remixResponse = if (nativeOk || webOk) JSONObject() else webPoPlayer(videoId, remix = true)
-        val remixOk = remixResponse.optJSONObject("playabilityStatus")?.optString("status") == "OK"
         val direct = nativeOk
         val response = when {
             webOk -> webResponse
@@ -1844,7 +1842,6 @@ object YouTubeRepository {
                     .put("_materialytClientVersion", "1.65.10")
                 AppLog.event("SABR player selected ANDROID_VR video=$videoId")
             }
-            remixOk -> remixResponse
             else -> {
                 val visionStatus = visionResponse.optJSONObject("playabilityStatus")
                 val reason = visionStatus?.optString("reason").orEmpty()
@@ -1868,7 +1865,7 @@ object YouTubeRepository {
         val cpn = response.optString("_materialytCpn")
             .takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no playback nonce")
         PlaybackLoadStatus.show(videoId, "Preparing history tracking…")
-        val accountTracking = runCatching { authenticatedPlayerTracking(videoId, cpn, music) }
+        val accountTracking = runCatching { authenticatedPlayerTracking(videoId, cpn) }
             .onFailure { AppLog.failure("SABR authenticated tracking video=$videoId", it) }
             .getOrNull()
         cachePlaybackTracking(videoId, accountTracking ?: response.optJSONObject("playbackTracking"), cpn, music)
@@ -1949,7 +1946,7 @@ object YouTubeRepository {
         val nativeVr = direct && response.optString("_materialytClientName") == "ANDROID_VR"
         return SabrPlaybackInfo(videoId, serverUrl, ustreamerConfig, playerPoToken, poToken,
             response.optString("_materialytClientVersion")
-                .ifBlank { if (direct) "1.03" else bootstrap("https://music.youtube.com", "WEB_REMIX").version },
+                .ifBlank { if (direct) "1.03" else bootstrap("https://www.youtube.com", "WEB").version },
             if (nativeVr) "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
                 else if (direct) VISIONOS_UA else WEB_PLAYER_UA,
             if (nativeVr) 28 else if (direct) 101 else if (webClient == "WEB") 1 else 67,
@@ -2097,7 +2094,7 @@ object YouTubeRepository {
                 }.build()
         }
         fun send(url: okhttp3.HttpUrl) {
-            val origin = if (tracking.music) "https://music.youtube.com" else "https://www.youtube.com"
+            val origin = "https://www.youtube.com"
             val request = Request.Builder().url(url).apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }.build()
             client.newCall(request).execute().use { response ->
                 AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (ended) "ended" else if (paused) "paused" else "playing"} HTTP ${response.code}")
@@ -2111,7 +2108,7 @@ object YouTubeRepository {
         if (!signedIn()) return
         if (synchronized(playbackTracking) { playbackTracking[videoId]?.music == music }) return
         val cpn = UUID.randomUUID().toString().replace("-", "").take(16)
-        val tracking = authenticatedPlayerTracking(videoId, cpn, music) ?: return
+        val tracking = authenticatedPlayerTracking(videoId, cpn) ?: return
         if (cachePlaybackTracking(videoId, tracking, cpn, music)) {
             AppLog.event("tracking prepared for ${if (music) "YouTube Music" else "standard YouTube"} history video=$videoId")
         }
@@ -2182,7 +2179,7 @@ object YouTubeRepository {
 
     private fun webPoPlayer(
         videoId: String,
-        remix: Boolean = true,
+        remix: Boolean = false,
         reloadToken: String? = null,
         cpnOverride: String? = null,
         adPlayback: Boolean = false,
@@ -2464,9 +2461,10 @@ object YouTubeRepository {
         return mobilePlayer(videoId, "ANDROID_VR", "1.65.10", "28", "Quest 3", "Android", "12")
     }
 
-    private fun authenticatedPlayerTracking(videoId: String, cpn: String, music: Boolean): JSONObject? {
-        val origin = if (music) "https://music.youtube.com" else "https://www.youtube.com"
-        val clientName = if (music) "WEB_REMIX" else "WEB"
+    private fun authenticatedPlayerTracking(videoId: String, cpn: String): JSONObject? {
+        // Playback and its authenticated tracking are standardized on WEB.
+        val origin = "https://www.youtube.com"
+        val clientName = "WEB"
         val bootstrap = bootstrap(origin, clientName)
         val response = post("$origin/youtubei/v1/player?key=${bootstrap.key}&prettyPrint=false",
             JSONObject().put("context", context(clientName, bootstrap.version))

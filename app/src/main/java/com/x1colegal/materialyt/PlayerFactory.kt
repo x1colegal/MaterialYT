@@ -14,7 +14,12 @@ object PlaybackPreferences {
 }
 
 object PlayerFactory {
-    fun bufferedPlayer(context: Context): ExoPlayer {
+    fun bufferedPlayer(context: Context): ExoPlayer = createPlayer(context, 180_000)
+
+    /** Audio tracks are small enough to keep loading through the end of the item. */
+    fun musicPlayer(context: Context): ExoPlayer = createPlayer(context, Int.MAX_VALUE)
+
+    private fun createPlayer(context: Context, maxBufferMs: Int): ExoPlayer {
         val renderers = DefaultRenderersFactory(context)
             .setEnableDecoderFallback(PlaybackPreferences.videoDecoderMode == DecoderMode.AUTO || PlaybackPreferences.audioDecoderMode == DecoderMode.AUTO)
             .setMediaCodecSelector(MediaCodecSelector { mimeType, secure, tunneling ->
@@ -30,7 +35,7 @@ object PlayerFactory {
             .setLoadControl(DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
                     12_000,
-                    180_000,
+                    maxBufferMs,
                     400,
                     800,
                 )

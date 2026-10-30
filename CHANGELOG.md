@@ -2,6 +2,15 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.7] - 2026-10-30
+
+### Changed
+- Standardize YouTube Music playback and authenticated playback tracking on the WEB client instead of WEB_REMIX.
+- Let the YouTube Music player continue buffering through the end of an audio track while preserving fast startup thresholds.
+
+### Fixed
+- Clear lyrics, lyrics errors, and scroll position whenever automatic playback advances to a different track.
+
 ## [4.6] - 2026-10-30
 
 ### Changed

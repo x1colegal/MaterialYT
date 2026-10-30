@@ -1502,8 +1502,10 @@ private fun MusicPlayer(
     var showSettings by remember { mutableStateOf(false) }
     var showSavePlaylist by remember(track.id) { mutableStateOf(false) }
     
-    var lyrics by remember { mutableStateOf<List<LyricLine>?>(null) }
-    var lyricsError by remember { mutableStateOf<String?>(null) }
+    // Lyrics belong to one media ID. Keeping this state across an automatic
+    // queue advance can display the previous song until the player is reopened.
+    var lyrics by remember(track.id) { mutableStateOf<List<LyricLine>?>(null) }
+    var lyricsError by remember(track.id) { mutableStateOf<String?>(null) }
     var interactions by remember(track.id) { mutableStateOf(VideoInteractionState()) }
     var interactionBusy by remember(track.id) { mutableStateOf(false) }
     var comments by remember(track.id) { mutableStateOf<List<VideoComment>>(emptyList()) }
@@ -1513,7 +1515,7 @@ private fun MusicPlayer(
     var commentsError by remember(track.id) { mutableStateOf<String?>(null) }
     var commentsRefresh by remember(track.id) { mutableIntStateOf(0) }
     
-    val lyricsState = rememberLazyListState()
+    val lyricsState = key(track.id) { rememberLazyListState() }
     val position = AutoMusicService.position.longValue
     val duration = AutoMusicService.duration.longValue
     val buffered = AutoMusicService.bufferedPosition.longValue
@@ -1823,15 +1825,15 @@ private fun AutoplayCountdownOverlay(next: FeedItem, seconds: Int, onCancel: () 
 private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer: (ExoPlayer) -> Unit, onBack: () -> Unit) {
     val context = LocalContext.current
     var error by remember { mutableStateOf<String?>(null) }
-    var lyrics by remember { mutableStateOf<List<LyricLine>?>(null) }
+    var lyrics by remember(track.id) { mutableStateOf<List<LyricLine>?>(null) }
     var showLyrics by remember { mutableStateOf(false) }
     var position by remember { mutableLongStateOf(0L) }
     var bufferedPosition by remember { mutableLongStateOf(0L) }
     var mediaLoaded by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(false) }
-    val player = remember { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
+    val player = remember { PlayerFactory.musicPlayer(context).also(onPlayer) }
     val mediaSession = remember { MediaSessionCompat(context, "MaterialYT Player") }
-    val lyricsState = rememberLazyListState()
+    val lyricsState = key(track.id) { rememberLazyListState() }
     BackHandler { onBack() }
     DisposableEffect(Unit) {
         context.stopService(Intent(context, AutoMusicService::class.java))
@@ -1882,7 +1884,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
             } else if (current < lastReported) lastReported = current
         }
     }
-    var lyricsError by remember { mutableStateOf<String?>(null) }
+    var lyricsError by remember(track.id) { mutableStateOf<String?>(null) }
     if (showLyrics && lyrics == null && lyricsError == null) LaunchedEffect(track.id) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.lyrics(track.id) } }.onSuccess { lyrics = it }.onFailure { lyricsError = it.message ?: "Lyrics unavailable" } }
     val lines = lyrics.orEmpty()
     val hasRealTiming = lines.any { it.startMs >= 0 }

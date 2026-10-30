@@ -121,7 +121,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_LOW)
         )
-        player = PlayerFactory.bufferedPlayer(this)
+        player = PlayerFactory.musicPlayer(this)
         player.setAudioAttributes(
             AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA)

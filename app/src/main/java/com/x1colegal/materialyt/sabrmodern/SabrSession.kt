@@ -44,7 +44,14 @@ internal class SabrConfig(
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
     /** Re-attest WEB in place: fresh SABR endpoint plus the replacement GVS PoToken. */
-    val renewProtection: (() -> Pair<String, ByteArray>)? = null,
+    val renewProtection: (() -> SabrProtectionRefresh)? = null,
+)
+
+/** All values bound to one freshly created WEB SABR player session. */
+internal data class SabrProtectionRefresh(
+    val url: String,
+    val ustreamerConfig: ByteArray,
+    val poToken: ByteArray,
 )
 
 /**
@@ -156,6 +163,7 @@ internal class SabrSession(
         val ctxByType = LinkedHashMap<Long, SabrMessages.ContextUpdate>()
         val ctxToSend = LinkedHashSet<Long>()
         var iter = 0
+        var requestNumber = 0
         var dry = 0
         var attestationStalls = 0
         var emptySessionRefreshes = 0
@@ -169,8 +177,10 @@ internal class SabrSession(
             protectionRenewals++
             AppLog.event("SABR audio renewing WEB protection attempt=$protectionRenewals")
             val refreshed = renew.invoke()
-            url = prepared(refreshed.first)
-            poToken = refreshed.second
+            url = prepared(refreshed.url)
+            ustreamerConfig = refreshed.ustreamerConfig
+            poToken = refreshed.poToken
+            requestNumber = 0
             cookie = null
             ctxByType.clear()
             ctxToSend.clear()
@@ -204,8 +214,9 @@ internal class SabrSession(
                 initialized = initWritten,
             )
             val requestUrl = url.toHttpUrlOrNull()?.newBuilder()
-                ?.setQueryParameter("rn", (iter - 1).toString())
+                ?.setQueryParameter("rn", requestNumber.toString())
                 ?.build()?.toString() ?: url
+            requestNumber++
             val req = Request.Builder()
                 .url(requestUrl)
                 .header("User-Agent", config.userAgent)
@@ -283,6 +294,7 @@ internal class SabrSession(
                 val refreshed = config.reloadPlayer.invoke(reloadToken)
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                requestNumber = 0
                 startupEmptyResponses = 0
                 dry = 0
                 continue
@@ -296,6 +308,7 @@ internal class SabrSession(
                 val refreshed = config.refreshPlayer.invoke()
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                requestNumber = 0
                 cookie = null
                 ctxByType.clear()
                 ctxToSend.clear()
@@ -321,6 +334,7 @@ internal class SabrSession(
                         val refreshed = config.refreshPlayer.invoke()
                         url = refreshed.first
                         ustreamerConfig = refreshed.second
+                        requestNumber = 0
                         cookie = null
                         ctxByType.clear()
                         ctxToSend.clear()

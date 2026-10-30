@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.3] - 2026-10-30
+
+### Fixed
+- Keep renewed WEB SABR endpoints, PoTokens, and ustreamer configurations bound to the same player session.
+- Restart SABR request numbering when YouTube replaces a player session, preventing `sabr.malformed_config` responses during stream-protection renewal.
+
 ## [4.2] - 2026-10-29
 
 ### Added

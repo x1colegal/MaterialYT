@@ -36,8 +36,8 @@ internal class SabrVideoConfig(
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
-    /** Re-attest WEB in place: fresh SABR endpoint plus the replacement GVS PoToken. */
-    val renewProtection: (() -> Pair<String, ByteArray>)? = null,
+    /** Re-attest WEB with the complete set of values from one fresh player session. */
+    val renewProtection: (() -> SabrProtectionRefresh)? = null,
 )
 
 /**
@@ -147,6 +147,7 @@ internal class SabrVideoSession(
         val ctxByType = LinkedHashMap<Long, SabrMessages.ContextUpdate>()
         val ctxToSend = LinkedHashSet<Long>()
         var iter = 0
+        var requestNumber = 0
         var dry = 0
         var attestationStalls = 0
         var emptySessionRefreshes = 0
@@ -160,8 +161,10 @@ internal class SabrVideoSession(
             protectionRenewals++
             AppLog.event("SABR video renewing WEB protection attempt=$protectionRenewals")
             val refreshed = renew.invoke()
-            url = prepared(refreshed.first)
-            poToken = refreshed.second
+            url = prepared(refreshed.url)
+            ustreamerConfig = refreshed.ustreamerConfig
+            poToken = refreshed.poToken
+            requestNumber = 0
             cookie = null
             ctxByType.clear()
             ctxToSend.clear()
@@ -201,8 +204,9 @@ internal class SabrVideoSession(
             val requestUrl = url.toHttpUrlOrNull()?.newBuilder()
                 // WEB numbers SABR requests from zero. Some content-ad sessions only emit their
                 // initialization segments for rn=0 even though ordinary videos tolerate rn=1.
-                ?.setQueryParameter("rn", (iter - 1).toString())
+                ?.setQueryParameter("rn", requestNumber.toString())
                 ?.build()?.toString() ?: url
+            requestNumber++
             val req = Request.Builder()
                 .url(requestUrl)
                 .header("User-Agent", config.userAgent)
@@ -279,6 +283,7 @@ internal class SabrVideoSession(
                 val refreshed = config.reloadPlayer.invoke(reloadToken)
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                requestNumber = 0
                 startupEmptyResponses = 0
                 dry = 0
                 continue
@@ -292,6 +297,7 @@ internal class SabrVideoSession(
                 val refreshed = config.refreshPlayer.invoke()
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                requestNumber = 0
                 cookie = null
                 ctxByType.clear()
                 ctxToSend.clear()
@@ -315,6 +321,7 @@ internal class SabrVideoSession(
                         val refreshed = config.refreshPlayer.invoke()
                         url = refreshed.first
                         ustreamerConfig = refreshed.second
+                        requestNumber = 0
                         cookie = null
                         ctxByType.clear()
                         ctxToSend.clear()

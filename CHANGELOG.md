@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.6] - 2026-10-30
+
+### Changed
+- Increase the playback buffer target to three minutes while preserving the existing 400 ms initial-playback and 800 ms rebuffer thresholds.
+
 ## [4.5] - 2026-10-30
 
 ### Fixed

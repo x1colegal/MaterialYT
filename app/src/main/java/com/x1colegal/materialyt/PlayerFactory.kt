@@ -30,7 +30,7 @@ object PlayerFactory {
             .setLoadControl(DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
                     12_000,
-                    60_000,
+                    180_000,
                     400,
                     800,
                 )

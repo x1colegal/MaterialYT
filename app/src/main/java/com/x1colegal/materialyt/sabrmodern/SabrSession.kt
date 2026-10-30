@@ -12,8 +12,7 @@ import timber.log.Timber
  * Everything one SABR session needs, derived from the /player response (see [SabrStreamResolver]).
  *
  * [nTransform] applies the cipher n-parameter transform to a googlevideo URL. Web clients'
- * `serverAbrStreamingUrl` is CIPHERED (its `n=` must be transformed before POSTing — the fix that made
- * the web family usable); direct clients (VISIONOS/…) pass the identity function.
+ * `serverAbrStreamingUrl` is CIPHERED, so its `n=` parameter must be transformed before POSTing.
  */
 internal class SabrConfig(
     val sabrUrl: String,
@@ -387,7 +386,7 @@ internal class SabrSession(
 
             if (redirect != null && !newSeg) { url = prepared(redirect); continue }
             dry = if (newSeg || gotContext) 0 else dry + 1
-            // Attestation cap: a client whose pot can't satisfy stream protection (MWEB/IOS-class) gets a
+            // Attestation cap: a session whose PoToken can't satisfy stream protection gets a
             // small free window, then the server serves ONLY STREAM_PROTECTION_STATUS>=2 with no media
             // (proven live: tests/probe-mweb-sabr.mjs). Bail FAST with a clear reason instead of grinding
             // to the dry cap — the roster/stall fallback then moves to a client that can attest.

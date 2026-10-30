@@ -51,7 +51,7 @@ object SabrMediaFactory {
                 })
                 else -> null
             },
-            renewProtection = if (info.clientId == 1 || info.clientId == 67) ({
+            renewProtection = if (info.clientId == 1) ({
                 val refreshed = YouTubeRepository.renewWebSabrProtection(info)
                 SabrProtectionRefresh(refreshed.first, decode(refreshed.second), decode(refreshed.third))
             }) else null,
@@ -86,7 +86,7 @@ object SabrMediaFactory {
                 })
                 else -> null
             },
-            renewProtection = if (info.clientId == 1 || info.clientId == 67) ({
+            renewProtection = if (info.clientId == 1) ({
                 val refreshed = YouTubeRepository.renewWebSabrProtection(info)
                 SabrProtectionRefresh(refreshed.first, decode(refreshed.second), decode(refreshed.third))
             }) else null,

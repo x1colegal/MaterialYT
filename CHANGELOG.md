@@ -2,6 +2,18 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.8] - 2026-10-30
+
+### Fixed
+- Prevent a stale foreground UI from restarting the previous song after background autoplay has already advanced the playback service.
+- Coalesce concurrent WEB SABR protection renewals after seeking so restarted sessions reuse one attested endpoint, configuration, and PoToken.
+- Restore the active player's requested system-bar state after returning to the app or leaving picture-in-picture.
+- Keep the navigation bar hidden for an active non-fullscreen video player after returning from the background.
+- Persist the top-level player UI state across foreground transitions so every active player reapplies its requested navigation-bar visibility.
+- Retry WEB PoToken initialization once with a clean runtime after a WebView timeout.
+- Remove legacy playback fallbacks to TV, mobile WEB, VISIONOS, IOS, and ANDROID clients; WEB plus SABR now reports its real failure directly.
+- Remove the dead native/mobile playback helpers and keep WEB_REMIX and MWEB limited to non-playback YouTube Music and Saved Shorts data APIs.
+
 ## [4.7] - 2026-10-30
 
 ### Changed

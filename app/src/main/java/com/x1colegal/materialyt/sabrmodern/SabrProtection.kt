@@ -2,7 +2,7 @@ package com.x1colegal.materialyt.sabrmodern
 
 /**
  * Pure detection of a SABR stream-protection (attestation) cap, shared by [SabrSession] and
- * [SabrVideoSession]. A client whose poToken cannot satisfy attestation (MWEB / IOS-class) is served a
+ * [SabrVideoSession]. A session whose PoToken cannot satisfy attestation is served a
  * small free window, then the server delivers ONLY `STREAM_PROTECTION_STATUS >= 2` with no media
  * (proven live: `tests/probe-mweb-sabr.mjs`). Counting consecutive no-progress responses under active
  * protection lets a session bail fast with a clear reason instead of grinding to the dry cap, so the

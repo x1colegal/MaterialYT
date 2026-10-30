@@ -250,6 +250,7 @@ class MainActivity : ComponentActivity() {
     fun registerCurrentPlayer(p: ExoPlayer) { player = p }
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
+    private var playerUiActive = false
     private var musicSystemBarsActive = false
     private var immersiveActive = false
     private var suppressNextAutoPip = false
@@ -358,11 +359,11 @@ class MainActivity : ComponentActivity() {
             WindowCompat.setDecorFitsSystemWindows(window, false)
             applyFullscreenState()
         } else {
-            restoreNormalSystemBars()
+            applyRequestedSystemBars()
             // Orientation/configuration changes can reapply the old fullscreen window flags
             // after this call. Restore the fitted viewport again on the following frames.
-            window.decorView.post { if (!isFullscreen && !pipMode) restoreNormalSystemBars() }
-            window.decorView.postDelayed({ if (!isFullscreen && !pipMode) restoreNormalSystemBars() }, 300L)
+            window.decorView.post { if (!isFullscreen && !pipMode) applyRequestedSystemBars() }
+            window.decorView.postDelayed({ if (!isFullscreen && !pipMode) applyRequestedSystemBars() }, 300L)
         }
     }
 
@@ -391,27 +392,44 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && !pipMode) {
-            when {
-                isFullscreen -> applyFullscreenState()
-                musicSystemBarsActive -> applyMusicPlayerSystemBars()
-                immersiveActive -> applyImmersiveState()
-                else -> restoreNormalSystemBars()
-            }
+        if (hasFocus) applyRequestedSystemBars()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Android may restore its navigation bar after this activity regains focus,
+        // after onWindowFocusChanged has already fired. Reapply the player-owned
+        // state on the next frame and once more after the system transition settles.
+        window.decorView.post { applyRequestedSystemBars() }
+        window.decorView.postDelayed({ applyRequestedSystemBars() }, 250L)
+    }
+
+    private fun applyRequestedSystemBars() {
+        if (pipMode) return
+        val state = when {
+            isFullscreen -> "fullscreen"
+            musicSystemBarsActive -> "music"
+            immersiveActive -> "immersive"
+            videoPlayerActive -> "video"
+            playerUiActive -> "player-ui"
+            else -> "normal"
+        }
+        AppLog.event(
+            "system bars apply state=$state fullscreen=$isFullscreen music=$musicSystemBarsActive " +
+                "immersive=$immersiveActive video=$videoPlayerActive playerUi=$playerUiActive"
+        )
+        when (state) {
+            "fullscreen" -> applyFullscreenState()
+            "music", "video", "player-ui" -> applyMusicPlayerSystemBars()
+            "immersive" -> applyImmersiveState()
+            else -> restoreNormalSystemBars()
         }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         window.decorView.post {
-            if (!pipMode) {
-                when {
-                    isFullscreen -> applyFullscreenState()
-                    musicSystemBarsActive -> applyMusicPlayerSystemBars()
-                    immersiveActive -> applyImmersiveState()
-                    else -> restoreNormalSystemBars()
-                }
-            }
+            applyRequestedSystemBars()
         }
     }
 
@@ -491,11 +509,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
         } else {
-            if (isFullscreen) applyFullscreenState() else restoreNormalSystemBars()
+            applyRequestedSystemBars()
         }
     }
 
-    fun videoPlayerActive(value: Boolean) { videoPlayerActive = value }
+    fun videoPlayerActive(value: Boolean) {
+        videoPlayerActive = value
+        if (!isFullscreen && !pipMode) applyRequestedSystemBars()
+    }
+
+    fun playerUiActive(value: Boolean) {
+        playerUiActive = value
+        if (!isFullscreen && !pipMode) applyRequestedSystemBars()
+    }
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
@@ -637,6 +663,10 @@ private fun AppScaffold(
     var activeChannelUrl by remember { mutableStateOf<String?>(null) }
     var activePlaylistUrl by remember { mutableStateOf<String?>(null) }
     val hideNavigation = playerMode || activity.isFullscreen
+    LaunchedEffect(playerMode) { activity.playerUiActive(playerMode) }
+    DisposableEffect(Unit) {
+        onDispose { activity.playerUiActive(false) }
+    }
     val tabs = buildList {
         add("Home" to Icons.Default.OndemandVideo)
         add("Shorts" to Icons.Default.SmartDisplay)
@@ -1173,6 +1203,10 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
     var searchOpen by remember { mutableStateOf(false) }
     val musicListState = rememberLazyListState()
     val musicGridState = rememberLazyGridState()
+    fun selectTrack(track: FeedItem) {
+        AutoMusicService.play(activity, track, audioCodec)
+        selected = track
+    }
     fun scrollMusicToTop() = scope.launch {
         musicListState.scrollToItem(0)
         musicGridState.scrollToItem(0)
@@ -1284,7 +1318,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
             }
             LazyColumn(state = musicListState, contentPadding = PaddingValues(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 items(musicHome.sections, key = { "section-${it.title}-${it.items.firstOrNull()?.id}" }) { section ->
-                    MusicHomeSectionView(section, tablet, { selected = it }, { selectedPlaylist = it })
+                    MusicHomeSectionView(section, tablet, ::selectTrack, { selectedPlaylist = it })
                 }
                 if (loadingHomeMore) item { Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 if (homeContinuationError != null) item {
@@ -1314,7 +1348,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
                 if (musicPlaylists.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
                     MusicCollectionShelf(musicPlaylists, cardWidth = 184.dp) { selectedPlaylist = it }
                 }
-                gridItems(musicSongs) { track -> MusicTrackRow(track) { selected = track } }
+                gridItems(musicSongs) { track -> MusicTrackRow(track) { selectTrack(track) } }
                 if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         } else {
@@ -1326,7 +1360,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
             LazyColumn(state = musicListState, contentPadding = PaddingValues(bottom = 16.dp)) {
                 if (musicPlaylists.isNotEmpty()) item { MusicCollectionShelf(musicPlaylists, cardWidth = 148.dp) { selectedPlaylist = it } }
                 if (musicSongs.isNotEmpty()) item { Text("Songs", Modifier.padding(horizontal = 16.dp, vertical = 12.dp), style = MaterialTheme.typography.titleLarge) }
-                items(musicSongs, key = { "music-${it.id}" }) { track -> MusicTrackRow(track) { selected = track } }
+                items(musicSongs, key = { "music-${it.id}" }) { track -> MusicTrackRow(track) { selectTrack(track) } }
                 if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         }
@@ -1434,6 +1468,11 @@ private fun MusicPlaylistScreen(activity: MainActivity, playlist: FeedItem, pref
     var selected by remember(playlist.id) { mutableStateOf<FeedItem?>(null) }
     var loading by remember(playlist.id) { mutableStateOf(true) }
     var error by remember(playlist.id) { mutableStateOf<String?>(null) }
+    fun selectTrack(track: FeedItem) {
+        val index = tracks.indexOfFirst { it.id == track.id }
+        AutoMusicService.play(activity, track, preferredCodec, tracks, index)
+        selected = track
+    }
     LaunchedEffect(playlist.id) {
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicPlaylistVideos(playlist.id) } }
             .onSuccess { tracks = it }
@@ -1464,7 +1503,7 @@ private fun MusicPlaylistScreen(activity: MainActivity, playlist: FeedItem, pref
                 Text(playlist.title, style = MaterialTheme.typography.headlineSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${tracks.size} tracks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (tracks.isNotEmpty()) FilledTonalButton(onClick = { selected = tracks.first() }) {
+            if (tracks.isNotEmpty()) FilledTonalButton(onClick = { selectTrack(tracks.first()) }) {
                 Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Play")
             }
         }
@@ -1472,7 +1511,7 @@ private fun MusicPlaylistScreen(activity: MainActivity, playlist: FeedItem, pref
         error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
             items(tracks, key = { it.id }) { track ->
-                Row(Modifier.fillMaxWidth().clickable { selected = track }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().clickable { selectTrack(track) }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     AsyncImage(track.thumbnail, null, Modifier.size(72.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
                     Column(Modifier.padding(start = 14.dp).weight(1f)) {
                         Text(track.title, Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleMedium)
@@ -1535,7 +1574,10 @@ private fun MusicPlayer(
         }
     }
     LaunchedEffect(track.id, preferredCodec) {
-        if (AutoMusicService.nowPlaying.value?.id != track.id || (!AutoMusicService.playing.value && AutoMusicService.position.longValue == 0L)) {
+        // Starting playback belongs to explicit selection handlers. A stale UI
+        // restored after background autoplay must never replace the service's
+        // newer now-playing item with the previous track.
+        if (AutoMusicService.nowPlaying.value == null) {
             AutoMusicService.play(activity, track, preferredCodec, queue, queueIndex)
         }
     }

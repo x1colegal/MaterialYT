@@ -45,32 +45,46 @@ object WebPoTokenProvider {
         require(requestedVisitorData.isNotBlank()) { "YouTube returned empty visitorData" }
         val cookies = YouTubeRepository.cookies(origin)
         val requestedSessionKey = "$origin\u0000$userAgent\u0000$requestedVisitorData\u0000$cookies"
-        var current = runtime
-        if (current == null || current.expired() || sessionKey != requestedSessionKey) {
-            current?.close()
-            visitorData = requestedVisitorData
-            sessionKey = requestedSessionKey
-            current = BotGuardRuntime(
-                MaterialYtApp.instance.applicationContext,
-                origin,
-                userAgent,
-                requestedVisitorData,
-                cookies,
-            )
-            current.initialize()
-            runtime = current
+        for (attempt in 0..1) {
+            try {
+                var current = runtime
+                if (current == null || current.expired() || sessionKey != requestedSessionKey) {
+                    current?.close()
+                    visitorData = requestedVisitorData
+                    sessionKey = requestedSessionKey
+                    current = BotGuardRuntime(
+                        MaterialYtApp.instance.applicationContext,
+                        origin,
+                        userAgent,
+                        requestedVisitorData,
+                        cookies,
+                    )
+                    current.initialize()
+                    runtime = current
+                }
+                // Player tokens are always content-bound to the video. GVS/SABR binding is selected from
+                // the current ytcfg experiment: video id when content tokens are enabled, otherwise the
+                // signed-in Data Sync ID (or visitorData for a guest session).
+                val active = current ?: error("WEB PoToken runtime was not created")
+                val playerToken = active.mint(videoId)
+                val streamingToken = if (streamingContentBinding == videoId) playerToken
+                    else active.mint(streamingContentBinding)
+                AppLog.event(
+                    "WEB PoToken ready visitor=${requestedVisitorData.length} player=${playerToken.length} " +
+                        "streaming=${streamingToken.length} sameBinding=${streamingContentBinding == videoId}"
+                )
+                return@synchronized WebPoTokenSession(requestedVisitorData, playerToken, streamingToken)
+            } catch (error: Throwable) {
+                runtime?.close()
+                runtime = null
+                visitorData = null
+                sessionKey = null
+                if (error is InterruptedException || Thread.currentThread().isInterrupted) throw error
+                if (attempt > 0) throw error
+                AppLog.event("WEB PoToken runtime retry video=$videoId error=${error.javaClass.simpleName}")
+            }
         }
-        // Player tokens are always content-bound to the video. GVS/SABR binding is selected from
-        // the current ytcfg experiment: video id when content tokens are enabled, otherwise the
-        // signed-in Data Sync ID (or visitorData for a guest session).
-        val playerToken = current!!.mint(videoId)
-        val streamingToken = if (streamingContentBinding == videoId) playerToken
-            else current.mint(streamingContentBinding)
-        AppLog.event(
-            "WEB PoToken ready visitor=${requestedVisitorData.length} player=${playerToken.length} " +
-                "streaming=${streamingToken.length} sameBinding=${streamingContentBinding == videoId}"
-        )
-        WebPoTokenSession(requestedVisitorData, playerToken, streamingToken)
+        error("WEB PoToken runtime retry exhausted")
     }
 }
 

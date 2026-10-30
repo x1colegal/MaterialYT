@@ -87,8 +87,10 @@ Shorts relies on frequently changing internal Reel endpoints. Temporary feed or 
 
 ## Playback
 
-- Native WEB + PoToken + SABR/UMP playback by default
-- WEB, VISIONOS, ANDROID_VR, and WEB_REMIX client handling where required
+- Native WEB + PoToken + SABR/UMP playback for regular videos, YouTube Music, and Shorts
+- One consistent WEB playback identity with no TV, MWEB, VISIONOS, IOS, ANDROID, or WEB_REMIX playback fallback
+- Official WEB playback-attestation submission with shared in-flight protection renewal
+- One clean BotGuard runtime retry after a WebView initialization timeout
 - Separate adaptive audio and video selection
 - AVC, HEVC, VP9, and AV1 video preferences
 - MP4A and Opus audio preferences
@@ -101,6 +103,8 @@ Shorts relies on frequently changing internal Reel endpoints. Temporary feed or 
 - Automatic PiP when leaving an active regular video
 - Display-aspect-aware PiP windows
 - Disk-backed SABR reassembly and large forward buffering
+
+`WEB_REMIX` is used only for YouTube Music browsing, queues, lyrics, and music-specific account data. It is not a playback backend or fallback. MWEB is limited to non-playback surfaces that YouTube does not expose through desktop WEB, such as Saved Shorts discovery.
 
 ## Account integration
 
@@ -192,7 +196,8 @@ Release builds currently use the configured debug signing key. Fork maintainers 
 ## Known limitations
 
 - YouTube's player clients, internal APIs, continuations, BotGuard challenges, and SABR messages are undocumented and can change at any time.
-- Some content may depend on the playback client selected by the internal fallback flow.
+- Playback intentionally reports the original WEB, PoToken, attestation, or SABR failure instead of hiding it behind a different YouTube client.
+- YouTube may temporarily report WEB stream protection as pending while a submitted playback attestation propagates through its backend.
 - Comments, lyrics, likes, audio tracks, playlists, and account metadata are shown only when YouTube exposes them to the current session.
 - PiP requires Android 8.0 or newer.
 - Codec and hardware-decoder availability depends on the device.

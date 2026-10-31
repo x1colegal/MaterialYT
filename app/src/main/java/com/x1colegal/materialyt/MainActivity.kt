@@ -29,6 +29,7 @@ import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.core.app.NotificationCompat
@@ -74,6 +75,8 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -237,6 +240,26 @@ private fun Modifier.autoMarquee(): Modifier = basicMarquee(
     initialDelayMillis = 1_500,
     repeatDelayMillis = 2_000
 )
+
+@Composable
+private fun CenteredMusicTitle(text: String, style: TextStyle) {
+    val measurer = rememberTextMeasurer()
+    BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        val availableWidth = with(androidx.compose.ui.platform.LocalDensity.current) { maxWidth.roundToPx() }
+        val overflows = remember(text, style, availableWidth) {
+            measurer.measure(text = text, style = style, maxLines = 1, softWrap = false).size.width > availableWidth
+        }
+        Text(
+            text,
+            modifier = if (overflows) Modifier.fillMaxWidth().autoMarquee() else Modifier.fillMaxWidth(),
+            color = ComposeColor.White,
+            style = style,
+            maxLines = 1,
+            softWrap = false,
+            textAlign = if (overflows) TextAlign.Start else TextAlign.Center,
+        )
+    }
+}
 enum class AppColor(val title: String, val seed: Long) {
     PURPLE("Purple", 0xFF8B5CF6), RED("YouTube Red", 0xFFFF1744), BLUE("Bright Blue", 0xFF2196F3), BLUE_CYAN("Blue Cyan", 0xFF00B8D4),
     GREEN("Forest", 0xFF43A047), ORANGE("Amber", 0xFFFF8F00), PINK("Rose", 0xFFFF4081), TEAL("Teal", 0xFF00A896),
@@ -283,12 +306,30 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Establish the edge-to-edge decor before Compose creates the app surface. On Android
+        // 5-7, opting in only after opening a player can leave that surface permanently inset
+        // below the status bar, exposing the light theme's white window background.
+        enableEdgeToEdge()
         incomingYouTubeUrl = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString
         CookieManager.getInstance().setAcceptCookie(true)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(pipReceiver, IntentFilter(ACTION_PIP_TOGGLE), RECEIVER_NOT_EXPORTED)
         else @Suppress("DEPRECATION") registerReceiver(pipReceiver, IntentFilter(ACTION_PIP_TOGGLE))
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 71)
         setContent { MaterialYtRoot(this) { player = it } }
+        ensureDecorContentEdgeToEdge()
+    }
+
+    private fun ensureDecorContentEdgeToEdge() {
+        // Android 5+'s internal screen_simple(_overlay_action_mode) layout marks the parent of
+        // android.R.id.content as fitsSystemWindows=true. WindowCompat only sets the legacy
+        // layout flags on legacy releases, so that internal parent can still consume the status-bar inset
+        // before Compose receives it. Compose owns all insets in this app; stop the decor parent
+        // from consuming them first.
+        val content = window.findViewById<View>(android.R.id.content)
+        val decorContentRoot = content?.parent as? View ?: return
+        decorContentRoot.fitsSystemWindows = false
+        decorContentRoot.requestApplyInsets()
+        decorContentRoot.requestLayout()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -372,9 +413,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun restoreNormalSystemBars() {
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-        WindowCompat.setDecorFitsSystemWindows(window, true)
+        // Edge-to-edge is established once in onCreate. Toggling decor fitting back to true and
+        // then false when a player opens leaves the Android 5-7 decor surface inset permanently.
         WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
         window.decorView.requestApplyInsets()
     }
@@ -583,7 +627,10 @@ class MainActivity : ComponentActivity() {
 
     private fun applyMusicPlayerSystemBars() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        ensureDecorContentEdgeToEdge()
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
         if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
@@ -665,10 +712,15 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
     val dark = theme == ThemeMode.DARK || theme == ThemeMode.OLED || (theme == ThemeMode.SYSTEM && systemDark)
     val base = ComposeColor(color.seed)
     val scheme = colorScheme(base, dark, theme == ThemeMode.OLED)
+    val musicBarsActive = activity.isMusicPlayerActive
     SideEffect {
-        activity.window.statusBarColor = Color.BLACK
-        activity.window.navigationBarColor = if (theme == ThemeMode.OLED) Color.BLACK else scheme.surface.value.toInt()
-        WindowCompat.getInsetsController(activity.window, activity.window.decorView).isAppearanceLightStatusBars = false
+        // Player-owned system bars must not be overwritten by a theme recomposition after the
+        // player has made them transparent.
+        if (!musicBarsActive && !activity.isFullscreen) {
+            activity.window.statusBarColor = Color.BLACK
+            activity.window.navigationBarColor = if (theme == ThemeMode.OLED) Color.BLACK else scheme.surface.value.toInt()
+            WindowCompat.getInsetsController(activity.window, activity.window.decorView).isAppearanceLightStatusBars = false
+        }
     }
     MaterialTheme(colorScheme = scheme) {
         AppScaffold(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme = { theme = it; prefs.edit().putString("theme", it.name).apply() },
@@ -835,7 +887,8 @@ private fun AppScaffold(
             }
             Scaffold(
                 Modifier.weight(1f),
-                contentWindowInsets = ComposeWindowInsets(0, 0, 0, 0),
+                contentWindowInsets = if (musicPlayerActive) ComposeWindowInsets(0, 0, 0, 0)
+                    else ScaffoldDefaults.contentWindowInsets,
                 bottomBar = { if (!hideNavigation) MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ } },
                 content = content,
             )
@@ -1691,7 +1744,7 @@ private fun MusicPlayer(
         Column(Modifier.fillMaxSize()) {
             Row(
                 Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding()
-                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                    .padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onBack) { Icon(Icons.Default.Close, "Close player", tint = ComposeColor.White) }
@@ -1714,7 +1767,7 @@ private fun MusicPlayer(
                             AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
-                        Spacer(Modifier.height(18.dp)); Text(track.title, Modifier.fillMaxWidth().autoMarquee(), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 1, softWrap = false, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(18.dp)); CenteredMusicTitle(track.title, MaterialTheme.typography.headlineSmall); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(14.dp))
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
@@ -1781,7 +1834,7 @@ private fun MusicPlayer(
                             AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
-                        Spacer(Modifier.height(22.dp)); Text(track.title, Modifier.fillMaxWidth().autoMarquee(), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall, maxLines = 1, softWrap = false, textAlign = TextAlign.Center); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(22.dp)); CenteredMusicTitle(track.title, MaterialTheme.typography.headlineSmall); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
                             drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)

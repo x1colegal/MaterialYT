@@ -5,12 +5,9 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
-import java.io.ByteArrayInputStream
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -44,10 +41,16 @@ object WebStreamAttestationProvider {
         var current = runtime
         if (current == null || sessionKey != key) {
             current?.close()
-            current = Runtime(origin, userAgent, videoId)
-            current.initialize()
-            runtime = current
-            sessionKey = key
+            val candidate = Runtime(origin, userAgent, videoId)
+            try {
+                candidate.initialize()
+                current = candidate
+                runtime = candidate
+                sessionKey = key
+            } catch (error: Throwable) {
+                candidate.close()
+                throw error
+            }
         }
         return current ?: error("WEB playback attestation runtime was not created")
     }
@@ -62,6 +65,7 @@ object WebStreamAttestationProvider {
         private val ready = CompletableFuture<Unit>()
         private val results = mutableMapOf<String, CompletableFuture<Unit>>()
         private var view: WebView? = null
+        private var playbackBootstrapStarted = false
 
         fun initialize() {
             main.post {
@@ -69,64 +73,77 @@ object WebStreamAttestationProvider {
                 view = webView
                 webView.settings.javaScriptEnabled = true
                 webView.settings.domStorageEnabled = true
-                // YouTube loads attmp lazily when playback begins. This hidden, muted
-                // player has no user gesture, so autoplay must be allowed here.
-                webView.settings.mediaPlaybackRequiresUserGesture = false
+                // Keep autoplay blocked until the page's player and every HTML media element
+                // have been muted. Allowing it before navigation gives pre-roll ads a short
+                // window to emit audio before onPageFinished can reach movie_player.
+                webView.settings.mediaPlaybackRequiresUserGesture = true
                 webView.settings.userAgentString = userAgent
                 webView.webChromeClient = WebChromeClient()
                 webView.webViewClient = object : WebViewClient() {
-                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                        val url = request.url
-                        val mediaRequest = url.host?.endsWith(".googlevideo.com", ignoreCase = true) == true ||
-                            url.path?.contains("/videoplayback", ignoreCase = true) == true
-                        if (!mediaRequest) return super.shouldInterceptRequest(view, request)
-                        // The attestation module is activated by the player's playback attempt,
-                        // but it does not need the media bytes. Returning an empty response keeps
-                        // the real watch-page runtime while making pre-roll/video audio impossible.
-                        return WebResourceResponse(
-                            "application/octet-stream",
-                            null,
-                            204,
-                            "No Content",
-                            mapOf("Cache-Control" to "no-store"),
-                            ByteArrayInputStream(ByteArray(0)),
-                        )
-                    }
-
                     override fun onPageFinished(view: WebView, url: String) {
+                        if (playbackBootstrapStarted) return
+                        playbackBootstrapStarted = true
                         view.evaluateJavascript(
                             """
-                            try {
-                              const player=document.getElementById('movie_player');
-                              if (player) {
-                                if (typeof player.setVolume === 'function') player.setVolume(0);
-                                if (typeof player.mute === 'function') player.mute();
-                                if (typeof player.playVideo === 'function') player.playVideo();
-                              }
-                            } catch (_) {}
-                            (function waitForAttestation(remaining) {
-                              const modern=window.attmp && typeof window.attmp.s === 'function';
-                              const legacy=window.yt && window.yt.aba && typeof window.yt.aba.att === 'function';
-                              if (modern || legacy) {
+                            (function installSilenceGuard() {
+                              const silence=function() {
                                 try {
+                                  document.querySelectorAll('video,audio').forEach(function(media) {
+                                    media.muted=true;
+                                    media.defaultMuted=true;
+                                    media.volume=0;
+                                  });
                                   const player=document.getElementById('movie_player');
-                                  if (player && typeof player.pauseVideo === 'function') player.pauseVideo();
+                                  if (player) {
+                                    if (typeof player.setVolume === 'function') player.setVolume(0);
+                                    if (typeof player.mute === 'function') player.mute();
+                                  }
                                 } catch (_) {}
-                                MaterialYtAttestation.ready();
-                              } else if (remaining > 0) {
-                                setTimeout(function(){ waitForAttestation(remaining - 1); }, 100);
-                              } else {
-                                MaterialYtAttestation.initError('YouTube attestation module was not loaded');
-                              }
-                            })(80);
-                            """.trimIndent(), null
-                        )
+                              };
+                              silence();
+                              try {
+                                new MutationObserver(silence).observe(document.documentElement, {
+                                  childList:true, subtree:true
+                                });
+                              } catch (_) {}
+                              window.__materialYtSilence=silence;
+                              return true;
+                            })();
+                            """.trimIndent()
+                        ) {
+                            // YouTube loads attmp lazily only after playback begins. Release the
+                            // gesture gate after the silence guard exists, then start playback.
+                            view.settings.mediaPlaybackRequiresUserGesture = false
+                            view.evaluateJavascript(
+                                """
+                                try {
+                                  if (window.__materialYtSilence) window.__materialYtSilence();
+                                  const player=document.getElementById('movie_player');
+                                  if (player && typeof player.playVideo === 'function') player.playVideo();
+                                } catch (_) {}
+                                (function waitForAttestation(remaining) {
+                                  if (window.__materialYtSilence) window.__materialYtSilence();
+                                  const modern=window.attmp && typeof window.attmp.s === 'function';
+                                  const legacy=window.yt && window.yt.aba && typeof window.yt.aba.att === 'function';
+                                  if (modern || legacy) {
+                                    try {
+                                      const player=document.getElementById('movie_player');
+                                      if (player && typeof player.pauseVideo === 'function') player.pauseVideo();
+                                    } catch (_) {}
+                                    MaterialYtAttestation.ready();
+                                  } else if (remaining > 0) {
+                                    setTimeout(function(){ waitForAttestation(remaining - 1); }, 100);
+                                  } else {
+                                    MaterialYtAttestation.initError('YouTube attestation module was not loaded');
+                                  }
+                                })(80);
+                                """.trimIndent(), null
+                            )
+                        }
                     }
                 }
                 webView.addJavascriptInterface(Bridge(), "MaterialYtAttestation")
-                // Keep the real watch page stopped until the script above has muted its player.
-                // With autoplay enabled in WebSettings, loading a plain /watch URL can otherwise
-                // leak a fraction of a pre-roll before onPageFinished gets a chance to call mute().
+                // Autoplay remains gated by WebSettings until the silence guard above is active.
                 webView.loadUrl("$origin/watch?v=$initialVideoId&hl=en&autoplay=0&mute=1&playsinline=1")
             }
             ready.get(12, TimeUnit.SECONDS)

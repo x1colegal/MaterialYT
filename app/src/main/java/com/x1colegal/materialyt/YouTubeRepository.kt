@@ -1571,7 +1571,7 @@ object YouTubeRepository {
         }
     }
 
-    fun musicSearch(query: String): List<FeedItem> = audioOnlyMusicItems(musicRequest("search", JSONObject().put("query", query)))
+    fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query))
         .also { activeMusicQuery = query }
 
     fun musicContinuation(query: String): List<FeedItem> {
@@ -1599,7 +1599,20 @@ object YouTubeRepository {
         val response = post("$origin/youtubei/v1/$endpoint?key=${bootstrap.key}", body, origin)
         val token = findContinuationToken(response)
         if (endpoint == "search") musicSearchToken = token else musicHomeToken = token
-        return audioOnlyMusicItems(parseItems(response)).also { AppLog.event("music endpoint=$endpoint items=${it.size}") }
+        val items = if (endpoint == "search") {
+            val sections = parseMusicHomeSections(response)
+            val searchableSections = sections.filterNot { section ->
+                section.title.trim().equals("Videos", ignoreCase = true) ||
+                    section.title.contains("music videos", ignoreCase = true)
+            }
+            searchableSections.flatMap { it.items }
+                .distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+                .ifEmpty { audioOnlyMusicItems(parseItems(response)) }
+                .also { parsed ->
+                    AppLog.event("music search sections=${sections.joinToString { "${it.title}:${it.items.size}" }} items=${parsed.size}")
+                }
+        } else audioOnlyMusicItems(parseItems(response))
+        return items.also { AppLog.event("music endpoint=$endpoint items=${it.size}") }
     }
 
     private fun feed(name: String, url: String): List<FeedItem> {
@@ -1963,7 +1976,6 @@ object YouTubeRepository {
         val origin = "https://www.youtube.com"
         val showInitialProgress = reloadToken == null && !adPlayback
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Preparing WEB session…")
-        WebStreamAttestationProvider.prepareAsync(videoId, origin, WEB_PLAYER_UA)
         val bootstrap = bootstrap(origin, clientName)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Generating PoToken…")
         val requestedVisitor = standaloneWebVisitorData()
@@ -1982,6 +1994,12 @@ object YouTubeRepository {
             }}"
         )
         val token = WebPoTokenProvider.get(videoId, requestedVisitor, streamingBinding, origin, WEB_PLAYER_UA)
+        // Android 5-7 cannot initialize two WebViews reliably at the same time. Starting the
+        // watch-page attestation runtime before BotGuard caused both to contend for the old
+        // WebView/JS engine, making BotGuard hit its full 30-second timeout before succeeding
+        // on retry. Start attestation only after the PoToken runtime is ready; it still overlaps
+        // player-JS loading and the /player request below.
+        WebStreamAttestationProvider.prepareAsync(videoId, origin, WEB_PLAYER_UA)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Loading player JavaScript…")
         val cpn = cpnOverride?.takeIf(String::isNotBlank)
             ?: UUID.randomUUID().toString().replace("-", "").take(16)
@@ -2048,6 +2066,7 @@ object YouTubeRepository {
             ?.optString("baseUrl")?.takeIf(String::isNotBlank)?.let { atrUrl ->
                 // Preparation overlaps the other player work, but the first SABR
                 // request must not race ahead of YouTube accepting this proof.
+                if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Submitting playback attestation…")
                 runCatching {
                     WebStreamAttestationProvider.attest(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
                 }.onFailure { AppLog.failure("WEB playback attestation video=$videoId", it) }
@@ -3503,7 +3522,7 @@ object YouTubeRepository {
                 if (!blocked) {
                     val supported = setOf(
                         "videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "playlistVideoRenderer", "playlistRenderer", "gridPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
-                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "playlistPanelVideoRenderer", "lockupViewModel"
+                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "musicCardShelfRenderer", "playlistPanelVideoRenderer", "lockupViewModel"
                     )
                     keys.forEach { key ->
                         val candidate = value.optJSONObject(key) ?: return@forEach

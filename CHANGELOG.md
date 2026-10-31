@@ -2,6 +2,19 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.11] - 2026-10-31
+
+### Fixed
+- Prevent hidden playback-attestation WebViews from leaking pre-roll audio by blocking autoplay until both YouTube's player and all HTML media elements are muted, then starting the muted attestation playback.
+- Initialize Android's official edge-to-edge support when the activity is created, keeping the same transparent system-bar path on phones and tablets without tablet-only workarounds.
+- Keep edge-to-edge enabled for the activity lifetime and prevent theme recompositions from overwriting player-owned transparent system bars on Android 5-7.
+- Stop Android 5+'s internal `screen_simple` decor root from consuming the status-bar inset before Compose; Android 17 stable still declares `fitsSystemWindows` there, so the correction applies consistently across supported versions.
+- Give the YT Music top controls more breathing room below the status bar on phones and tablets.
+- Preserve centered YT Music titles when they fit while keeping marquee scrolling for long titles.
+- Allow WebView to receive the media bytes required to initialize YouTube playback attestation on every Android version; hidden playback remains muted through the player API instead of request blocking.
+- Preserve YT Music search relevance by parsing its result shelves in server order, including the native top-song card renderer, while continuing to exclude music-video items mixed into results.
+- Avoid competing BotGuard and playback-attestation WebViews on Android 5-7, clean up failed attestation runtimes, and report the attestation stage separately from the player-data request.
+
 ## [4.10] - 2026-10-30
 
 ### Fixed

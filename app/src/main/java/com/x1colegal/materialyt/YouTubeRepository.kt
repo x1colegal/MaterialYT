@@ -139,12 +139,8 @@ data class VideoCommentPage(
 )
 
 object YouTubeRepository {
-    private data class WebProtectionRenewal(
-        val completedAtMs: Long,
-    )
-
     private val webProtectionRenewals =
-        ConcurrentHashMap<String, CompletableFuture<WebProtectionRenewal>>()
+        ConcurrentHashMap<String, CompletableFuture<Unit>>()
     private val webProtectionExecutor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "MaterialYT-SABR-Attestation").apply { isDaemon = true }
     }
@@ -2128,16 +2124,13 @@ object YouTubeRepository {
         while (true) {
             webProtectionRenewals[renewalKey]?.let { active ->
                 AppLog.event("SABR WEB protection joining renewal video=${info.videoId}")
-                val shared = active.get()
-                if (SystemClock.elapsedRealtime() - shared.completedAtMs <= 15_000L) {
-                    return
-                }
-                webProtectionRenewals.remove(renewalKey, active)
+                active.get()
+                return
             }
 
             // The worker owns the attestation lifetime. Cancelling a player/UI waiter must not
             // cancel the shared proof and strand another active audio/video session.
-            val own = CompletableFuture<WebProtectionRenewal>()
+            val own = CompletableFuture<Unit>()
             if (webProtectionRenewals.putIfAbsent(renewalKey, own) != null) continue
             webProtectionExecutor.execute {
                 try {
@@ -2145,18 +2138,17 @@ object YouTubeRepository {
                         info.videoId, originalCpn, atrUrl, "https://www.youtube.com", WEB_PLAYER_UA
                     )
                     AppLog.event("SABR WEB attestation renewed in place video=${info.videoId}")
-                    own.complete(WebProtectionRenewal(SystemClock.elapsedRealtime()))
+                    own.complete(Unit)
                 } catch (error: Throwable) {
                     own.completeExceptionally(error)
+                } finally {
+                    // Coalesce only callers that overlap the same in-flight proof. A later
+                    // protection response is a new server challenge and needs a new proof.
+                    webProtectionRenewals.remove(renewalKey, own)
                 }
             }
-            try {
-                own.get()
-                return
-            } catch (error: Throwable) {
-                webProtectionRenewals.remove(renewalKey, own)
-                throw error
-            }
+            own.get()
+            return
         }
     }
 

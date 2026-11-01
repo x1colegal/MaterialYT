@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.0] - 2026-10-31
+
+### Fixed
+- Generate and submit a fresh playback attestation for every new SABR protection challenge while coalescing only requests that overlap the same in-flight proof.
+- Prevent a completed attestation from being reused when YouTube returns another `protection=2`, avoiding escalation to `protection=3` without rebuilding the player session or discarding buffered media.
+
 ## [4.12] - 2026-10-31
 
 ### Fixed

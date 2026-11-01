@@ -193,8 +193,13 @@ object WebStreamAttestationProvider {
                     """.trimIndent(), null
                 )
             }
-            result.get(40, TimeUnit.SECONDS)
-            AppLog.event("WEB playback attestation submitted video=$videoId")
+            try {
+                result.get(40, TimeUnit.SECONDS)
+                AppLog.event("WEB playback attestation submitted video=$videoId")
+            } finally {
+                // A cancelled/timed-out waiter must not leave a dead result occupying this id.
+                synchronized(results) { results.remove(id, result) }
+            }
         }
 
         fun close() = main.post {

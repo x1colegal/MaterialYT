@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [4.12] - 2026-10-31
+
+### Fixed
+- Renew only the active WEB playback attestation when SABR reports protection pending, preserving the existing endpoint, PoToken, request context, and buffered media instead of rebuilding the entire player session.
+- Keep a shared attestation renewal alive when an individual player or UI waiter is cancelled, and prevent one protection response from triggering duplicate renewals or leaving the media downloader stopped.
+
 ## [4.11] - 2026-10-31
 
 ### Fixed

@@ -12,7 +12,6 @@ import com.x1colegal.materialyt.sabrmodern.ModernSabrRegistry
 import com.x1colegal.materialyt.sabrmodern.ModernSabrStream
 import com.x1colegal.materialyt.sabrmodern.SabrConfig
 import com.x1colegal.materialyt.sabrmodern.SabrMessages
-import com.x1colegal.materialyt.sabrmodern.SabrProtectionRefresh
 import com.x1colegal.materialyt.sabrmodern.SabrVideoConfig
 
 /** Current SABR/UMP transport with positional, disk-backed A/V reassembly. */
@@ -52,8 +51,7 @@ object SabrMediaFactory {
                 else -> null
             },
             renewProtection = if (info.clientId == 1) ({
-                val refreshed = YouTubeRepository.renewWebSabrProtection(info)
-                SabrProtectionRefresh(refreshed.first, decode(refreshed.second), decode(refreshed.third))
+                YouTubeRepository.renewWebSabrProtection(info)
             }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
@@ -87,8 +85,7 @@ object SabrMediaFactory {
                 else -> null
             },
             renewProtection = if (info.clientId == 1) ({
-                val refreshed = YouTubeRepository.renewWebSabrProtection(info)
-                SabrProtectionRefresh(refreshed.first, decode(refreshed.second), decode(refreshed.third))
+                YouTubeRepository.renewWebSabrProtection(info)
             }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")

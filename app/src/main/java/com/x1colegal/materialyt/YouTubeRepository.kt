@@ -21,6 +21,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import android.os.SystemClock
@@ -63,6 +64,7 @@ data class SabrPlaybackInfo(
     val osVersion: String,
     val deviceMake: String? = null,
     val deviceModel: String? = null,
+    val attestationUrl: String,
     val durationMs: Long,
     val formats: List<SabrFormat>
 )
@@ -139,11 +141,13 @@ data class VideoCommentPage(
 object YouTubeRepository {
     private data class WebProtectionRenewal(
         val completedAtMs: Long,
-        val value: Triple<String, String, String>,
     )
 
     private val webProtectionRenewals =
         ConcurrentHashMap<String, CompletableFuture<WebProtectionRenewal>>()
+    private val webProtectionExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "MaterialYT-SABR-Attestation").apply { isDaemon = true }
+    }
 
     private fun audioOnlyMusicItems(items: List<FeedItem>): List<FeedItem> =
         items.filter { it.playlist || it.channel || !it.musicVideo }
@@ -1851,6 +1855,7 @@ object YouTubeRepository {
             "10.0",
             null,
             null,
+            response.optString("_materialytAtrUrl"),
             durationMs, formats)
     }
 
@@ -2070,6 +2075,7 @@ object YouTubeRepository {
                 runCatching {
                     WebStreamAttestationProvider.attest(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
                 }.onFailure { AppLog.failure("WEB playback attestation video=$videoId", it) }
+                response.put("_materialytAtrUrl", atrUrl)
             }
         val streaming = response.optJSONObject("streamingData")
         val sabrUrl = streaming?.optString("serverAbrStreamingUrl").orEmpty()
@@ -2111,48 +2117,43 @@ object YouTubeRepository {
         return url to config
     }
 
-    /** Rebuilds WEB protection and returns one internally consistent SABR player session. */
-    fun renewWebSabrProtection(info: SabrPlaybackInfo): Triple<String, String, String> {
+    /** Re-submits WEB playback attestation without replacing or resetting the active SABR session. */
+    fun renewWebSabrProtection(info: SabrPlaybackInfo) {
         check(info.clientId == 1) { "SABR protection renewal is only supported by the WEB playback client" }
         val originalCpn = info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
+            ?.takeIf(String::isNotBlank) ?: error("WEB SABR session has no CPN")
+        val atrUrl = info.attestationUrl.takeIf(String::isNotBlank)
+            ?: error("WEB SABR session has no attestation URL")
         val renewalKey = "${info.videoId}\u0000${originalCpn.orEmpty()}\u0000${info.clientId}"
         while (true) {
             webProtectionRenewals[renewalKey]?.let { active ->
                 AppLog.event("SABR WEB protection joining renewal video=${info.videoId}")
                 val shared = active.get()
                 if (SystemClock.elapsedRealtime() - shared.completedAtMs <= 15_000L) {
-                    return shared.value
+                    return
                 }
                 webProtectionRenewals.remove(renewalKey, active)
             }
 
+            // The worker owns the attestation lifetime. Cancelling a player/UI waiter must not
+            // cancel the shared proof and strand another active audio/video session.
             val own = CompletableFuture<WebProtectionRenewal>()
             if (webProtectionRenewals.putIfAbsent(renewalKey, own) != null) continue
+            webProtectionExecutor.execute {
+                try {
+                    WebStreamAttestationProvider.attest(
+                        info.videoId, originalCpn, atrUrl, "https://www.youtube.com", WEB_PLAYER_UA
+                    )
+                    AppLog.event("SABR WEB attestation renewed in place video=${info.videoId}")
+                    own.complete(WebProtectionRenewal(SystemClock.elapsedRealtime()))
+                } catch (error: Throwable) {
+                    own.completeExceptionally(error)
+                }
+            }
             try {
-                WebPoTokenProvider.reset()
-                val response = webPoPlayer(info.videoId, cpnOverride = originalCpn)
-                val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
-                val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
-                check(status == "OK") { reason.ifBlank { "WEB protection renewal returned $status" } }
-                val rawUrl = response.optJSONObject("streamingData")?.optString("serverAbrStreamingUrl")
-                    ?.takeIf(String::isNotBlank) ?: error("WEB protection renewal returned no endpoint")
-                val cpn = response.optString("_materialytCpn").ifBlank { originalCpn.orEmpty() }
-                val pot = response.optString("_materialytStreamingPot")
-                    .takeIf(String::isNotBlank) ?: error("WEB protection renewal returned no GVS PoToken")
-                val config = findString(response, "videoPlaybackUstreamerConfig")
-                    ?.takeIf(String::isNotBlank)
-                    ?: error("WEB protection renewal returned no ustreamer config")
-                val url = rawUrl.toHttpUrlOrNull()?.newBuilder()
-                    ?.setQueryParameter("alr", "yes")
-                    ?.apply { if (cpn.isNotBlank()) setQueryParameter("cpn", cpn) }
-                    ?.setQueryParameter("pot", pot)
-                    ?.build()?.toString() ?: rawUrl
-                val value = Triple(url, config, pot)
-                own.complete(WebProtectionRenewal(SystemClock.elapsedRealtime(), value))
-                AppLog.event("SABR WEB protection renewed video=${info.videoId} token=${pot.length}")
-                return value
+                own.get()
+                return
             } catch (error: Throwable) {
-                own.completeExceptionally(error)
                 webProtectionRenewals.remove(renewalKey, own)
                 throw error
             }

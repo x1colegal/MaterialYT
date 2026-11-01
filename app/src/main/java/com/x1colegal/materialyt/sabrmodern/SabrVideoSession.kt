@@ -37,7 +37,7 @@ internal class SabrVideoConfig(
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
     /** Re-attest WEB with the complete set of values from one fresh player session. */
-    val renewProtection: (() -> SabrProtectionRefresh)? = null,
+    val renewProtection: (() -> Unit)? = null,
 )
 
 /**
@@ -160,14 +160,12 @@ internal class SabrVideoSession(
             if (protectionRenewals >= MAX_PROTECTION_RENEWALS) return false
             protectionRenewals++
             AppLog.event("SABR video renewing WEB protection attempt=$protectionRenewals")
-            val refreshed = renew.invoke()
-            url = prepared(refreshed.url)
-            ustreamerConfig = refreshed.ustreamerConfig
-            poToken = refreshed.poToken
-            requestNumber = 0
-            cookie = null
-            ctxByType.clear()
-            ctxToSend.clear()
+            try {
+                renew.invoke()
+            } catch (error: Throwable) {
+                AppLog.failure("SABR video WEB attestation renewal failed", error)
+                return false
+            }
             attestationStalls = 0
             dry = 0
             backoffTimeMs = 0
@@ -277,7 +275,6 @@ internal class SabrVideoSession(
                 Timber.tag(TAG).w("SABR_ERROR at iter=$iter (video ${video.lastSeq}, audio ${audio.lastSeq}) — server rejected the request")
                 failStream("SABR_ERROR", stall = true); return
             }
-            if (protStatus >= SabrProtection.ATTESTATION_PENDING && headers.isEmpty() && renewProtection()) continue
             if (!reloadToken.isNullOrBlank() && config.reloadPlayer != null) {
                 AppLog.event("SABR video reloading player iter=$iter token=${reloadToken.length}")
                 val refreshed = config.reloadPlayer.invoke(reloadToken)

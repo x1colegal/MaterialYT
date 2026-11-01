@@ -174,15 +174,16 @@ object WebStreamAttestationProvider {
                           ? await window.attmp.s(args[0], args[1], args[2])
                           : await window.yt.aba.att(args[0], args[1], args[2]);
                         if (!proof || !proof.challenge) throw new Error('YouTube returned no playback attestation challenge');
-                        const fields=[proof.challenge];
-                        if (proof.error) fields.push('r1c=' + encodeURIComponent(String(proof.error)));
-                        else if (proof.webResponse) fields.push('r1a=' + encodeURIComponent(String(proof.webResponse)));
+                        const fields=[String(proof.challenge)];
+                        if (proof.error) throw new Error('YouTube playback attestation failed: ' + proof.error);
+                        else if (proof.webResponse) fields.push('r1a=' + String(proof.webResponse));
                         if (proof.adblockReporting && proof.adblockReporting.reportingStatus !== undefined)
-                          fields.push('r6a=' + encodeURIComponent(String(proof.adblockReporting.reportingStatus)));
+                          fields.push('r6a=' + String(proof.adblockReporting.reportingStatus));
                         if (proof.adblockReporting && proof.adblockReporting.broadSpectrumDetectionResult !== undefined)
-                          fields.push('r6b=' + encodeURIComponent(String(proof.adblockReporting.broadSpectrumDetectionResult)));
+                          fields.push('r6b=' + String(proof.adblockReporting.broadSpectrumDetectionResult));
                         const separator=$jsAtr.indexOf('?') >= 0 ? '&' : '?';
-                        const response=await fetch($jsAtr + separator + fields.join('&'), {
+                        const target=$jsAtr + separator + 'attestationResponse=' + encodeURIComponent(fields.join('&'));
+                        const response=await fetch(target, {
                           method:'GET', credentials:'include', mode:'no-cors', keepalive:true
                         });
                         MaterialYtAttestation.complete(requestId);

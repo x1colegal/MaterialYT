@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.1] - 2026-11-01
+
+### Fixed
+- Submit WEB playback attestation through YouTube's expected `attestationResponse` envelope with exactly one encoding pass.
+- Match YouTube's single-submit attestation lifecycle instead of regenerating proof on every pending SABR protection response, preserving buffered playback and preventing escalation to rejected protection states.
+
 ## [5.0] - 2026-10-31
 
 ### Fixed

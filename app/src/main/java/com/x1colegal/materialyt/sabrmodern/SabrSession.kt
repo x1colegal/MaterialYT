@@ -42,8 +42,6 @@ internal class SabrConfig(
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
-    /** Re-attest WEB in place without replacing any SABR session state. */
-    val renewProtection: (() -> Unit)? = null,
 )
 
 /**
@@ -160,25 +158,7 @@ internal class SabrSession(
         var attestationStalls = 0
         var emptySessionRefreshes = 0
         var startupEmptyResponses = 0
-        var protectionRenewals = 0
         var backoffTimeMs = 0L
-
-        fun renewProtection(): Boolean {
-            val renew = config.renewProtection ?: return false
-            if (protectionRenewals >= MAX_PROTECTION_RENEWALS) return false
-            protectionRenewals++
-            AppLog.event("SABR audio renewing WEB protection attempt=$protectionRenewals")
-            try {
-                renew.invoke()
-            } catch (error: Throwable) {
-                AppLog.failure("SABR audio WEB attestation renewal failed", error)
-                return false
-            }
-            attestationStalls = 0
-            dry = 0
-            backoffTimeMs = 0
-            return true
-        }
 
         while (!cancelled && iter < maxIter && dry < 6) {
             if (backoffTimeMs > 0) {
@@ -381,7 +361,6 @@ internal class SabrSession(
             // (proven live: tests/probe-mweb-sabr.mjs). Bail FAST with a clear reason instead of grinding
             // to the dry cap — the roster/stall fallback then moves to a client that can attest.
             attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
-            if (protStatus >= SabrProtection.ATTESTATION_PENDING && renewProtection()) continue
             if (SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR attestation cap (STREAM_PROTECTION_STATUS=$protStatus): ${buffer.available()}/${config.format.contentLength} at seq $lastSeq/$endSeg — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus): ${buffer.available()}/${config.format.contentLength}", stall = true); return
@@ -413,7 +392,6 @@ internal class SabrSession(
     companion object {
         private const val TAG = "SabrSession"
         private const val STARTUP_EMPTY_LIMIT = 2
-        private const val MAX_PROTECTION_RENEWALS = 2
         private const val MAX_STARTUP_REFRESHES = 2
     }
 }

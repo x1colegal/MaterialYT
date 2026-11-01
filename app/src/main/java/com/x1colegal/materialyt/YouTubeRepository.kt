@@ -15,13 +15,10 @@ import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import android.os.SystemClock
@@ -139,12 +136,6 @@ data class VideoCommentPage(
 )
 
 object YouTubeRepository {
-    private val webProtectionRenewals =
-        ConcurrentHashMap<String, CompletableFuture<Unit>>()
-    private val webProtectionExecutor = Executors.newSingleThreadExecutor { task ->
-        Thread(task, "MaterialYT-SABR-Attestation").apply { isDaemon = true }
-    }
-
     private fun audioOnlyMusicItems(items: List<FeedItem>): List<FeedItem> =
         items.filter { it.playlist || it.channel || !it.musicVideo }
 
@@ -2111,45 +2102,6 @@ object YouTubeRepository {
             ?.takeIf(String::isNotBlank) ?: info.videoPlaybackUstreamerConfig
         AppLog.event("SABR WEB ad playback refresh ready video=${info.videoId}")
         return url to config
-    }
-
-    /** Re-submits WEB playback attestation without replacing or resetting the active SABR session. */
-    fun renewWebSabrProtection(info: SabrPlaybackInfo) {
-        check(info.clientId == 1) { "SABR protection renewal is only supported by the WEB playback client" }
-        val originalCpn = info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
-            ?.takeIf(String::isNotBlank) ?: error("WEB SABR session has no CPN")
-        val atrUrl = info.attestationUrl.takeIf(String::isNotBlank)
-            ?: error("WEB SABR session has no attestation URL")
-        val renewalKey = "${info.videoId}\u0000${originalCpn.orEmpty()}\u0000${info.clientId}"
-        while (true) {
-            webProtectionRenewals[renewalKey]?.let { active ->
-                AppLog.event("SABR WEB protection joining renewal video=${info.videoId}")
-                active.get()
-                return
-            }
-
-            // The worker owns the attestation lifetime. Cancelling a player/UI waiter must not
-            // cancel the shared proof and strand another active audio/video session.
-            val own = CompletableFuture<Unit>()
-            if (webProtectionRenewals.putIfAbsent(renewalKey, own) != null) continue
-            webProtectionExecutor.execute {
-                try {
-                    WebStreamAttestationProvider.attest(
-                        info.videoId, originalCpn, atrUrl, "https://www.youtube.com", WEB_PLAYER_UA
-                    )
-                    AppLog.event("SABR WEB attestation renewed in place video=${info.videoId}")
-                    own.complete(Unit)
-                } catch (error: Throwable) {
-                    own.completeExceptionally(error)
-                } finally {
-                    // Coalesce only callers that overlap the same in-flight proof. A later
-                    // protection response is a new server challenge and needs a new proof.
-                    webProtectionRenewals.remove(renewalKey, own)
-                }
-            }
-            own.get()
-            return
-        }
     }
 
     /** Applies a WEB SABR RELOAD_PLAYER_RESPONSE token and returns its prepared replacement endpoint. */

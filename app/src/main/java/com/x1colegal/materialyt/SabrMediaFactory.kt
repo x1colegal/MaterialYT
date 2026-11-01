@@ -50,9 +50,6 @@ object SabrMediaFactory {
                 })
                 else -> null
             },
-            renewProtection = if (info.clientId == 1) ({
-                YouTubeRepository.renewWebSabrProtection(info)
-            }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, config, null, HttpBackend.playbackClient()))
@@ -84,9 +81,6 @@ object SabrMediaFactory {
                 })
                 else -> null
             },
-            renewProtection = if (info.clientId == 1) ({
-                YouTubeRepository.renewWebSabrProtection(info)
-            }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, null, config, HttpBackend.playbackClient()))

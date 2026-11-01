@@ -36,8 +36,6 @@ internal class SabrVideoConfig(
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
-    /** Re-attest WEB with the complete set of values from one fresh player session. */
-    val renewProtection: (() -> Unit)? = null,
 )
 
 /**
@@ -152,25 +150,7 @@ internal class SabrVideoSession(
         var attestationStalls = 0
         var emptySessionRefreshes = 0
         var startupEmptyResponses = 0
-        var protectionRenewals = 0
         var backoffTimeMs = 0L
-
-        fun renewProtection(): Boolean {
-            val renew = config.renewProtection ?: return false
-            if (protectionRenewals >= MAX_PROTECTION_RENEWALS) return false
-            protectionRenewals++
-            AppLog.event("SABR video renewing WEB protection attempt=$protectionRenewals")
-            try {
-                renew.invoke()
-            } catch (error: Throwable) {
-                AppLog.failure("SABR video WEB attestation renewal failed", error)
-                return false
-            }
-            attestationStalls = 0
-            dry = 0
-            backoffTimeMs = 0
-            return true
-        }
 
         while (!cancelled && iter < maxIter && dry < 6) {
             if (backoffTimeMs > 0) {
@@ -386,7 +366,6 @@ internal class SabrVideoSession(
             // Attestation cap (see SabrSession): a client that can't satisfy stream protection is served a
             // free window then only STREAM_PROTECTION_STATUS>=2 — bail fast so the fallback moves on.
             attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
-            if (protStatus >= SabrProtection.ATTESTATION_PENDING && renewProtection()) continue
             if (SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR video attestation cap (STREAM_PROTECTION_STATUS=$protStatus) — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus)", stall = true); return
@@ -435,7 +414,6 @@ internal class SabrVideoSession(
     companion object {
         private const val TAG = "SabrVideoSession"
         private const val STARTUP_EMPTY_LIMIT = 2
-        private const val MAX_PROTECTION_RENEWALS = 2
         private const val MAX_STARTUP_REFRESHES = 2
     }
 }

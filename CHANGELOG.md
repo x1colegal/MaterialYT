@@ -2,6 +2,14 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.2] - 2026-11-01
+
+### Fixed
+- Refresh the streaming PoToken inside the active SABR session after repeated limited-playback responses, preserving its endpoint, protocol state, and buffered media instead of regenerating playback attestation or restarting the player.
+- Invalidate the previous music source before loading a newly selected track so stale player callbacks cannot clear its loading stage or advance the wrong queue.
+- Preserve the current music position when recovering with another audio stream candidate instead of restarting playback from the beginning.
+- Keep an explicit failure status visible when every audio stream candidate is exhausted.
+
 ## [5.1] - 2026-11-01
 
 ### Fixed

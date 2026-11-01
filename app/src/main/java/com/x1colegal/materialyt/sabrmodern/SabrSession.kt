@@ -42,6 +42,7 @@ internal class SabrConfig(
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
+    val refreshPoToken: (() -> ByteArray)? = null,
 )
 
 /**
@@ -158,6 +159,7 @@ internal class SabrSession(
         var attestationStalls = 0
         var emptySessionRefreshes = 0
         var startupEmptyResponses = 0
+        var lastProtectionRefreshAt = 0L
         var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
@@ -361,6 +363,19 @@ internal class SabrSession(
             // (proven live: tests/probe-mweb-sabr.mjs). Bail FAST with a clear reason instead of grinding
             // to the dry cap — the roster/stall fallback then moves to a client that can attest.
             attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
+            if (attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
+                System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
+            ) {
+                config.refreshPoToken?.let { refresh ->
+                    lastProtectionRefreshAt = System.currentTimeMillis()
+                    runCatching { refresh() }
+                        .onSuccess {
+                            poToken = it
+                            AppLog.event("SABR audio refreshed streaming PoToken in place protection=$protStatus")
+                        }
+                        .onFailure { AppLog.failure("SABR audio streaming PoToken refresh", it) }
+                }
+            }
             if (SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR attestation cap (STREAM_PROTECTION_STATUS=$protStatus): ${buffer.available()}/${config.format.contentLength} at seq $lastSeq/$endSeg — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus): ${buffer.available()}/${config.format.contentLength}", stall = true); return

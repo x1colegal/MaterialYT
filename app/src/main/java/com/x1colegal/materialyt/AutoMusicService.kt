@@ -50,6 +50,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private var playbackQueue = emptyList<FeedItem>()
     private var playbackQueueIndex = -1
     private var autoplayTrack: FeedItem? = null
+    private var endReported = false
+    private var activeSourceGeneration = 0
     private val browserTracks = mutableMapOf<String, FeedItem>()
     private val browserQueues = mutableMapOf<String, Pair<List<FeedItem>, Int>>()
     private lateinit var playbackWakeLock: PowerManager.WakeLock
@@ -181,7 +183,6 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             isActive = true
         }
         sessionToken = session.sessionToken
-        var endReported = false
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 publishState()
@@ -217,8 +218,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             }
             override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
                 val failedTrack = currentTrack ?: return
+                val failedGeneration = activeSourceGeneration
+                val resumePosition = player.currentPosition.coerceAtLeast(0L)
                 AppLog.failure("music stream candidate=${audioCandidateIndex + 1}/${audioCandidates.size} video=${failedTrack.id}", error)
-                scope.launch { playNextAudioCandidate(failedTrack, playGeneration) }
+                scope.launch { playNextAudioCandidate(failedTrack, failedGeneration, resumePosition) }
             }
         })
         publishState()
@@ -412,6 +415,12 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val generation = ++playGeneration
         scope.launch {
             acquirePlaybackLocks()
+            // Invalidate the previous source before publishing the new track. Otherwise READY or
+            // ENDED callbacks from the old song can clear the new loading stage or advance its queue.
+            player.stop()
+            player.clearMediaItems()
+            activeSourceGeneration = generation
+            endReported = false
             currentTrack = track
             preferredAudioCodec = preferredCodec
             playbackQueue = queue
@@ -502,7 +511,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         audioCandidateIndex = -1
     }
 
-    private suspend fun playNextAudioCandidate(track: FeedItem, generation: Int) {
+    private suspend fun playNextAudioCandidate(track: FeedItem, generation: Int, resumePositionMs: Long = 0L) {
         if (currentTrack?.id != track.id || generation != playGeneration) return
         val next = audioCandidateIndex + 1
         if (next >= audioCandidates.size) {
@@ -518,7 +527,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 )
                 audioCandidates = audioCandidates + additional
                 availableAudioTracks.value = (availableAudioTracks.value + additional).distinctBy(::audioStreamKey)
-                if (additional.isNotEmpty()) return playNextAudioCandidate(track, generation)
+                if (additional.isNotEmpty()) return playNextAudioCandidate(track, generation, resumePositionMs)
             }
             if (extractionRetryCount < 1) {
                 extractionRetryCount++
@@ -529,9 +538,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 availableAudioTracks.value = refreshed.distinctBy(::audioStreamKey)
                 setAudioCandidates(refreshed, preferredAudioCodec)
                 webFallbackAttempted = false
-                if (audioCandidates.isNotEmpty()) return playNextAudioCandidate(track, generation)
+                if (audioCandidates.isNotEmpty()) return playNextAudioCandidate(track, generation, resumePositionMs)
             }
             AppLog.event("music exhausted all stream candidates video=${track.id}")
+            PlaybackLoadStatus.show(track.id, "Could not load media")
             return
         }
         audioCandidateIndex = next
@@ -543,8 +553,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 sabrDataSourceFactory(stream.sabrPlayback.serverAbrStreamingUrl))
         } else ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
             .createMediaSource(MediaItem.fromUri(stream.url))
-        player.setMediaSource(source)
-        player.seekTo(0L)
+        activeSourceGeneration = generation
+        player.setMediaSource(source, resumePositionMs.coerceAtLeast(0L))
         player.prepare()
         player.playWhenReady = true
         session.isActive = true

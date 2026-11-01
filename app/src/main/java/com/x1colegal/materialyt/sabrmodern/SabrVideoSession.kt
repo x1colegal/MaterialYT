@@ -36,6 +36,7 @@ internal class SabrVideoConfig(
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
+    val refreshPoToken: (() -> ByteArray)? = null,
 )
 
 /**
@@ -150,6 +151,7 @@ internal class SabrVideoSession(
         var attestationStalls = 0
         var emptySessionRefreshes = 0
         var startupEmptyResponses = 0
+        var lastProtectionRefreshAt = 0L
         var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
@@ -366,6 +368,19 @@ internal class SabrVideoSession(
             // Attestation cap (see SabrSession): a client that can't satisfy stream protection is served a
             // free window then only STREAM_PROTECTION_STATUS>=2 — bail fast so the fallback moves on.
             attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
+            if (attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
+                System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
+            ) {
+                config.refreshPoToken?.let { refresh ->
+                    lastProtectionRefreshAt = System.currentTimeMillis()
+                    runCatching { refresh() }
+                        .onSuccess {
+                            poToken = it
+                            AppLog.event("SABR video refreshed streaming PoToken in place protection=$protStatus")
+                        }
+                        .onFailure { AppLog.failure("SABR video streaming PoToken refresh", it) }
+                }
+            }
             if (SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR video attestation cap (STREAM_PROTECTION_STATUS=$protStatus) — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus)", stall = true); return

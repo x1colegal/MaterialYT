@@ -62,6 +62,8 @@ data class SabrPlaybackInfo(
     val deviceMake: String? = null,
     val deviceModel: String? = null,
     val attestationUrl: String,
+    val poTokenVisitorData: String,
+    val poTokenStreamingBinding: String,
     val durationMs: Long,
     val formats: List<SabrFormat>
 )
@@ -1843,6 +1845,8 @@ object YouTubeRepository {
             null,
             null,
             response.optString("_materialytAtrUrl"),
+            response.optString("_materialytPoTokenVisitorData"),
+            response.optString("_materialytPoTokenStreamingBinding"),
             durationMs, formats)
     }
 
@@ -2074,8 +2078,23 @@ object YouTubeRepository {
         return response.put("_materialytCpn", cpn)
             .put("_materialytPlayerPot", token.playerRequestPoToken)
             .put("_materialytStreamingPot", token.streamingDataPoToken)
+            .put("_materialytPoTokenVisitorData", token.visitorData)
+            .put("_materialytPoTokenStreamingBinding", streamingBinding)
             .put("_materialytClientVersion", bootstrap.version)
             .put("_materialytClientName", clientName)
+    }
+
+    /** Refreshes only the token carried by the active SABR streamer context. */
+    fun refreshWebSabrPoToken(info: SabrPlaybackInfo): String {
+        check(info.clientId == 1) { "SABR PoToken refresh is only supported by the WEB playback client" }
+        val visitor = info.poTokenVisitorData.takeIf(String::isNotBlank)
+            ?: error("WEB SABR session has no PoToken visitor binding")
+        val binding = info.poTokenStreamingBinding.takeIf(String::isNotBlank)
+            ?: error("WEB SABR session has no streaming PoToken binding")
+        val refreshed = WebPoTokenProvider.get(info.videoId, visitor, binding, "https://www.youtube.com", WEB_PLAYER_UA)
+            .streamingDataPoToken
+        AppLog.event("SABR WEB streaming PoToken refreshed in place video=${info.videoId}")
+        return refreshed
     }
 
     /** Recreates a WEB SABR endpoint after the server enters its content-ad context flow. */

@@ -50,6 +50,9 @@ object SabrMediaFactory {
                 })
                 else -> null
             },
+            refreshPoToken = if (info.clientId == 1) ({
+                decode(YouTubeRepository.refreshWebSabrPoToken(info))
+            }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, config, null, HttpBackend.playbackClient()))
@@ -81,6 +84,9 @@ object SabrMediaFactory {
                 })
                 else -> null
             },
+            refreshPoToken = if (info.clientId == 1) ({
+                decode(YouTubeRepository.refreshWebSabrPoToken(info))
+            }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, null, config, HttpBackend.playbackClient()))

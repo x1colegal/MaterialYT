@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.3] - 2026-11-01
+
+### Fixed
+- Add an explicit lyrics retry action and automatically retry a timed-out request when returning to the Lyrics page.
+- Preserve the edge-to-edge player viewport throughout gesture-navigation app switching, preventing temporary black system bars and UI resizing.
+
 ## [5.2] - 2026-11-01
 
 ### Fixed

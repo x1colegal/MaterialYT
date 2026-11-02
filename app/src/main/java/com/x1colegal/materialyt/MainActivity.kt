@@ -440,16 +440,44 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) applyRequestedSystemBars()
+        // Gesture-navigation app switching takes its transition snapshot after focus is lost,
+        // not after the activity is resumed. Preserve the same edge-to-edge viewport on both
+        // sides of that focus transition so the snapshot never contains fitted black bars.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ensureDecorContentEdgeToEdge()
+        applyRequestedSystemBars()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Recents/slide-to-open may restore the platform's fitted black system bars before
+        // onResume. Keep the decor edge-to-edge throughout that transition so Compose never
+        // receives a smaller viewport for an intermediate frame.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ensureDecorContentEdgeToEdge()
+        applyRequestedSystemBars()
     }
 
     override fun onResume() {
         super.onResume()
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ensureDecorContentEdgeToEdge()
+        applyRequestedSystemBars()
         // Android may restore its navigation bar after this activity regains focus,
         // after onWindowFocusChanged has already fired. Reapply the player-owned
         // state on the next frame and once more after the system transition settles.
         window.decorView.post { applyRequestedSystemBars() }
         window.decorView.postDelayed({ applyRequestedSystemBars() }, 250L)
+    }
+
+    override fun onPause() {
+        // A horizontal swipe on the gesture navigation handle pauses the activity while its
+        // window remains visible. Reassert the player-owned transparent bars before Android
+        // captures/scales that live window for the switch animation.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ensureDecorContentEdgeToEdge()
+        applyRequestedSystemBars()
+        super.onPause()
     }
 
     private fun applyRequestedSystemBars() {
@@ -1635,6 +1663,7 @@ private fun MusicPlayer(
     // queue advance can display the previous song until the player is reopened.
     var lyrics by remember(track.id) { mutableStateOf<List<LyricLine>?>(null) }
     var lyricsError by remember(track.id) { mutableStateOf<String?>(null) }
+    var lyricsRequest by remember(track.id) { mutableIntStateOf(0) }
     var interactions by remember(track.id) { mutableStateOf(VideoInteractionState()) }
     var interactionBusy by remember(track.id) { mutableStateOf(false) }
     var comments by remember(track.id) { mutableStateOf<List<VideoComment>>(emptyList()) }
@@ -1716,7 +1745,12 @@ private fun MusicPlayer(
             commentsLoading = false
         }
     }
-    if ((showLyrics || LocalConfiguration.current.smallestScreenWidthDp >= 600) && lyrics == null && lyricsError == null) LaunchedEffect(track.id) {
+    fun retryLyrics() {
+        lyrics = null
+        lyricsError = null
+        lyricsRequest++
+    }
+    if ((showLyrics || LocalConfiguration.current.smallestScreenWidthDp >= 600) && lyrics == null && lyricsError == null) LaunchedEffect(track.id, lyricsRequest) {
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.lyrics(track.id) } }
             .onSuccess { lyrics = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) lyricsError = it.message ?: "Lyrics unavailable" }
     }
@@ -1782,7 +1816,7 @@ private fun MusicPlayer(
                     Column(Modifier.weight(1f).fillMaxHeight().background(ComposeColor.Black.copy(alpha = .28f), RoundedCornerShape(20.dp)).padding(16.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text(if (showComments) "Comments" else "Lyrics", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
-                            TextButton(onClick = { showComments = false }) { Text("Lyrics", color = if (!showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
+                            TextButton(onClick = { if (lyricsError != null) retryLyrics(); showComments = false }) { Text("Lyrics", color = if (!showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
                             TextButton(onClick = { showComments = true }) { Text("Comments", color = if (showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
                             if (showComments) IconButton(onClick = { commentsRefresh++ }, enabled = !commentsLoading) { Icon(Icons.Default.Refresh, "Refresh comments", tint = ComposeColor.White) }
                         }
@@ -1800,7 +1834,12 @@ private fun MusicPlayer(
                                 item { CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreMusicComments) }
                             }
                         } else LazyColumn(state = lyricsState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                            if (lines.isEmpty()) item { Text(lyricsError ?: if (lyrics == null) "Loading lyrics…" else "Lyrics unavailable", color = ComposeColor.White.copy(alpha = .7f), style = MaterialTheme.typography.bodyLarge) }
+                            if (lines.isEmpty()) item {
+                                Column {
+                                    Text(lyricsError ?: if (lyrics == null) "Loading lyrics…" else "Lyrics unavailable", color = ComposeColor.White.copy(alpha = .7f), style = MaterialTheme.typography.bodyLarge)
+                                    if (lyricsError != null) TextButton(onClick = ::retryLyrics) { Text("Retry") }
+                                }
+                            }
                             else items(lines.size) { index -> Text(lines[index].text, Modifier.clickable(enabled = lines[index].startMs >= 0) { AutoMusicService.seekTo(lines[index].startMs) }, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .48f), style = if (index == currentLine) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleMedium) }
                         }
                     }
@@ -1823,7 +1862,12 @@ private fun MusicPlayer(
                         items(comments, key = { it.id }) { comment -> VideoCommentNode(track.id, comment) { changed -> comments = if (changed == null) comments.filterNot { it.id == comment.id } else comments.map { if (it.id == comment.id) changed else it } } }
                         item { CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreMusicComments) }
                     } else if (page == 1) LazyColumn(state = lyricsState, contentPadding = PaddingValues(horizontal = 28.dp, vertical = 220.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                        if (lines.isEmpty()) item { Text(lyricsError ?: "Loading lyrics…", color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall) }
+                        if (lines.isEmpty()) item {
+                            Column {
+                                Text(lyricsError ?: "Loading lyrics…", color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall)
+                                if (lyricsError != null) TextButton(onClick = ::retryLyrics) { Text("Retry") }
+                            }
+                        }
                         else items(lines.size) { index -> Text(lines[index].text, Modifier.clickable(enabled = lines[index].startMs >= 0) { AutoMusicService.seekTo(lines[index].startMs) }, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .48f), style = if (index == currentLine) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge) }
                     } else Column(
                         Modifier.fillMaxSize().padding(horizontal = 24.dp),
@@ -1854,7 +1898,7 @@ private fun MusicPlayer(
                         unselectedTextColor = ComposeColor.White.copy(alpha = .68f),
                     )
                     NavigationBarItem(!showLyrics && !showComments, { showLyrics = false; showComments = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }, colors = musicNavigationColors)
-                    NavigationBarItem(showLyrics, { showLyrics = true; showComments = false }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }, colors = musicNavigationColors)
+                    NavigationBarItem(showLyrics, { if (lyricsError != null) retryLyrics(); showLyrics = true; showComments = false }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }, colors = musicNavigationColors)
                     NavigationBarItem(showComments, { showLyrics = false; showComments = true }, { Icon(Icons.Default.Comment, null) }, label = { Text("Comments") }, colors = musicNavigationColors)
                 }
             }
@@ -1958,6 +2002,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
     val context = LocalContext.current
     var error by remember { mutableStateOf<String?>(null) }
     var lyrics by remember(track.id) { mutableStateOf<List<LyricLine>?>(null) }
+    var lyricsRequest by remember(track.id) { mutableIntStateOf(0) }
     var showLyrics by remember { mutableStateOf(false) }
     var position by remember { mutableLongStateOf(0L) }
     var bufferedPosition by remember { mutableLongStateOf(0L) }
@@ -2017,7 +2062,8 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
         }
     }
     var lyricsError by remember(track.id) { mutableStateOf<String?>(null) }
-    if (showLyrics && lyrics == null && lyricsError == null) LaunchedEffect(track.id) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.lyrics(track.id) } }.onSuccess { lyrics = it }.onFailure { lyricsError = it.message ?: "Lyrics unavailable" } }
+    fun retryLyrics() { lyrics = null; lyricsError = null; lyricsRequest++ }
+    if (showLyrics && lyrics == null && lyricsError == null) LaunchedEffect(track.id, lyricsRequest) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.lyrics(track.id) } }.onSuccess { lyrics = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) lyricsError = it.message ?: "Lyrics unavailable" } }
     val lines = lyrics.orEmpty()
     val hasRealTiming = lines.any { it.startMs >= 0 }
     val currentLine = if (lines.isEmpty()) 0 else if (hasRealTiming) lines.indexOfLast { it.startMs in 0..position }.coerceAtLeast(0)
@@ -2034,7 +2080,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
             Crossfade(showLyrics, label = "player page", modifier = Modifier.weight(1f)) { lyricsPage ->
                 if (lyricsPage) {
                     LazyColumn(state = lyricsState, contentPadding = PaddingValues(horizontal = 28.dp, vertical = 220.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                        if (lines.isEmpty()) item { Text(lyricsError ?: "Loading lyrics…", color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall) }
+                        if (lines.isEmpty()) item { Column { Text(lyricsError ?: "Loading lyrics…", color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall); if (lyricsError != null) TextButton(onClick = ::retryLyrics) { Text("Retry") } } }
                         else items(lines.size) { index -> Text(lines[index].text, Modifier.clickable(enabled = lines[index].startMs >= 0) { player.seekTo(lines[index].startMs) }, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .48f), style = if (index == currentLine) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge) }
                     }
                 } else {
@@ -2058,7 +2104,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
                     }
                 }
             }
-            NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) { NavigationBarItem(!showLyrics, { showLyrics = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }); NavigationBarItem(showLyrics, { showLyrics = true }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }) }
+            NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) { NavigationBarItem(!showLyrics, { showLyrics = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }); NavigationBarItem(showLyrics, { if (lyricsError != null) retryLyrics(); showLyrics = true }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }) }
         }
     }
 }

@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.4] - 2026-11-02
+
+### Fixed
+- Mute the entire playback-attestation WebView before navigation so its hidden YouTube player cannot temporarily take audio focus and start music playback without sound.
+- Keep the existing JavaScript silence guard as a compatibility fallback for older Android System WebView versions.
+
 ## [5.3] - 2026-11-01
 
 ### Fixed

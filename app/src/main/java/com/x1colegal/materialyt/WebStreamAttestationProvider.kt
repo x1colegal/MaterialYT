@@ -7,6 +7,8 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
@@ -71,6 +73,17 @@ object WebStreamAttestationProvider {
             main.post {
                 val webView = WebView(MaterialYtApp.instance.applicationContext)
                 view = webView
+                // JavaScript muting happens inside YouTube's player and may be too late: the
+                // Chromium media pipeline can already have created an AudioTrack and taken audio
+                // focus, briefly silencing the real ExoPlayer. Mute the whole WebView before any
+                // page or media pipeline exists. Keep the JS guard below for older WebView builds
+                // that do not expose MUTE_AUDIO (notably devices on Android 5-7).
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.MUTE_AUDIO)) {
+                    WebViewCompat.setAudioMuted(webView, true)
+                    AppLog.event("WEB playback attestation WebView audio muted at provider level")
+                } else {
+                    AppLog.event("WEB playback attestation WebView provider mute unavailable; using JS silence guard")
+                }
                 webView.settings.javaScriptEnabled = true
                 webView.settings.domStorageEnabled = true
                 // Keep autoplay blocked until the page's player and every HTML media element

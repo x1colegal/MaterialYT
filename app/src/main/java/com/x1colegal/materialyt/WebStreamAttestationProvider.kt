@@ -39,7 +39,12 @@ object WebStreamAttestationProvider {
     }
 
     private fun runtime(origin: String, userAgent: String, videoId: String): Runtime {
-        val key = "$origin\u0000$userAgent\u0000${YouTubeRepository.cookies(origin)}"
+        // WebView's CookieManager is process-wide and exposes cookie updates to an existing
+        // WebView. Including the complete cookie header in this identity made YouTube's own
+        // PoToken/attestation cookie mutations look like a login change: the ready runtime was
+        // destroyed and rebuilt repeatedly in the middle of one SABR session. A later rebuild
+        // could remain waiting for attmp while playback stayed in BUFFERING forever.
+        val key = "$origin\u0000$userAgent"
         var current = runtime
         if (current == null || sessionKey != key) {
             current?.close()

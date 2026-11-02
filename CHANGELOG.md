@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.5] - 2026-11-02
+
+### Fixed
+- Reuse the initialized playback-attestation WebView when YouTube updates its cookies during PoToken or attestation requests.
+- Prevent an unnecessary attestation runtime rebuild from leaving SABR playback permanently stuck on `Buffering media…`.
+
 ## [5.4] - 2026-11-02
 
 ### Fixed

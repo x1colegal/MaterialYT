@@ -49,12 +49,16 @@ internal class ModernSabrStream(
     /** Supply ExoPlayer's real media time so a byte-range open never has to guess through VBR. */
     @Synchronized
     fun hintPlaybackTime(positionMs: Long) {
-        hintedPlaybackTimeMs = positionMs.coerceAtLeast(0L)
+        val normalizedPositionMs = positionMs.coerceAtLeast(0L)
+        hintedPlaybackTimeMs = normalizedPositionMs
         hintCreatedAtMs = SystemClock.elapsedRealtime()
-        AppLog.event("SABR seek hint id=$id positionMs=$positionMs")
-        if (positionMs > 0L && videoConfig != null && kotlin.math.abs(positionMs - requestedStartMs) >= SEEK_COALESCE_MS) {
-            val position = positionForTime(positionMs, videoConfig.durationMs, videoConfig.videoFormat.contentLength)
-            restartAt(positionMs, video = true, position = position, source = "hint")
+        AppLog.event("SABR seek hint id=$id positionMs=$normalizedPositionMs")
+        // Zero is a real seek target. Ignoring it leaves a session previously cold-started at a
+        // history position (for example 03:00) anchored there forever, so no bytes covering the
+        // beginning can ever arrive. Avoid restarting only when this session is already at zero.
+        if (videoConfig != null && kotlin.math.abs(normalizedPositionMs - requestedStartMs) >= SEEK_COALESCE_MS) {
+            val position = positionForTime(normalizedPositionMs, videoConfig.durationMs, videoConfig.videoFormat.contentLength)
+            restartAt(normalizedPositionMs, video = true, position = position, source = "hint")
         }
     }
 

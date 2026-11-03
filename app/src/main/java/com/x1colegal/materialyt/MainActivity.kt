@@ -3645,6 +3645,16 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         val listener = object : Player.Listener {
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
                 if (reason != Player.DISCONTINUITY_REASON_SEEK) return
+                val duration = player.duration
+                if (duration > 0L && newPosition.positionMs >= duration) {
+                    // The exact duration is one position past the final playable sample. Opening a
+                    // SABR DataSource there produces a zero-length range and ExoPlayer can remain
+                    // buffering forever. Land on the last playable second instead.
+                    val lastPlayablePosition = (duration - 1_000L).coerceAtLeast(0L)
+                    AppLog.event("SABR endpoint seek clamped video=$videoId requested=${newPosition.positionMs} target=$lastPlayablePosition duration=$duration")
+                    player.seekTo(lastPlayablePosition)
+                    return
+                }
                 val sabr = sabrPlayback ?: return
                 val video = selectedStream?.sabrFormat ?: return
                 val audio = selectedAudio?.sabrFormat ?: return

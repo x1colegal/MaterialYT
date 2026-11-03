@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.6] - 2026-11-03
+
+### Fixed
+- Restart a SABR session at the beginning when seeking from a restored history position to `00:00`.
+- Clamp seeks at the exact media duration to the final playable second, avoiding an empty byte range that remained stuck buffering.
+
 ## [5.5] - 2026-11-02
 
 ### Fixed

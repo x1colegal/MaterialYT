@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.7] - 2026-11-04
+
+### Fixed
+- Rebind reused `PlayerView` instances to the new ExoPlayer when opening another video, preventing a black PiP window.
+- Reset and refresh the PiP aspect ratio for every new player instead of retaining the previous video's shape.
+
 ## [5.6] - 2026-11-03
 
 ### Fixed

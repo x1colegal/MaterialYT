@@ -270,7 +270,10 @@ enum class AppColor(val title: String, val seed: Long) {
 class MainActivity : ComponentActivity() {
     companion object { private const val ACTION_PIP_TOGGLE = "com.x1colegal.materialyt.PIP_TOGGLE" }
     private var player: ExoPlayer? = null
-    fun registerCurrentPlayer(p: ExoPlayer) { player = p }
+    fun registerCurrentPlayer(p: ExoPlayer) {
+        if (player !== p) pipAspectRatio = Rational(16, 9)
+        player = p
+    }
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
     private var playerUiActive = false
@@ -567,6 +570,11 @@ class MainActivity : ComponentActivity() {
 
 
     fun visiblePlayerView(view: PlayerView?) { visiblePlayerView = view }
+    fun clearVisiblePlayerView(owner: ExoPlayer) {
+        // Disposal of the previous video's effect may run after the replacement player has
+        // already registered its reused AndroidView. Never clear that new PiP surface.
+        if (player === owner) visiblePlayerView = null
+    }
 
     val isMusicPlayerActive: Boolean get() = musicSystemBarsActive
 
@@ -3723,7 +3731,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             mediaSession.release()
             activity.fullscreen(false)
             activity.videoPlayerActive(false)
-            activity.visiblePlayerView(null)
+            activity.clearVisiblePlayerView(player)
             player.removeListener(listener)
             player.release()
         }
@@ -4053,6 +4061,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             },
                             modifier = Modifier.fillMaxSize(),
                             update = {
+                                if (it.player !== player) it.player = player
                                 currentPlayerView = it
                                 it.useController = false
                                 it.hideController()
@@ -4099,6 +4108,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 } },
                 modifier = Modifier.fillMaxSize().background(ComposeColor.Black),
                 update = {
+                    if (it.player !== player) it.player = player
                     it.setBackgroundColor(Color.BLACK)
                     it.setShutterBackgroundColor(Color.BLACK)
                     currentPlayerView = it
@@ -4113,7 +4123,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
             AndroidView(
                 factory = { context -> PlayerView(context).apply { this.player = player; useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE }); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this); (findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_position)?.parent as? View)?.let { bottomControls -> val inset = (8f * context.resources.displayMetrics.density).roundToInt(); bottomControls.setPadding(bottomControls.paddingLeft, bottomControls.paddingTop, bottomControls.paddingRight, maxOf(bottomControls.paddingBottom, inset)) }; hideController(); controllerVisible = false } } },
-                update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
+                update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
                 modifier = Modifier.fillMaxSize()
             )
             if (!hasStartedPlayback) videoLoadMessage?.let { message ->
@@ -4138,7 +4148,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 Row(Modifier.fillMaxSize()) {
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                            AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
+                            AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
                             if (!hasStartedPlayback) videoLoadMessage?.let { message ->
                                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                             }
@@ -4275,7 +4285,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             } else LazyColumn(Modifier.fillMaxSize()) {
                 item {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                        AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
+                        AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
                         if (!hasStartedPlayback) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
                         if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                     }

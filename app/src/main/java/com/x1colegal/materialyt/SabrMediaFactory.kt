@@ -51,7 +51,7 @@ object SabrMediaFactory {
                 else -> null
             },
             refreshPoToken = if (info.clientId == 1) ({
-                decode(YouTubeRepository.refreshWebSabrPoToken(info))
+                YouTubeRepository.refreshWebSabrPoToken(info).let { it to decode(it) }
             }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
@@ -85,7 +85,7 @@ object SabrMediaFactory {
                 else -> null
             },
             refreshPoToken = if (info.clientId == 1) ({
-                decode(YouTubeRepository.refreshWebSabrPoToken(info))
+                YouTubeRepository.refreshWebSabrPoToken(info).let { it to decode(it) }
             }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")

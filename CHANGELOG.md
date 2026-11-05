@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.8] - 2026-11-04
+
+### Fixed
+- Rebuild the BotGuard runtime when SABR explicitly requires fresh stream attestation instead of minting another proof from the rejected challenge.
+- Replace the streaming PoToken atomically in both the SABR endpoint and protobuf request while preserving buffered media, playback position, and continuation state.
+- Recover immediately when stream protection escalates from pending to required without being blocked by the normal refresh cooldown.
+
 ## [5.7] - 2026-11-04
 
 ### Fixed

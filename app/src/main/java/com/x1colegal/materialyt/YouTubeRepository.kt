@@ -2091,9 +2091,16 @@ object YouTubeRepository {
             ?: error("WEB SABR session has no PoToken visitor binding")
         val binding = info.poTokenStreamingBinding.takeIf(String::isNotBlank)
             ?: error("WEB SABR session has no streaming PoToken binding")
-        val refreshed = WebPoTokenProvider.get(info.videoId, visitor, binding, "https://www.youtube.com", WEB_PLAYER_UA)
+        val refreshed = WebPoTokenProvider.get(
+            info.videoId,
+            visitor,
+            binding,
+            "https://www.youtube.com",
+            WEB_PLAYER_UA,
+            forceFreshChallenge = true,
+        )
             .streamingDataPoToken
-        AppLog.event("SABR WEB streaming PoToken refreshed in place video=${info.videoId}")
+        AppLog.event("SABR WEB streaming PoToken refreshed from a fresh challenge video=${info.videoId}")
         return refreshed
     }
 

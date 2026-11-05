@@ -42,7 +42,8 @@ internal class SabrConfig(
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
-    val refreshPoToken: (() -> ByteArray)? = null,
+    /** Returns the same fresh streaming PoToken in its URL-safe and decoded protobuf forms. */
+    val refreshPoToken: (() -> Pair<String, ByteArray>)? = null,
 )
 
 /**
@@ -160,6 +161,7 @@ internal class SabrSession(
         var emptySessionRefreshes = 0
         var startupEmptyResponses = 0
         var lastProtectionRefreshAt = 0L
+        var lastProtectionRefreshStatus = 0L
         var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
@@ -363,15 +365,25 @@ internal class SabrSession(
             // (proven live: tests/probe-mweb-sabr.mjs). Bail FAST with a clear reason instead of grinding
             // to the dry cap — the roster/stall fallback then moves to a client that can attest.
             attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
-            if (attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
+            val protectionEscalated = protStatus > lastProtectionRefreshStatus
+            val protectionRefreshDue = protStatus >= SabrProtection.ATTESTATION_REQUIRED && protectionEscalated ||
+                attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
                 System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
-            ) {
+            if (protectionRefreshDue) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
+                    lastProtectionRefreshStatus = protStatus
                     runCatching { refresh() }
-                        .onSuccess {
-                            poToken = it
-                            AppLog.event("SABR audio refreshed streaming PoToken in place protection=$protStatus")
+                        .onSuccess { refreshed ->
+                            // The WEB streamer validates both copies. Updating only the protobuf
+                            // while leaving the rejected `pot=` in the endpoint makes the request
+                            // internally inconsistent and escalates pending protection to required.
+                            poToken = refreshed.second
+                            url = url.toHttpUrlOrNull()?.newBuilder()
+                                ?.setQueryParameter("pot", refreshed.first)
+                                ?.build()?.toString() ?: url
+                            attestationStalls = 0
+                            AppLog.event("SABR audio installed fresh streaming PoToken in URL and request protection=$protStatus")
                         }
                         .onFailure { AppLog.failure("SABR audio streaming PoToken refresh", it) }
                 }

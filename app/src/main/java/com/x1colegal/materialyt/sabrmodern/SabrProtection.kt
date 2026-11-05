@@ -9,8 +9,9 @@ package com.x1colegal.materialyt.sabrmodern
  * roster/stall fallback moves on to a client that can attest. JVM-unit-tested ([SabrProtectionTest]).
  */
 internal object SabrProtection {
-    /** `STREAM_PROTECTION_STATUS`: 1 = OK, 2 = limited playback, 3 = protection rejected. */
+    /** Names come from the bundled StreamProtectionStatus protobuf schema. */
     const val ATTESTATION_PENDING = 2L
+    const val ATTESTATION_REQUIRED = 3L
     const val REFRESH_AFTER_STALLS = 2
     const val REFRESH_COOLDOWN_MS = 30_000L
     /** Consecutive no-media responses under active protection before it's an attestation cap. */

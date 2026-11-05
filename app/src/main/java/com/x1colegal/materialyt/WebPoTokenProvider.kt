@@ -41,10 +41,22 @@ object WebPoTokenProvider {
         streamingContentBinding: String,
         origin: String = "https://www.youtube.com",
         userAgent: String = YouTubeRepository.WEB_PLAYER_UA,
+        forceFreshChallenge: Boolean = false,
     ): WebPoTokenSession = synchronized(lock) {
         require(requestedVisitorData.isNotBlank()) { "YouTube returned empty visitorData" }
         val cookies = YouTubeRepository.cookies(origin)
         val requestedSessionKey = "$origin\u0000$userAgent\u0000$requestedVisitorData\u0000$cookies"
+        if (forceFreshChallenge) {
+            // STREAM_PROTECTION_STATUS=ATTESTATION_REQUIRED means the server rejected the proof
+            // minted by this BotGuard challenge. Minting the same binding with the same minter is
+            // not a renewal: it reproduces the rejected proof. Rebuild the runtime so GenerateIT
+            // supplies fresh token material before the active SABR session retries.
+            runtime?.close()
+            runtime = null
+            visitorData = null
+            sessionKey = null
+            AppLog.event("WEB PoToken invalidated for fresh stream-protection challenge video=$videoId")
+        }
         for (attempt in 0..1) {
             try {
                 var current = runtime

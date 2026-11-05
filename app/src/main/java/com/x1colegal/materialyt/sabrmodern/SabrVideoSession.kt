@@ -36,7 +36,8 @@ internal class SabrVideoConfig(
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
     val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
-    val refreshPoToken: (() -> ByteArray)? = null,
+    /** Returns the same fresh streaming PoToken in its URL-safe and decoded protobuf forms. */
+    val refreshPoToken: (() -> Pair<String, ByteArray>)? = null,
 )
 
 /**
@@ -152,6 +153,7 @@ internal class SabrVideoSession(
         var emptySessionRefreshes = 0
         var startupEmptyResponses = 0
         var lastProtectionRefreshAt = 0L
+        var lastProtectionRefreshStatus = 0L
         var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
@@ -368,15 +370,22 @@ internal class SabrVideoSession(
             // Attestation cap (see SabrSession): a client that can't satisfy stream protection is served a
             // free window then only STREAM_PROTECTION_STATUS>=2 — bail fast so the fallback moves on.
             attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
-            if (attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
+            val protectionEscalated = protStatus > lastProtectionRefreshStatus
+            val protectionRefreshDue = protStatus >= SabrProtection.ATTESTATION_REQUIRED && protectionEscalated ||
+                attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
                 System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
-            ) {
+            if (protectionRefreshDue) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
+                    lastProtectionRefreshStatus = protStatus
                     runCatching { refresh() }
-                        .onSuccess {
-                            poToken = it
-                            AppLog.event("SABR video refreshed streaming PoToken in place protection=$protStatus")
+                        .onSuccess { refreshed ->
+                            poToken = refreshed.second
+                            url = url.toHttpUrlOrNull()?.newBuilder()
+                                ?.setQueryParameter("pot", refreshed.first)
+                                ?.build()?.toString() ?: url
+                            attestationStalls = 0
+                            AppLog.event("SABR video installed fresh streaming PoToken in URL and request protection=$protStatus")
                         }
                         .onFailure { AppLog.failure("SABR video streaming PoToken refresh", it) }
                 }

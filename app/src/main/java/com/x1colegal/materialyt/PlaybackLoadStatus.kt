@@ -13,7 +13,10 @@ object PlaybackLoadStatus {
         mutableMessage.value = PlaybackLoadMessage(mediaId, text)
     }
 
-    fun clear(mediaId: String) {
-        if (mutableMessage.value?.mediaId == mediaId) mutableMessage.value = null
+    fun clear(mediaId: String, expectedText: String? = null) {
+        val current = mutableMessage.value
+        if (current?.mediaId == mediaId && (expectedText == null || current.text == expectedText)) {
+            mutableMessage.value = null
+        }
     }
 }

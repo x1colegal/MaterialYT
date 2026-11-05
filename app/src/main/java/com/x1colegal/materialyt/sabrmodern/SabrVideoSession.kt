@@ -1,6 +1,7 @@
 package com.x1colegal.materialyt.sabrmodern
 
 import com.x1colegal.materialyt.AppLog
+import com.x1colegal.materialyt.PlaybackLoadStatus
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -15,6 +16,7 @@ import timber.log.Timber
  * [urlPot] is the videoId-bound pot appended as `&pot=` (both null/identity for a direct client).
  */
 internal class SabrVideoConfig(
+    val mediaId: String,
     val sabrUrl: String,
     val ustreamerConfig: ByteArray,
     val videoFormat: SabrMessages.Format,
@@ -161,7 +163,16 @@ internal class SabrVideoSession(
                 val delay = backoffTimeMs.coerceAtMost(30_000L)
                 backoffTimeMs = 0
                 AppLog.event("SABR video policy backoff=${delay}ms")
-                Thread.sleep(delay)
+                var remaining = delay
+                var shown = ""
+                while (remaining > 0 && !cancelled) {
+                    shown = "SABR requested backoff, waiting ${(remaining + 999L) / 1_000L}s"
+                    PlaybackLoadStatus.show(config.mediaId, shown)
+                    val step = minOf(remaining, 1_000L)
+                    Thread.sleep(step)
+                    remaining -= step
+                }
+                PlaybackLoadStatus.clear(config.mediaId, shown)
                 if (cancelled) return
             }
             iter++

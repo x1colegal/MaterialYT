@@ -3203,7 +3203,12 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 
     LaunchedEffect(item.id) {
         PlaybackLoadStatus.message.collect { status ->
-            if (!hasStartedPlayback && status?.mediaId == item.id) shortLoadMessage = status.text
+            if (status?.mediaId == item.id &&
+                (!hasStartedPlayback || status.text.startsWith("SABR requested backoff"))) {
+                shortLoadMessage = status.text
+            } else if (shortLoadMessage?.startsWith("SABR requested backoff") == true) {
+                shortLoadMessage = null
+            }
         }
     }
 
@@ -3307,7 +3312,8 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     shortLoadMessage = null
                     PlaybackLoadStatus.clear(item.id)
                 }
-                else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == item.id) {
+                else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == item.id &&
+                    PlaybackLoadStatus.message.value?.text?.startsWith("SABR requested backoff") != true) {
                     PlaybackLoadStatus.show(item.id, "Buffering media…")
                 }
                 if (state == Player.STATE_ENDED) {
@@ -3374,7 +3380,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 }
             }
             error?.let { Text(it, color = ComposeColor.White, modifier = Modifier.align(Alignment.Center).background(ComposeColor.Black.copy(alpha = .7f)).padding(16.dp)) }
-            if (!hasStartedPlayback) shortLoadMessage?.let { message ->
+            if (!hasStartedPlayback || shortLoadMessage?.startsWith("SABR requested backoff") == true) shortLoadMessage?.let { message ->
                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
             }
             Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Bottom) {
@@ -3671,7 +3677,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             override fun onPlaybackStateChanged(state: Int) {
                 playbackState = state
                 if (state == Player.STATE_READY) PlaybackLoadStatus.clear(videoId)
-                else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == videoId) {
+                else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == videoId &&
+                    PlaybackLoadStatus.message.value?.text?.startsWith("SABR requested backoff") != true) {
                     PlaybackLoadStatus.show(videoId, "Buffering media…")
                 }
                 if (state == Player.STATE_ENDED) autoplayPending = true
@@ -4126,7 +4133,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
                 modifier = Modifier.fillMaxSize()
             )
-            if (!hasStartedPlayback) videoLoadMessage?.let { message ->
+            if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message ->
                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
             }
             if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
@@ -4149,7 +4156,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                             AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
-                            if (!hasStartedPlayback) videoLoadMessage?.let { message ->
+                            if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message ->
                                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                             }
                             if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
@@ -4286,7 +4293,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 item {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                         AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
-                        if (!hasStartedPlayback) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
+                        if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
                         if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                     }
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {

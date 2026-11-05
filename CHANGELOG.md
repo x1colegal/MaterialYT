@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.9] - 2026-11-04
+
+### Fixed
+- Select the video's explicitly tagged original-language audio instead of treating the session's default dubbed track as the original.
+- Show a visible countdown when YouTube's SABR policy requests a temporary backoff instead of leaving playback apparently stuck.
+
 ## [5.8] - 2026-11-04
 
 ### Fixed

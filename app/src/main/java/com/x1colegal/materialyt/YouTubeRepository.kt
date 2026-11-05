@@ -89,6 +89,24 @@ data class VideoInteractionState(
     val related: List<FeedItem> = emptyList(),
     val relatedContinuation: String? = null,
 )
+
+private fun isOriginalAudioTrack(audioTrack: JSONObject?, trackName: String, xtags: String): Boolean {
+    val decodedTags = runCatching {
+        val normalized = xtags.replace('-', '+').replace('_', '/')
+        android.util.Base64.decode(
+            normalized + "=".repeat((4 - normalized.length % 4) % 4),
+            android.util.Base64.DEFAULT,
+        ).toString(Charsets.UTF_8)
+    }.getOrDefault("")
+    return when {
+        // WEB marks auto-dubbed tracks explicitly. `audioIsDefault` may still be true for one of
+        // these because it describes the session's default language, not the video's source audio.
+        decodedTags.contains("dubbed", ignoreCase = true) -> false
+        decodedTags.contains("original", ignoreCase = true) -> true
+        trackName.contains("original", ignoreCase = true) -> true
+        else -> audioTrack?.optBoolean("audioIsDefault", false) == true
+    }
+}
 data class RelatedVideoPage(val items: List<FeedItem>, val continuation: String? = null)
 data class LyricLine(val text: String, val startMs: Long, val endMs: Long)
 data class CommunityPost(val id: String, val text: String, val published: String, val likes: String, val comments: String, val image: String = "", val avatar: String = "")
@@ -1730,7 +1748,7 @@ object YouTubeRepository {
             val audio = mime.startsWith("audio/")
             val audioTrack = item.optJSONObject("audioTrack")
             val trackName = audioTrack?.optString("displayName").orEmpty().ifBlank { audioTrack?.optString("id").orEmpty() }
-            val originalAudio = trackName.contains("original", true) || audioTrack?.optBoolean("audioIsDefault", false) == true
+            val originalAudio = isOriginalAudioTrack(audioTrack, trackName, item.optString("xtags"))
             PlayableStream(streamUrl, codec, item.optInt("height"), item.optInt("fps"), item.optInt("bitrate"), audio, !audio && !item.has("audioQuality"), originalAudio, trackName, audioTrack?.optString("id").orEmpty())
         }
         AppLog.event("player streams=${streams.size} formats=${formats.size} video=$videoId")
@@ -1790,6 +1808,7 @@ object YouTubeRepository {
                 val audioTrack = item.optJSONObject("audioTrack")
                 val trackName = audioTrack?.optString("displayName").orEmpty()
                     .ifBlank { audioTrack?.optString("id").orEmpty() }
+                val xtags = item.optString("xtags")
                 val contentLength = item.optString("contentLength").toLongOrNull() ?: 0L
                 // The positional SABR reassembler needs a finite target length. Do not expose
                 // live/unknown-length entries as selectable VOD qualities and crash at playback.
@@ -1803,10 +1822,9 @@ object YouTubeRepository {
                     bitrate = item.optInt("bitrate"),
                     contentLength = contentLength,
                     lastModified = item.optString("lastModified").toLongOrNull() ?: 0L,
-                    xtags = item.optString("xtags"),
+                    xtags = xtags,
                     audio = audio,
-                    originalAudio = audioTrack?.optBoolean("audioIsDefault", false) == true
-                        || trackName.contains("original", true),
+                    originalAudio = isOriginalAudioTrack(audioTrack, trackName, xtags),
                     audioTrackName = trackName,
                     audioTrackId = audioTrack?.optString("id").orEmpty()
                 )

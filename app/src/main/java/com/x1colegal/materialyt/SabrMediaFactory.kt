@@ -32,6 +32,7 @@ object SabrMediaFactory {
         )
         val id = streamId(info, video, audio)
         val config = SabrVideoConfig(
+            info.videoId,
             info.serverAbrStreamingUrl, decode(info.videoPlaybackUstreamerConfig),
             video.wireFormat(), audio.wireFormat(), decode(info.streamingPoToken), clientInfo(info),
             info.userAgent, { it }, durationMs = info.durationMs,
@@ -67,6 +68,7 @@ object SabrMediaFactory {
         require(audio.audio && audio.contentLength > 0) { "SABR audio has no content length" }
         val id = "${info.videoId}-audio-${audio.itag}"
         val config = SabrConfig(
+            info.videoId,
             info.serverAbrStreamingUrl, decode(info.videoPlaybackUstreamerConfig), audio.wireFormat(),
             decode(info.streamingPoToken), clientInfo(info), info.userAgent, { it }, durationMs = info.durationMs,
             reloadPlayer = { token ->

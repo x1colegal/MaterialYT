@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.10] - 2026-11-06
+
+### Fixed
+- Display SABR backoff countdowns only while the player is actively buffering so routine background waits do not cover playing video, Shorts, or music.
+- Preserve the active `VideoScreen` composition, `ExoPlayer` instance, and `PlayerView` surface across video transitions and switch target views cleanly so Picture-in-Picture never turns black when advancing to the next video.
+
 ## [5.9] - 2026-11-04
 
 ### Fixed

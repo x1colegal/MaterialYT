@@ -198,6 +198,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 currentTrack?.id?.let { id ->
+                    PlaybackLoadStatus.setBuffering(id, playbackState == Player.STATE_BUFFERING)
                     if (playbackState == Player.STATE_READY) PlaybackLoadStatus.clear(id)
                     else if (playbackState == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == id &&
                         PlaybackLoadStatus.message.value?.text?.startsWith("SABR requested backoff") != true) {

@@ -175,7 +175,7 @@ internal class SabrSession(
                 var shown = ""
                 while (remaining > 0 && !cancelled) {
                     shown = "SABR requested backoff, waiting ${(remaining + 999L) / 1_000L}s"
-                    PlaybackLoadStatus.show(config.mediaId, shown)
+                    PlaybackLoadStatus.showSabrBackoff(config.mediaId, shown)
                     val step = minOf(remaining, 1_000L)
                     Thread.sleep(step)
                     remaining -= step

@@ -274,6 +274,10 @@ class MainActivity : ComponentActivity() {
         if (player !== p) pipAspectRatio = Rational(16, 9)
         player = p
     }
+    fun isCurrentPlayer(p: ExoPlayer): Boolean = player === p
+    fun resetPipAspectRatioForNewVideo() {
+        pipAspectRatio = Rational(16, 9)
+    }
     private var visiblePlayerView: PlayerView? = null
     private var videoPlayerActive = false
     private var playerUiActive = false
@@ -898,17 +902,15 @@ private fun AppScaffold(
                 }
             }
             activeVideoUrl?.let { videoUrl ->
-                key(videoUrl) {
-                    VideoScreen(activity, videoUrl, codec, audioCodec, quality, onPlayer,
-                        onPlayerMode = { playerMode = it },
-                        onOpenVideo = { nextUrl -> activeVideoUrl = nextUrl; playerMode = true },
-                        onOpenChannel = { channelUrl ->
-                            activeChannelUrl = channelUrl
-                            playerMode = false
-                        }) {
-                        activeVideoUrl = null
+                VideoScreen(activity, videoUrl, codec, audioCodec, quality, onPlayer,
+                    onPlayerMode = { playerMode = it },
+                    onOpenVideo = { nextUrl -> activeVideoUrl = nextUrl; playerMode = true },
+                    onOpenChannel = { channelUrl ->
+                        activeChannelUrl = channelUrl
                         playerMode = false
-                    }
+                    }) {
+                    activeVideoUrl = null
+                    playerMode = false
                 }
             }
         }
@@ -3308,6 +3310,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 PlaybackLoadStatus.clear(item.id)
             }
             override fun onPlaybackStateChanged(state: Int) {
+                PlaybackLoadStatus.setBuffering(item.id, state == Player.STATE_BUFFERING)
                 if (state == Player.STATE_READY) {
                     shortLoadMessage = null
                     PlaybackLoadStatus.clear(item.id)
@@ -3324,6 +3327,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         }
         player.addListener(playbackListener)
         onDispose {
+            PlaybackLoadStatus.setBuffering(item.id, false)
             PlaybackLoadStatus.clear(item.id)
             lifecycleOwner.lifecycle.removeObserver(observer)
             player.removeListener(playbackListener)
@@ -3577,17 +3581,31 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var phonePanel by remember(videoId) { mutableStateOf(VideoPhonePanel.MAIN) }
     var fullscreen by remember { mutableStateOf(false) }
     var speed by remember { mutableFloatStateOf(1f) }
-    var playerGeneration by remember(videoId) { mutableIntStateOf(0) }
+    var playerGeneration by remember { mutableIntStateOf(0) }
     var decoderRecoveryPosition by remember(videoId) { mutableStateOf<Long?>(null) }
     var initialStartApplied by remember(videoId) { mutableStateOf(false) }
-    val player = remember(videoId, playerGeneration) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
+    val player = remember(playerGeneration) { PlayerFactory.bufferedPlayer(context).also(onPlayer) }
     var isMinimized by remember { mutableStateOf(false) }
+    var miniplayerDismissed by remember { mutableStateOf(false) }
+    var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
+    fun attachPlayerView(view: PlayerView) {
+        if (currentPlayerView !== view) {
+            PlayerView.switchTargetView(player, currentPlayerView, view)
+            currentPlayerView = view
+        } else if (view.player !== player) {
+            view.player = player
+        }
+        activity.visiblePlayerView(view)
+    }
+    LaunchedEffect(url) {
+        miniplayerDismissed = false
+        if (!activity.pipMode) isMinimized = false
+        activity.resetPipAspectRatioForNewVideo()
+    }
     LaunchedEffect(isMinimized, fullscreen) {
         if (!fullscreen) activity.fullscreen(false)
         onPlayerMode?.invoke(!isMinimized)
     }
-    var miniplayerDismissed by remember { mutableStateOf(false) }
-    var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(true) }
     var autoplayPending by remember(videoId) { mutableStateOf(false) }
     var autoplaySeconds by remember(videoId) { mutableIntStateOf(5) }
@@ -3628,7 +3646,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             MergingMediaSource(true, videoSource, audioSource)
             } else videoSource
         }
-        val currentPosition = player.currentPosition.coerceAtLeast(0L)
+        val currentPosition = if (selectedStream != null) player.currentPosition.coerceAtLeast(0L) else 0L
         val position = if (currentPosition > 0L) currentPosition else resumeStartMs.takeIf { !initialStartApplied } ?: 0L
         if (position > 0L && sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
             SabrMediaFactory.hintSeek(sabr, stream.sabrFormat, audio.sabrFormat, position)
@@ -3636,6 +3654,11 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position)
         player.setPlaybackSpeed(speed); player.playWhenReady = true
         selectedStream = stream
+        currentPlayerView?.let { view ->
+            attachPlayerView(view)
+            view.requestLayout()
+            view.invalidate()
+        }
     }
     val mediaSession = remember(player) { MediaSessionCompat(context, "MaterialYT Video") }
     LaunchedEffect(videoMetadata, channelInfo) {
@@ -3646,7 +3669,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             activity.showPlaybackNotification(mediaSession, title, author, thumb, player.isPlaying)
         }
     }
-    DisposableEffect(player, videoId) {
+    DisposableEffect(player) {
         activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         activity.videoPlayerActive(true)
         mediaSession.setCallback(object : MediaSessionCompat.Callback() {
@@ -3656,6 +3679,20 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             override fun onSeekTo(pos: Long) = player.seekTo(pos)
         })
         mediaSession.isActive = true
+        onDispose {
+            mediaSession.isActive = false
+            mediaSession.release()
+            if (activity.isCurrentPlayer(player)) {
+                activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                activity.stopPlaybackNotification()
+                activity.fullscreen(false)
+                activity.videoPlayerActive(false)
+            }
+            activity.clearVisiblePlayerView(player)
+            player.release()
+        }
+    }
+    DisposableEffect(player, videoId) {
         val listener = object : Player.Listener {
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
                 if (reason != Player.DISCONTINUITY_REASON_SEEK) return
@@ -3676,6 +3713,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             override fun onPlaybackStateChanged(state: Int) {
                 playbackState = state
+                PlaybackLoadStatus.setBuffering(videoId, state == Player.STATE_BUFFERING)
                 if (state == Player.STATE_READY) PlaybackLoadStatus.clear(videoId)
                 else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == videoId &&
                     PlaybackLoadStatus.message.value?.text?.startsWith("SABR requested backoff") != true) {
@@ -3709,6 +3747,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 if (resumeStartMs > 0L) initialStartApplied = true
                 decoderRecoveryPosition = null
                 PlaybackLoadStatus.clear(videoId)
+                currentPlayerView?.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_shutter)?.visibility = View.INVISIBLE
             }
             override fun onVideoSizeChanged(videoSize: com.google.android.exoplayer2.video.VideoSize) {
                 activity.updatePipAspectRatio(videoSize.width, videoSize.height, videoSize.pixelWidthHeightRatio)
@@ -3732,15 +3771,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
         player.addListener(listener)
         onDispose {
-            activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            activity.stopPlaybackNotification()
-            mediaSession.isActive = false
-            mediaSession.release()
-            activity.fullscreen(false)
-            activity.videoPlayerActive(false)
-            activity.clearVisiblePlayerView(player)
+            PlaybackLoadStatus.setBuffering(videoId, false)
             player.removeListener(listener)
-            player.release()
         }
     }
     val autoplayNext = if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) {
@@ -4009,6 +4041,31 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         return
     }
 
+    if (activity.pipMode) {
+        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+            AndroidView(
+                factory = { context -> PlayerView(context).apply {
+                    setBackgroundColor(Color.BLACK)
+                    setShutterBackgroundColor(Color.BLACK)
+                    useController = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+                    attachPlayerView(this)
+                } },
+                modifier = Modifier.fillMaxSize().background(ComposeColor.Black),
+                update = {
+                    it.setBackgroundColor(Color.BLACK)
+                    it.setShutterBackgroundColor(Color.BLACK)
+                    it.useController = false
+                    it.hideController()
+                    attachPlayerView(it)
+                }
+            )
+            if (autoplayPending && autoplayNext != null) Box(Modifier.matchParentSize().background(ComposeColor.Black))
+        }
+        return
+    }
+
     if (isMinimized) {
         var downwardDrag by remember { mutableFloatStateOf(0f) }
         val animatedOffset by animateFloatAsState(
@@ -4058,21 +4115,17 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         AndroidView(
                             factory = {
                                 PlayerView(it).apply {
-                                    this.player = player
                                     useController = false
                                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                                     setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
-                                    currentPlayerView = this
-                                    activity.visiblePlayerView(this)
+                                    attachPlayerView(this)
                                 }
                             },
                             modifier = Modifier.fillMaxSize(),
                             update = {
-                                if (it.player !== player) it.player = player
-                                currentPlayerView = it
                                 it.useController = false
                                 it.hideController()
-                                activity.visiblePlayerView(it)
+                                attachPlayerView(it)
                             }
                         )
                     }
@@ -4100,37 +4153,11 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         return
     }
 
-    if (activity.pipMode) {
+    if (fullscreen) {
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
             AndroidView(
-                factory = { context -> PlayerView(context).apply {
-                    setBackgroundColor(Color.BLACK)
-                    setShutterBackgroundColor(Color.BLACK)
-                    this.player = player
-                    useController = false
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
-                    currentPlayerView = this
-                    activity.visiblePlayerView(this)
-                } },
-                modifier = Modifier.fillMaxSize().background(ComposeColor.Black),
-                update = {
-                    if (it.player !== player) it.player = player
-                    it.setBackgroundColor(Color.BLACK)
-                    it.setShutterBackgroundColor(Color.BLACK)
-                    currentPlayerView = it
-                    it.useController = false
-                    it.hideController()
-                    activity.visiblePlayerView(it)
-                }
-            )
-            if (autoplayPending && autoplayNext != null) Box(Modifier.matchParentSize().background(ComposeColor.Black))
-        }
-    } else if (fullscreen) {
-        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
-            AndroidView(
-                factory = { context -> PlayerView(context).apply { this.player = player; useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE }); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this); (findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_position)?.parent as? View)?.let { bottomControls -> val inset = (8f * context.resources.displayMetrics.density).roundToInt(); bottomControls.setPadding(bottomControls.paddingLeft, bottomControls.paddingTop, bottomControls.paddingRight, maxOf(bottomControls.paddingBottom, inset)) }; hideController(); controllerVisible = false } } },
-                update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) },
+                factory = { context -> PlayerView(context).apply { useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE }); attachPlayerView(this); post { bindPlaylistControls(this); (findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_position)?.parent as? View)?.let { bottomControls -> val inset = (8f * context.resources.displayMetrics.density).roundToInt(); bottomControls.setPadding(bottomControls.paddingLeft, bottomControls.paddingTop, bottomControls.paddingRight, maxOf(bottomControls.paddingBottom, inset)) }; hideController(); controllerVisible = false } } },
+                update = { attachPlayerView(it); bindPlaylistControls(it) },
                 modifier = Modifier.fillMaxSize()
             )
             if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message ->
@@ -4155,7 +4182,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 Row(Modifier.fillMaxSize()) {
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                            AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
+                            AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
                             if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message ->
                                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                             }
@@ -4292,7 +4319,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             } else LazyColumn(Modifier.fillMaxSize()) {
                 item {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                        AndroidView({ PlayerView(it).apply { this.player = player; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); currentPlayerView = this; activity.visiblePlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { if (it.player !== player) it.player = player; currentPlayerView = it; activity.visiblePlayerView(it); bindPlaylistControls(it) })
+                        AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
                         if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
                         if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                     }

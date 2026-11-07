@@ -15,6 +15,7 @@ object PlaybackPreferences {
     @Volatile var videoDecoderMode = DecoderMode.AUTO
     @Volatile var audioDecoderMode = DecoderMode.AUTO
     var prioritizeQualityOverCodec by mutableStateOf(false)
+    var showSabrBackoffDuringBuffering by mutableStateOf(false)
 }
 
 object PlayerFactory {

@@ -5,11 +5,14 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -98,6 +101,30 @@ object WebStreamAttestationProvider {
                 webView.settings.userAgentString = userAgent
                 webView.webChromeClient = WebChromeClient()
                 webView.webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(
+                        view: WebView,
+                        request: WebResourceRequest,
+                    ): WebResourceResponse? {
+                        val path = request.url?.encodedPath.orEmpty()
+                        // Never let the hidden bootstrap watch page report cmt=0 playback/watchtime
+                        // with the user's signed-in cookies and overwrite their watch history.
+                        if (
+                            path.contains("/api/stats/playback") ||
+                            path.contains("/api/stats/watchtime") ||
+                            path.contains("/api/stats/qoe")
+                        ) {
+                            return WebResourceResponse(
+                                "text/plain",
+                                "UTF-8",
+                                204,
+                                "No Content",
+                                emptyMap(),
+                                ByteArrayInputStream(ByteArray(0)),
+                            )
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+
                     override fun onPageFinished(view: WebView, url: String) {
                         if (playbackBootstrapStarted) return
                         playbackBootstrapStarted = true

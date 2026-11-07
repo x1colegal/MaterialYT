@@ -264,7 +264,7 @@ internal class SabrSession(
                 SabrUmp.SNACKBAR_MESSAGE -> snackbarPayload = p.payload.joinToString("") { "%02x".format(it) }
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
                     protStatus = SabrProto.read(p.payload).longAt(1)
-                    AppLog.event("SABR audio protection=$protStatus iter=$iter")
+                    if (protStatus != 1L || iter <= 3) AppLog.event("SABR audio protection=$protStatus iter=$iter")
                     Timber.tag(TAG).d("STREAM_PROTECTION_STATUS=$protStatus (1=OK,2=pending,3=attestation-required)")
                 }
             }
@@ -390,7 +390,11 @@ internal class SabrSession(
                 if (h.isInit) { initWritten = true } else {
                     seen.add(h.seq)
                     if (firstSeq == 0 || h.seq < firstSeq) { firstSeq = h.seq; firstMs = h.startMs }
-                    if (firstWrittenOffset < 0 || h.startRange < firstWrittenOffset) firstWrittenOffset = h.startRange
+                    if (firstWrittenOffset < 0 || h.startRange < firstWrittenOffset) {
+                        val firstLanding = firstWrittenOffset < 0
+                        firstWrittenOffset = h.startRange
+                        if (firstLanding && firstWrittenOffset > 0) buffer.raiseDemandTo(firstWrittenOffset)
+                    }
                     if (h.seq > lastSeq) lastSeq = h.seq
                     val end = h.startMs + h.durMs
                     if (end > bufEndMs) bufEndMs = end

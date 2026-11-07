@@ -261,7 +261,7 @@ internal class SabrVideoSession(
                 SabrUmp.SNACKBAR_MESSAGE -> snackbarPayload = p.payload.joinToString("") { "%02x".format(it) }
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
                     protStatus = SabrProto.read(p.payload).longAt(1)
-                    AppLog.event("SABR video protection=$protStatus iter=$iter")
+                    if (protStatus != 1L || iter <= 3) AppLog.event("SABR video protection=$protStatus iter=$iter")
                     Timber.tag(TAG).d("STREAM_PROTECTION_STATUS=$protStatus (1=OK,2=pending,3=attestation-required)")
                 }
             }
@@ -389,8 +389,10 @@ internal class SabrVideoSession(
                     t.seen.add(h.seq)
                     if (t.firstSeq == 0 || h.seq < t.firstSeq) { t.firstSeq = h.seq; t.firstMs = h.startMs }
                     if (t.firstOff < 0 || h.startRange < t.firstOff) {
+                        val firstLanding = t.firstOff < 0
                         t.firstOff = h.startRange
                         if (t === video) firstVideoOffset = t.firstOff else firstAudioOffset = t.firstOff
+                        if (firstLanding && t.firstOff > 0) t.buffer.raiseDemandTo(t.firstOff)
                     }
                     if (h.seq > t.lastSeq) t.lastSeq = h.seq
                     val end = h.startMs + h.durMs

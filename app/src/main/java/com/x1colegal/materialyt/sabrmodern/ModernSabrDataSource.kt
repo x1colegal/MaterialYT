@@ -18,27 +18,45 @@ internal class ModernSabrStream(
     private val videoConfig: SabrVideoConfig?,
     private val audioConfig: SabrConfig?,
     private val client: OkHttpClient,
+    initialStartMs: Long = 0L,
 ) {
     val videoBuffer: SabrBuffer?
     val audioBuffer: SabrBuffer
     private var session: Runnable
-    private var requestedStartMs = 0L
-    private var hintedPlaybackTimeMs: Long? = null
-    private var hintCreatedAtMs = 0L
+    private var sessionThread: Thread? = null
+    private var requestedStartMs = initialStartMs.coerceAtLeast(0L)
+    private var currentSessionStartMs = 0L
+    private var currentMarginMs = INITIAL_SEEK_MARGIN_MS
+    private var overshootRestarts = 0
+    private var hintedPlaybackTimeMs: Long? = initialStartMs.takeIf { it > 0L }
+    private var hintCreatedAtMs = if (initialStartMs > 0L) SystemClock.elapsedRealtime() else 0L
 
     init {
         val dir = File(MaterialYtApp.instance.cacheDir, "sabr-modern").apply { mkdirs() }
+        val coldStartMs = if (requestedStartMs > 0L) (requestedStartMs - currentMarginMs).coerceAtLeast(0L) else 0L
+        currentSessionStartMs = coldStartMs
         if (videoConfig != null) {
             videoBuffer = SabrBuffer(videoConfig.videoFormat.contentLength, File(dir, "$id-video.part"))
             audioBuffer = SabrBuffer(videoConfig.audioFormat.contentLength, File(dir, "$id-audio.part"))
+            if (coldStartMs > 0L) {
+                videoBuffer.resetDemandFrom(positionForTime(coldStartMs, videoConfig.durationMs, videoConfig.videoFormat.contentLength))
+                audioBuffer.resetDemandFrom(positionForTime(coldStartMs, videoConfig.durationMs, videoConfig.audioFormat.contentLength))
+            }
             session = SabrVideoSession(videoConfig, client, videoBuffer, audioBuffer,
+                startTimeMs = coldStartMs,
                 paceAheadVideoBytes = 32L * 1024 * 1024,
                 paceAheadAudioBytes = 8L * 1024 * 1024)
         } else {
             val cfg = requireNotNull(audioConfig)
             videoBuffer = null
             audioBuffer = SabrBuffer(cfg.format.contentLength, File(dir, "$id-audio.part"))
-            session = SabrSession(cfg, client, audioBuffer, paceAheadBytes = 8L * 1024 * 1024)
+            if (coldStartMs > 0L) {
+                audioBuffer.resetDemandFrom(positionForTime(coldStartMs, cfg.durationMs, cfg.format.contentLength))
+            }
+            session = SabrSession(cfg, client, audioBuffer, startTimeMs = coldStartMs, paceAheadBytes = 8L * 1024 * 1024)
+        }
+        if (requestedStartMs > 0L) {
+            AppLog.event("SABR cold start id=$id targetMs=$requestedStartMs startMs=$coldStartMs")
         }
         startSession(session)
     }
@@ -57,8 +75,10 @@ internal class ModernSabrStream(
         // history position (for example 03:00) anchored there forever, so no bytes covering the
         // beginning can ever arrive. Avoid restarting only when this session is already at zero.
         if (videoConfig != null && kotlin.math.abs(normalizedPositionMs - requestedStartMs) >= SEEK_COALESCE_MS) {
+            overshootRestarts = 0
+            currentMarginMs = INITIAL_SEEK_MARGIN_MS
             val position = positionForTime(normalizedPositionMs, videoConfig.durationMs, videoConfig.videoFormat.contentLength)
-            restartAt(normalizedPositionMs, video = true, position = position, source = "hint")
+            restartAt(normalizedPositionMs, video = true, position = position, source = "hint", marginMs = currentMarginMs)
         }
     }
 
@@ -78,10 +98,14 @@ internal class ModernSabrStream(
             return
         }
 
+        // If the active session already landed its first segment PAST the byte offset ExoPlayer
+        // needs (e.g. a keyframe/GOP boundary just before startTimeMs), step back and re-aim.
+        if (reaimIfLandedPast(video, position, "open")) return
+
         // For merged A/V, both DataSources open for one player seek. They must share ONE real media
         // time; deriving separate times from VBR byte offsets produced conflicting restarts.
         if (hintedTarget != null) {
-            restartAt(hintedTarget, video, position, "player")
+            restartAt(hintedTarget, video, position, "player", marginMs = currentMarginMs)
             return
         }
 
@@ -99,19 +123,86 @@ internal class ModernSabrStream(
             return
         }
         val targetMs = position.coerceAtMost(contentLength) * durationMs / contentLength
-        restartAt(targetMs, video, position, "audio-estimate")
+        overshootRestarts = 0
+        currentMarginMs = INITIAL_SEEK_MARGIN_MS
+        restartAt(targetMs, video, position, "audio-estimate", marginMs = currentMarginMs)
+    }
+
+    /**
+     * Called while [ModernSabrDataSource.read] waits for [position]. If the session landed its first
+     * segment AFTER [position] (a GOP/keyframe boundary before [currentSessionStartMs]), a forward
+     * drain can never cover [position] — step [currentSessionStartMs] back with a wider margin.
+     */
+    @Synchronized
+    fun ensureCoveragePossible(video: Boolean, position: Long) {
+        val requestedBuffer = buffer(video)
+        if (position <= 0L || requestedBuffer.coveredAt(position) || requestedBuffer.failed()) return
+        val initCovered = requestedBuffer.available()
+        if (initCovered > 0L && position >= initCovered) {
+            reaimIfLandedPast(video, position, "read")
+        }
     }
 
     @Synchronized
-    private fun restartAt(targetMs: Long, video: Boolean, position: Long, source: String) {
+    private fun reaimIfLandedPast(video: Boolean, position: Long, trigger: String): Boolean {
+        val anchor = when (val active = session) {
+            is SabrVideoSession -> if (video) active.firstVideoOffset else active.firstAudioOffset
+            is SabrSession -> active.firstWrittenOffset
+            else -> -1L
+        }
+        val requestedBuffer = buffer(video)
+        val initCovered = requestedBuffer.available()
+        // Anchor is the byte offset of the first non-init media segment.
+        // ExoPlayer requests the init segment first (offset 0..initCovered), and then requests
+        // the seek/resume position around anchor. An overshoot only occurs if position is BEFORE
+        // the first media segment anchor, BUT NOT inside the initial header (initCovered).
+        // Since initCovered is just the header length (e.g. 2345 bytes), position >= initCovered
+        // is NOT enough: position must be the media target (positionForTime), not the init header!
+        val videoTarget = videoConfig?.let { positionForTime(requestedStartMs, it.durationMs, it.videoFormat.contentLength) } ?: 0L
+        val audioTarget = videoConfig?.let { positionForTime(requestedStartMs, it.durationMs, it.audioFormat.contentLength) }
+            ?: audioConfig?.let { positionForTime(requestedStartMs, it.durationMs, it.format.contentLength) } ?: 0L
+        val targetOffset = if (video) videoTarget else audioTarget
+        // Only trigger overshoot re-aim if the reader is trying to read near targetOffset and anchor landed past it
+        if (anchor <= position || position < targetOffset || currentSessionStartMs <= 0L) return false
+        if (overshootRestarts >= SabrSeekLogic.MAX_SEEK_RESTARTS) return false
+        overshootRestarts++
+        currentMarginMs = (currentMarginMs * 2L).coerceAtMost(MAX_SEEK_MARGIN_MS)
+        val proportionalMs = if (anchor > 0L) (currentSessionStartMs * position / anchor) else currentSessionStartMs
+        val nextStartMs = (minOf(currentSessionStartMs, proportionalMs) - currentMarginMs).coerceAtLeast(0L)
+        AppLog.event(
+            "SABR seek overshoot re-aim id=$id video=$video trigger=$trigger position=$position anchor=$anchor " +
+                "prevStartMs=$currentSessionStartMs nextStartMs=$nextStartMs marginMs=$currentMarginMs attempt=$overshootRestarts"
+        )
+        restartAt(
+            targetMs = requestedStartMs,
+            video = video,
+            position = position,
+            source = "overshoot-$trigger",
+            marginMs = currentMarginMs,
+            explicitStartMs = nextStartMs,
+            forceRestart = true,
+        )
+        return true
+    }
+
+    @Synchronized
+    private fun restartAt(
+        targetMs: Long,
+        video: Boolean,
+        position: Long,
+        source: String,
+        marginMs: Long = currentMarginMs,
+        explicitStartMs: Long? = null,
+        forceRestart: Boolean = false,
+    ) {
         val requestedBuffer = buffer(video)
         // The paired DataSource opening second observes the same explicit target and only raises its
         // demand watermark; it never cancels the replacement created by the first opener.
-        if (kotlin.math.abs(targetMs - requestedStartMs) < SEEK_COALESCE_MS && requestedStartMs > 0L) {
+        if (!forceRestart && kotlin.math.abs(targetMs - requestedStartMs) < SEEK_COALESCE_MS && requestedStartMs > 0L) {
             requestedBuffer.raiseDemandTo(position)
             return
         }
-        val startMs = (targetMs - SabrSeekLogic.SEEK_MARGIN_MS).coerceAtLeast(0L)
+        val startMs = explicitStartMs ?: (targetMs - marginMs).coerceAtLeast(0L)
         when (val old = session) {
             is SabrVideoSession -> old.cancel()
             is SabrSession -> old.cancel()
@@ -121,15 +212,18 @@ internal class ModernSabrStream(
             ?: audioConfig?.let { positionForTime(startMs, it.durationMs, it.format.contentLength) }
         videoTarget?.let { videoBuffer?.resetDemandFrom(it) }
         audioTarget?.let(audioBuffer::resetDemandFrom)
+        // ModernSabrDataSource does not run an outer retry loop on session death, so a failed
+        // session must mark its buffer errored (restartable = false) instead of leaving read() waiting.
         session = if (videoConfig != null) {
             SabrVideoSession(videoConfig, client, requireNotNull(videoBuffer), audioBuffer,
                 startTimeMs = startMs, paceAheadVideoBytes = 32L * 1024 * 1024,
-                paceAheadAudioBytes = 8L * 1024 * 1024, restartable = true)
+                paceAheadAudioBytes = 8L * 1024 * 1024, restartable = false)
         } else {
             SabrSession(requireNotNull(audioConfig), client, audioBuffer, startTimeMs = startMs,
-                paceAheadBytes = 8L * 1024 * 1024, restartable = true)
+                paceAheadBytes = 8L * 1024 * 1024, restartable = false)
         }
         requestedStartMs = targetMs
+        currentSessionStartMs = startMs
         AppLog.event("SABR seek restart id=$id targetMs=$targetMs startMs=$startMs video=$video source=$source")
         startSession(session)
     }
@@ -138,12 +232,14 @@ internal class ModernSabrStream(
         if (durationMs > 0L) (timeMs * length / durationMs).coerceIn(0L, length - 1L) else 0L
 
     private fun startSession(value: Runnable) {
-        Thread(value, "materialyt-sabr-$id").apply { isDaemon = true; start() }
+        sessionThread = Thread(value, "materialyt-sabr-$id").apply { isDaemon = true; start() }
     }
 
     companion object {
-        private const val SEEK_HINT_TTL_MS = 10_000L
+        private const val SEEK_HINT_TTL_MS = 15_000L
         private const val SEEK_COALESCE_MS = 10_000L
+        private const val INITIAL_SEEK_MARGIN_MS = 12_000L
+        private const val MAX_SEEK_MARGIN_MS = 60_000L
         private const val NEAR_FRONTIER_BYTES = 512L * 1024L
     }
 
@@ -159,9 +255,24 @@ internal class ModernSabrStream(
 
 internal object ModernSabrRegistry {
     private val streams = ConcurrentHashMap<String, ModernSabrStream>()
-    fun put(stream: ModernSabrStream) { streams.put(stream.id, stream)?.destroy() }
+    fun put(stream: ModernSabrStream) {
+        // Destroy any older Dual-Track video streams so previous videos do not keep draining in the background.
+        if (!stream.id.contains("-audio-")) {
+            val staleKeys = streams.keys.filter { it != stream.id && !it.contains("-audio-") }
+            for (key in staleKeys) {
+                streams.remove(key)?.destroy()
+            }
+        }
+        streams.put(stream.id, stream)?.destroy()
+    }
     fun get(id: String): ModernSabrStream? = streams[id]
     fun hintPlaybackTime(id: String, positionMs: Long) { streams[id]?.hintPlaybackTime(positionMs) }
+    fun destroyForVideo(videoId: String) {
+        val prefix = "$videoId-"
+        for (key in streams.keys.filter { it.startsWith(prefix) }) {
+            streams.remove(key)?.destroy()
+        }
+    }
 }
 
 internal class ModernSabrDataSource(private val video: Boolean) : BaseDataSource(true) {
@@ -189,7 +300,8 @@ internal class ModernSabrDataSource(private val video: Boolean) : BaseDataSource
         if (readLength == 0) return 0
         if (remaining <= 0) return C.RESULT_END_OF_INPUT
         val wanted = minOf(readLength.toLong(), remaining).toInt()
-        val buffer = stream?.buffer(video) ?: return C.RESULT_END_OF_INPUT
+        val activeStream = stream ?: return C.RESULT_END_OF_INPUT
+        val buffer = activeStream.buffer(video)
         while (true) {
             val count = buffer.readCovered(position, target, offset, wanted)
             if (count > 0) {
@@ -198,6 +310,7 @@ internal class ModernSabrDataSource(private val video: Boolean) : BaseDataSource
                 bytesTransferred(count)
                 return count
             }
+            activeStream.ensureCoveragePossible(video, position)
             buffer.awaitChange(250)
         }
     }

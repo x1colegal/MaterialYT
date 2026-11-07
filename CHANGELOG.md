@@ -2,6 +2,20 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.12] - 2026-11-07
+
+### Added
+- Show the `"SABR requested backoff, waiting Xs"` notice only during initial media startup by default, and add a `"Show SABR backoff while buffering"` toggle in Settings (disabled by default) to display it during mid-playback buffering as well.
+
+### Fixed
+- Cold-start SABR streams directly at the requested resume timestamp with a 12-second keyframe margin (`INITIAL_SEEK_MARGIN_MS = 12_000L`) and automatically widen the margin if the server lands past the target byte offset, fixing infinite buffering when resuming videos from History (such as at `05:03`).
+- Anchor the SABR demand-pacing watermark to the first received media offset on seek/resume so mid-stream cold starts are never throttled relative to byte `0`.
+- Avoid solving the `n` challenge a second time in `refreshWebSabrAdPlayback` and `reloadSabrPlayback` when `webPoPlayer` already resolved `serverAbrStreamingUrl`, preventing `HTTP 403` errors during session refresh.
+- Refresh cached `playbackTracking` (`videostatsPlaybackUrl` and `videostatsWatchtimeUrl`) whenever `refreshWebSabrAdPlayback` or `reloadSabrPlayback` rotates the WEB player session mid-stream, and flush the final playback timestamp on player disposal so closing a video immediately after seeking or watching saves the resume position.
+- Block `/api/stats/playback`, `/api/stats/watchtime`, and `/api/stats/qoe` inside `WebStreamAttestationProvider`'s hidden bootstrap WebView so it never reports `cmt=0` with signed-in cookies, and fix duration and progress extraction in `scanResumeMetadata` (including `thumbnailBadgeViewModel` and `thumbnailOverlayTimeStatusRenderer`) so reopened videos do not reset to `00:00`.
+- Include user activity timestamp (`lact`), session elapsed time (`rt`), valid playback state (`state=playing`), and video duration (`len`) in `/api/stats/watchtime` beacons, dispatch `/api/stats/playback` strictly on startup rather than on pause, and send properly bounded `st < et` watchtime intervals with `final=1` on pause and player disposal, restoring YouTube server-side watch history synchronization.
+- Cancel and clean up previous `ModernSabrStream` sessions when switching or closing videos so background `SabrVideoSession` threads do not leak.
+
 ## [5.11] - 2026-11-06
 
 ### Added

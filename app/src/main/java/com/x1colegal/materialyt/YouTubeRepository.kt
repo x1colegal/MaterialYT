@@ -227,7 +227,8 @@ object YouTubeRepository {
         val cpn: String,
         val music: Boolean,
         val startedAtMs: Long = System.currentTimeMillis(),
-        var started: Boolean = false
+        var started: Boolean = false,
+        var lastReportedMs: Long = -1L
     )
     private val playbackTracking = mutableMapOf<String, PlaybackTracking>()
 
@@ -1884,7 +1885,7 @@ object YouTubeRepository {
     }
 
     fun reportPlayback(videoId: String, fromMs: Long, toMs: Long, paused: Boolean = false, ended: Boolean = false) {
-        if (!signedIn() || toMs <= fromMs) return
+        if (!signedIn() || toMs < 0L) return
         val tracking = synchronized(playbackTracking) { playbackTracking[videoId] }
         if (tracking == null) {
             AppLog.event("playback tracking skipped video=$videoId reason=no_session")
@@ -1897,8 +1898,23 @@ object YouTubeRepository {
             AppLog.event("playback tracking skipped video=$videoId reason=missing_${required.filter { source.queryParameter(it).isNullOrBlank() }.joinToString("_")}")
             return
         }
-        val fromSec = "%.3f".format(java.util.Locale.US, fromMs / 1000.0)
+        val effectiveFromMs = synchronized(tracking) {
+            val candidate = if (fromMs < toMs && fromMs >= 0L) {
+                fromMs
+            } else if (tracking.lastReportedMs in 0 until toMs) {
+                tracking.lastReportedMs
+            } else {
+                (toMs - 1_000L).coerceAtLeast(0L)
+            }
+            tracking.lastReportedMs = toMs
+            candidate
+        }
+        val fromSec = "%.3f".format(java.util.Locale.US, effectiveFromMs / 1000.0)
         val toSec = "%.3f".format(java.util.Locale.US, toMs / 1000.0)
+        val elapsedSec = "%.1f".format(java.util.Locale.US, (System.currentTimeMillis() - tracking.startedAtMs).coerceAtLeast(0L) / 1000.0)
+        val lactMs = ((System.currentTimeMillis() % 3000L) + 120L).toString()
+        val videoLen = source.queryParameter("len")
+            ?: synchronized(videoDetailsCache) { videoDetailsCache[videoId]?.durationSeconds?.takeIf { it > 0L }?.toString() }
         fun statsUrl(playback: Boolean): okhttp3.HttpUrl {
             val rawBase = if (playback) tracking.playbackUrl else tracking.watchtimeUrl
             val base = (if (tracking.music) rawBase.replace("https://s.youtube.com/", "https://music.youtube.com/") else rawBase).toHttpUrlOrNull()
@@ -1908,7 +1924,10 @@ object YouTubeRepository {
                 .setQueryParameter("ver", "2")
                 .setQueryParameter("docid", source.queryParameter("docid") ?: videoId)
                 .setQueryParameter("cpn", tracking.cpn)
+                .setQueryParameter("lact", lactMs)
                 .apply {
+                    if (source.queryParameter("el").isNullOrBlank()) setQueryParameter("el", "detailpage")
+                    if (!videoLen.isNullOrBlank()) setQueryParameter("len", videoLen)
                     if (tracking.music) {
                         setQueryParameter("c", "WEB_REMIX")
                         setQueryParameter("cver", bootstrap("https://music.youtube.com", "WEB_REMIX").version)
@@ -1918,30 +1937,35 @@ object YouTubeRepository {
                 }
                 .apply {
                     if (playback) {
-                        setQueryParameter("cmt", fromSec)
+                        setQueryParameter("cmt", toSec)
                         setQueryParameter("rtn", "0")
                         setQueryParameter("rt", "0")
                         setQueryParameter("fs", "0")
-                        setQueryParameter("state", "paused")
-                        if (ended) setQueryParameter("final", "1")
+                        setQueryParameter("state", if (paused) "paused" else "playing")
                     }
                     else {
                         setQueryParameter("st", fromSec)
                         setQueryParameter("et", toSec)
                         setQueryParameter("cmt", toSec)
-                        if (paused) setQueryParameter("state", "paused") else removeAllQueryParameters("state")
-                        if (ended) setQueryParameter("final", "1") else removeAllQueryParameters("final")
+                        setQueryParameter("rt", elapsedSec)
+                        setQueryParameter("state", if (paused) "paused" else "playing")
+                        if (ended || paused) setQueryParameter("final", "1") else removeAllQueryParameters("final")
                     }
                 }.build()
         }
         fun send(url: okhttp3.HttpUrl) {
-            val origin = "https://www.youtube.com"
-            val request = Request.Builder().url(url).apply { authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) } }.build()
+            val origin = if (tracking.music) "https://music.youtube.com" else "https://www.youtube.com"
+            val ua = if (tracking.music) UA else WEB_PLAYER_UA
+            val request = Request.Builder().url(url).apply {
+                authenticatedHeaders(origin).forEach { (key, value) -> header(key, value) }
+                header("User-Agent", ua)
+                header("Referer", "$origin/watch?v=$videoId")
+            }.build()
             client.newCall(request).execute().use { response ->
-                AppLog.event("playback tracking video=$videoId music=${tracking.music} kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (ended) "ended" else if (paused) "paused" else "playing"} HTTP ${response.code}")
+                AppLog.event("playback tracking video=$videoId kind=${if (url.encodedPath.contains("watchtime")) "watchtime" else "playback"} state=${if (ended) "ended" else if (paused) "paused" else "playing"} cmt=$toSec len=$videoLen rt=$elapsedSec lact=$lactMs HTTP ${response.code}")
             }
         }
-        if (first || ended) send(statsUrl(true))
+        if (first) send(statsUrl(true))
         send(statsUrl(false))
     }
 
@@ -3366,8 +3390,13 @@ object YouTubeRepository {
             val exactResumeMs = resume.resumePlaybackPositionMs?.toLong()
                 ?: resume.startTimeSeconds?.times(1_000.0)?.toLong()
             val resumePercent = (resume.percentDurationWatched ?: resume.startPercent ?: 0.0).coerceIn(0.0, 100.0)
-            val durationText = text(renderer.opt("lengthText")) ?: resume.durationText
+            val durationText = text(renderer.opt("lengthText"))
+                ?: resume.durationText
+                ?: synchronized(videoDetailsCache) { videoDetailsCache[id]?.durationSeconds?.takeIf { it > 0L }?.let { "${it / 60}:${"%02d".format(it % 60)}" } }
             val durationMs = parseDurationMs(durationText.orEmpty())
+                .takeIf { it > 0L }
+                ?: synchronized(videoDetailsCache) { videoDetailsCache[id]?.durationSeconds?.times(1_000L) }
+                ?: 0L
             val rawResumePositionMs = exactResumeMs?.takeIf { it > 0L }
                 ?: if (resumePercent > 0.0 && durationMs > 0L) (durationMs * resumePercent / 100.0).toLong() else 0L
             val resumePositionMs = if (
@@ -3426,6 +3455,13 @@ object YouTubeRepository {
                         "percentDurationWatched" -> if (result.percentDurationWatched == null) result.percentDurationWatched = number(child)
                         "startPercent" -> if (result.startPercent == null) result.startPercent = number(child)
                         "lengthText" -> if (result.durationText == null) result.durationText = text(child)
+                        "thumbnailOverlayTimeStatusRenderer" -> if (result.durationText == null) result.durationText = text(child)
+                        "thumbnailBadgeViewModel" -> if (result.durationText == null && child is JSONObject) {
+                            val badge = child.optString("text").ifBlank { child.optString("badgeText") }.ifBlank { text(child).orEmpty() }.trim()
+                            if (badge.matches(Regex("\\d{1,3}:\\d{2}(:\\d{2})?"))) {
+                                result.durationText = badge
+                            }
+                        }
                     }
                     walk(child)
                 }

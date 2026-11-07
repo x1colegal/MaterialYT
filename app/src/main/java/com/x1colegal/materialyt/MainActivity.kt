@@ -339,6 +339,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppLog.init(this)
         // Establish the edge-to-edge decor before Compose creates the app surface. On Android
         // 5-7, opting in only after opening a player can leave that surface permanently inset
         // below the status bar, exposing the light theme's white window background.
@@ -777,6 +778,7 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
     var audioDecoderMode by remember { mutableStateOf(runCatching { DecoderMode.valueOf(prefs.getString("audio_decoder_mode", "AUTO")!!) }.getOrDefault(DecoderMode.AUTO)) }
     remember {
         PlaybackPreferences.prioritizeQualityOverCodec = prefs.getBoolean("prioritize_quality_over_codec", false)
+        PlaybackPreferences.showSabrBackoffDuringBuffering = prefs.getBoolean("show_sabr_backoff_during_buffering", false)
     }
     PlaybackPreferences.videoDecoderMode = videoDecoderMode
     PlaybackPreferences.audioDecoderMode = audioDecoderMode
@@ -1292,10 +1294,10 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet) {
             LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp)) {
-                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url + if (item.resumePositionMs > 0) "&t=${item.resumePositionMs / 1000}" else "") } } } }
+                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } } }
             }
         } else {
-            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url + if (item.resumePositionMs > 0) "&t=${item.resumePositionMs / 1000}" else "") } } } }
+            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } } }
         }
         }
     }
@@ -1725,7 +1727,12 @@ private fun MusicPlayer(
     val selectedAudioTrack = AutoMusicService.selectedAudioTrack.value
     val serviceTrack = AutoMusicService.nowPlaying.value
     val musicLoadStatus by PlaybackLoadStatus.message.collectAsState()
-    val musicLoadMessage = musicLoadStatus?.takeIf { it.mediaId == track.id }?.text
+    val musicLoadMessage = musicLoadStatus?.takeIf {
+        it.mediaId == track.id &&
+            (!PlaybackLoadStatus.hasPlaybackStarted(track.id) ||
+                !it.text.startsWith("SABR requested backoff") ||
+                PlaybackPreferences.showSabrBackoffDuringBuffering)
+    }?.text
     BackHandler { onBack() }
     DisposableEffect(Unit) {
         activity.musicPlayerSystemBars(true)
@@ -3238,8 +3245,10 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 
     LaunchedEffect(item.id) {
         PlaybackLoadStatus.message.collect { status ->
+            val allowBackoffAfterStart = PlaybackPreferences.showSabrBackoffDuringBuffering &&
+                status?.text?.startsWith("SABR requested backoff") == true
             if (status?.mediaId == item.id &&
-                (!hasStartedPlayback || status.text.startsWith("SABR requested backoff"))) {
+                (!hasStartedPlayback || allowBackoffAfterStart)) {
                 shortLoadMessage = status.text
             } else if (shortLoadMessage?.startsWith("SABR requested backoff") == true) {
                 shortLoadMessage = null
@@ -3267,6 +3276,8 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             player.clearMediaItems()
             return@LaunchedEffect
         }
+        hasStartedPlayback = false
+        PlaybackLoadStatus.beginInitialLoad(item.id)
         streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; sabrPlayback = null; error = null
         if (streams.isEmpty()) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(item.id) } }.onSuccess { playback ->
@@ -3331,7 +3342,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 if (isPlaying) {
                     hasStartedPlayback = true
                     shortLoadMessage = null
-                    PlaybackLoadStatus.clear(item.id)
+                    PlaybackLoadStatus.markPlaybackStarted(item.id)
                 }
                 if (!isPlaying) {
                     val pos = player.currentPosition
@@ -3341,13 +3352,14 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             override fun onRenderedFirstFrame() {
                 hasStartedPlayback = true
                 shortLoadMessage = null
-                PlaybackLoadStatus.clear(item.id)
+                PlaybackLoadStatus.markPlaybackStarted(item.id)
             }
             override fun onPlaybackStateChanged(state: Int) {
                 PlaybackLoadStatus.setBuffering(item.id, state == Player.STATE_BUFFERING)
                 if (state == Player.STATE_READY) {
+                    hasStartedPlayback = true
                     shortLoadMessage = null
-                    PlaybackLoadStatus.clear(item.id)
+                    PlaybackLoadStatus.markPlaybackStarted(item.id)
                 }
                 else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == item.id &&
                     PlaybackLoadStatus.message.value?.text?.startsWith("SABR requested backoff") != true) {
@@ -3367,6 +3379,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             player.removeListener(playbackListener)
             player.pause()
             player.stop()
+            SabrMediaFactory.releaseVideo(item.id)
             (context as? MainActivity)?.unregisterCurrentPlayer(player)
             player.release()
         }
@@ -3667,11 +3680,13 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         next?.setOnClickListener { if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1) }
     }
     fun play(stream: PlayerChoice) {
+        val currentPosition = if (selectedStream != null) player.currentPosition.coerceAtLeast(0L) else 0L
+        val position = if (currentPosition > 0L) currentPosition else resumeStartMs.takeIf { !initialStartApplied } ?: 0L
         val audio = if (stream.videoOnly) selectedAudio ?: audioStreams.maxByOrNull { it.bitrate } else null
         val sabr = sabrPlayback
         val source = if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
             SabrMediaFactory.create(sabr, stream.sabrFormat, audio.sabrFormat,
-                sabrDataSourceFactory(sabr.serverAbrStreamingUrl))
+                sabrDataSourceFactory(sabr.serverAbrStreamingUrl), initialStartMs = position)
         } else {
             val videoSource = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
             if (audio != null) {
@@ -3680,11 +3695,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             // timestamps. Align their periods so ExoPlayer can render immediately.
             MergingMediaSource(true, videoSource, audioSource)
             } else videoSource
-        }
-        val currentPosition = if (selectedStream != null) player.currentPosition.coerceAtLeast(0L) else 0L
-        val position = if (currentPosition > 0L) currentPosition else resumeStartMs.takeIf { !initialStartApplied } ?: 0L
-        if (position > 0L && sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
-            SabrMediaFactory.hintSeek(sabr, stream.sabrFormat, audio.sabrFormat, position)
         }
         player.setMediaSource(source); player.prepare(); if (position > 0) player.seekTo(position)
         player.setPlaybackSpeed(speed); player.playWhenReady = true
@@ -3725,6 +3735,13 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             activity.clearVisiblePlayerView(player)
             activity.unregisterCurrentPlayer(player)
+            val finalPos = player.currentPosition.coerceAtLeast(0L)
+            if (hasStartedPlayback && finalPos > 1_000L) {
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    runCatching { YouTubeRepository.reportPlayback(videoId, finalPos, finalPos, paused = true) }
+                }
+            }
+            SabrMediaFactory.releaseVideo(videoId)
             player.release()
         }
     }
@@ -3742,6 +3759,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     player.seekTo(lastPlayablePosition)
                     return
                 }
+                val seekPos = newPosition.positionMs.coerceAtLeast(0L)
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    runCatching { YouTubeRepository.reportPlayback(videoId, seekPos, seekPos, paused = !player.isPlaying) }
+                }
                 val sabr = sabrPlayback ?: return
                 val video = selectedStream?.sabrFormat ?: return
                 val audio = selectedAudio?.sabrFormat ?: return
@@ -3750,7 +3771,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             override fun onPlaybackStateChanged(state: Int) {
                 playbackState = state
                 PlaybackLoadStatus.setBuffering(videoId, state == Player.STATE_BUFFERING)
-                if (state == Player.STATE_READY) PlaybackLoadStatus.clear(videoId)
+                if (state == Player.STATE_READY) {
+                    hasStartedPlayback = true
+                    PlaybackLoadStatus.markPlaybackStarted(videoId)
+                }
                 else if (!hasStartedPlayback && state == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == videoId &&
                     PlaybackLoadStatus.message.value?.text?.startsWith("SABR requested backoff") != true) {
                     PlaybackLoadStatus.show(videoId, "Buffering media…")
@@ -3763,12 +3787,12 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) {
                     hasStartedPlayback = true
-                    PlaybackLoadStatus.clear(videoId)
+                    PlaybackLoadStatus.markPlaybackStarted(videoId)
                 }
                 activity.updatePipAction()
                 if (!isPlaying) {
-                    val pos = player.currentPosition
-                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { YouTubeRepository.reportPlayback(videoId, maxOf(0, pos - 1000L), pos, paused = true) } }
+                    val pos = player.currentPosition.coerceAtLeast(0L)
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { YouTubeRepository.reportPlayback(videoId, pos, pos, paused = true) } }
                 }
                 val title = videoMetadata?.title ?: "Video"
                 val author = displayChannelName(videoMetadata?.author, channelInfo?.name)
@@ -3782,7 +3806,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 hasStartedPlayback = true
                 if (resumeStartMs > 0L) initialStartApplied = true
                 decoderRecoveryPosition = null
-                PlaybackLoadStatus.clear(videoId)
+                PlaybackLoadStatus.markPlaybackStarted(videoId)
                 currentPlayerView?.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_shutter)?.visibility = View.INVISIBLE
             }
             override fun onVideoSizeChanged(videoSize: com.google.android.exoplayer2.video.VideoSize) {
@@ -3892,6 +3916,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     val prioritizeQualityOverCodec = PlaybackPreferences.prioritizeQualityOverCodec
     LaunchedEffect(url, codec, audioCodec, quality, prioritizeQualityOverCodec) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
+        hasStartedPlayback = false
+        PlaybackLoadStatus.beginInitialLoad(videoId)
         resumeStartMs = if (playlistIndex >= 0 || autoplayRequest) 0L else if (requestedStartMs > 0L || !YouTubeRepository.signedIn()) requestedStartMs else {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.historyResumePosition(videoId) } }
                 .onFailure { AppLog.failure("history resume lookup video=$videoId", it) }
@@ -4197,7 +4223,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 update = { attachPlayerView(it); bindPlaylistControls(it) },
                 modifier = Modifier.fillMaxSize()
             )
-            if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message ->
+            if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message ->
                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
             }
             if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
@@ -4220,7 +4246,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                             AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
-                            if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message ->
+                            if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message ->
                                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                             }
                             if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
@@ -4357,7 +4383,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 item {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                         AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
-                        if (!hasStartedPlayback || videoLoadMessage?.startsWith("SABR requested backoff") == true) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
+                        if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
                         if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                     }
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -4654,6 +4680,24 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
                 Switch(checked = prioritizeQuality, onCheckedChange = {
                     PlaybackPreferences.prioritizeQualityOverCodec = it
                     prefs.edit().putBoolean("prioritize_quality_over_codec", it).apply()
+                })
+            }
+        }
+        item {
+            val prefs = activity.getSharedPreferences("settings", 0)
+            val showBackoffBuffering = PlaybackPreferences.showSabrBackoffDuringBuffering
+            Row(Modifier.fillMaxWidth().clickable {
+                val updated = !showBackoffBuffering
+                PlaybackPreferences.showSabrBackoffDuringBuffering = updated
+                prefs.edit().putBoolean("show_sabr_backoff_during_buffering", updated).apply()
+            }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Show SABR backoff while buffering", style = MaterialTheme.typography.titleMedium)
+                    Text("Display the SABR backoff countdown whenever playback is buffering, not only during initial video startup", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = showBackoffBuffering, onCheckedChange = {
+                    PlaybackPreferences.showSabrBackoffDuringBuffering = it
+                    prefs.edit().putBoolean("show_sabr_backoff_during_buffering", it).apply()
                 })
             }
         }

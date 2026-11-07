@@ -188,6 +188,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 publishState()
                 val id = currentTrack?.id
+                if (isPlaying && id != null) PlaybackLoadStatus.markPlaybackStarted(id)
                 if (!isPlaying && id != null) {
                     // ExoPlayer must only be read on its application looper. Capture the
                     // position here, then move only the network report to the IO dispatcher.
@@ -200,8 +201,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 currentTrack?.id?.let { id ->
                     PlaybackLoadStatus.setBuffering(id, playbackState == Player.STATE_BUFFERING)
-                    if (playbackState == Player.STATE_READY) PlaybackLoadStatus.clear(id)
-                    else if (playbackState == Player.STATE_BUFFERING && PlaybackLoadStatus.message.value?.mediaId == id &&
+                    if (playbackState == Player.STATE_READY) {
+                        PlaybackLoadStatus.markPlaybackStarted(id)
+                    } else if (playbackState == Player.STATE_BUFFERING && !PlaybackLoadStatus.hasPlaybackStarted(id) &&
+                        PlaybackLoadStatus.message.value?.mediaId == id &&
                         PlaybackLoadStatus.message.value?.text?.startsWith("SABR requested backoff") != true) {
                         PlaybackLoadStatus.show(id, "Buffering media…")
                     }
@@ -428,6 +431,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             activeSourceGeneration = generation
             endReported = false
             currentTrack = track
+            PlaybackLoadStatus.beginInitialLoad(track.id)
             preferredAudioCodec = preferredCodec
             playbackQueue = queue
             playbackQueueIndex = queueIndex

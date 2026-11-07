@@ -23,7 +23,11 @@ object SabrMediaFactory {
         ModernSabrRegistry.hintPlaybackTime(streamId(info, video, audio), positionMs)
     }
 
-    fun create(info: SabrPlaybackInfo, video: SabrFormat, audio: SabrFormat, upstreamFactory: DataSource.Factory): MediaSource {
+    fun releaseVideo(videoId: String) {
+        ModernSabrRegistry.destroyForVideo(videoId)
+    }
+
+    fun create(info: SabrPlaybackInfo, video: SabrFormat, audio: SabrFormat, upstreamFactory: DataSource.Factory, initialStartMs: Long = 0L): MediaSource {
         require(!video.audio && audio.audio)
         require(video.contentLength > 0 && audio.contentLength > 0) { "SABR formats have no content length" }
         AppLog.event(
@@ -56,7 +60,7 @@ object SabrMediaFactory {
             }) else null,
         )
         PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
-        ModernSabrRegistry.put(ModernSabrStream(id, config, null, HttpBackend.playbackClient()))
+        ModernSabrRegistry.put(ModernSabrStream(id, config, null, HttpBackend.playbackClient(), initialStartMs = initialStartMs))
         val videoSource = ProgressiveMediaSource.Factory(ModernSabrDataSource.Factory(true))
             .createMediaSource(MediaItem.fromUri(Uri.parse("sabrmodern://$id/video")))
         val audioSource = ProgressiveMediaSource.Factory(ModernSabrDataSource.Factory(false))

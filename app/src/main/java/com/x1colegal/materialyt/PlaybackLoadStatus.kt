@@ -9,14 +9,33 @@ data class PlaybackLoadMessage(val mediaId: String, val text: String)
 object PlaybackLoadStatus {
     private val mutableMessage = MutableStateFlow<PlaybackLoadMessage?>(null)
     private val bufferingMedia = ConcurrentHashMap.newKeySet<String>()
+    private val startedMedia = ConcurrentHashMap.newKeySet<String>()
     val message = mutableMessage.asStateFlow()
+
+    fun beginInitialLoad(mediaId: String) {
+        startedMedia -= mediaId
+        bufferingMedia += mediaId
+    }
+
+    fun markPlaybackStarted(mediaId: String) {
+        startedMedia += mediaId
+        bufferingMedia -= mediaId
+        clear(mediaId)
+    }
+
+    fun hasPlaybackStarted(mediaId: String): Boolean = mediaId in startedMedia
 
     fun show(mediaId: String, text: String) {
         mutableMessage.value = PlaybackLoadMessage(mediaId, text)
     }
 
     fun showSabrBackoff(mediaId: String, text: String) {
-        if (mediaId in bufferingMedia) show(mediaId, text)
+        val allowed = if (mediaId !in startedMedia) {
+            true
+        } else {
+            mediaId in bufferingMedia && PlaybackPreferences.showSabrBackoffDuringBuffering
+        }
+        if (allowed) show(mediaId, text)
     }
 
     fun setBuffering(mediaId: String, buffering: Boolean) {

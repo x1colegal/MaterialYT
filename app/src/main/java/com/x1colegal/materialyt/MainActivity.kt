@@ -189,9 +189,32 @@ internal fun sabrDataSourceFactory(streamUrl: String): DataSource.Factory =
     OkHttpDataSource.Factory(videoHttpClient)
         .setDefaultRequestProperties(YouTubeRepository.mediaHeaders(streamUrl))
 
-private fun selectVideoStream(streams: List<PlayerChoice>, codec: CodecChoice, quality: QualityChoice): PlayerChoice? {
+private fun selectVideoStream(
+    streams: List<PlayerChoice>,
+    codec: CodecChoice,
+    quality: QualityChoice,
+    prioritizeQualityOverCodec: Boolean = PlaybackPreferences.prioritizeQualityOverCodec,
+): PlayerChoice? {
     val valid = streams.filter { it.url.startsWith("http") }
-    val matchingCodec = valid.filter { stream -> codec.tokens.any { stream.codec.lowercase().contains(it) } }
+    if (valid.isEmpty()) return null
+    fun matchesCodec(stream: PlayerChoice): Boolean =
+        codec.tokens.any { stream.codec.lowercase().contains(it) }
+    if (prioritizeQualityOverCodec) {
+        val comparator = if (quality == QualityChoice.AUTO) {
+            compareBy<PlayerChoice> { it.height }
+                .thenBy { it.fps }
+                .thenBy { matchesCodec(it) }
+                .thenBy { it.bitrate }
+        } else {
+            compareBy<PlayerChoice> { -kotlin.math.abs(it.height - quality.height) }
+                .thenBy { it.height }
+                .thenBy { it.fps }
+                .thenBy { matchesCodec(it) }
+                .thenBy { it.bitrate }
+        }
+        return valid.maxWithOrNull(comparator)
+    }
+    val matchingCodec = valid.filter(::matchesCodec)
     if (quality == QualityChoice.AUTO) return (matchingCodec.ifEmpty { valid }).maxByOrNull { it.height }
     matchingCodec.firstOrNull { it.height == quality.height }?.let { return it }
     matchingCodec.minByOrNull { kotlin.math.abs(it.height - quality.height) }?.let { return it }
@@ -273,6 +296,9 @@ class MainActivity : ComponentActivity() {
     fun registerCurrentPlayer(p: ExoPlayer) {
         if (player !== p) pipAspectRatio = Rational(16, 9)
         player = p
+    }
+    fun unregisterCurrentPlayer(p: ExoPlayer) {
+        if (player === p) player = null
     }
     fun isCurrentPlayer(p: ExoPlayer): Boolean = player === p
     fun resetPipAspectRatioForNewVideo() {
@@ -487,6 +513,8 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    private var lastLoggedSystemBarsSummary: String? = null
+
     private fun applyRequestedSystemBars() {
         if (pipMode) return
         val state = when {
@@ -496,10 +524,12 @@ class MainActivity : ComponentActivity() {
             playerUiActive -> "player-ui"
             else -> "normal"
         }
-        AppLog.event(
-            "system bars apply state=$state fullscreen=$isFullscreen music=$musicSystemBarsActive " +
-                "immersive=$immersiveActive video=$videoPlayerActive playerUi=$playerUiActive"
-        )
+        val summary = "system bars apply state=$state fullscreen=$isFullscreen music=$musicSystemBarsActive " +
+            "immersive=$immersiveActive video=$videoPlayerActive playerUi=$playerUiActive"
+        if (summary != lastLoggedSystemBarsSummary) {
+            lastLoggedSystemBarsSummary = summary
+            AppLog.event(summary)
+        }
         when (state) {
             "fullscreen" -> applyFullscreenState()
             "music" -> applyMusicPlayerSystemBars()
@@ -745,6 +775,9 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
     var quality by remember { mutableStateOf(runCatching { QualityChoice.valueOf(prefs.getString("quality", "AUTO")!!) }.getOrDefault(QualityChoice.AUTO)) }
     var videoDecoderMode by remember { mutableStateOf(runCatching { DecoderMode.valueOf(prefs.getString("video_decoder_mode", "AUTO")!!) }.getOrDefault(DecoderMode.AUTO)) }
     var audioDecoderMode by remember { mutableStateOf(runCatching { DecoderMode.valueOf(prefs.getString("audio_decoder_mode", "AUTO")!!) }.getOrDefault(DecoderMode.AUTO)) }
+    remember {
+        PlaybackPreferences.prioritizeQualityOverCodec = prefs.getBoolean("prioritize_quality_over_codec", false)
+    }
     PlaybackPreferences.videoDecoderMode = videoDecoderMode
     PlaybackPreferences.audioDecoderMode = audioDecoderMode
     
@@ -2045,7 +2078,7 @@ private fun MusicPlayerLegacy(activity: MainActivity, track: FeedItem, onPlayer:
             override fun onPlayerError(cause: PlaybackException) { Log.e("MaterialYT", "music player ${cause.errorCodeName}", cause); error = "${cause.errorCodeName}: ${cause.cause?.message ?: cause.localizedMessage}" }
         }
         player.addListener(listener)
-        onDispose { player.removeListener(listener); activity.stopMusicNotification(); mediaSession.isActive = false; mediaSession.release(); activity.immersive(false); player.release() }
+        onDispose { player.removeListener(listener); activity.stopMusicNotification(); mediaSession.isActive = false; mediaSession.release(); activity.immersive(false); activity.unregisterCurrentPlayer(player); player.release() }
     }
     LaunchedEffect(track.id) {
         val audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
@@ -3227,7 +3260,8 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         player.setMediaSource(source); player.prepare(); player.setPlaybackSpeed(speed); player.playWhenReady = active
         selected = stream
     }
-    LaunchedEffect(item.id, active, codec, preferredAudioCodec, quality) {
+    val prioritizeQualityOverCodec = PlaybackPreferences.prioritizeQualityOverCodec
+    LaunchedEffect(item.id, active, codec, preferredAudioCodec, quality, prioritizeQualityOverCodec) {
         if (!active) {
             player.stop()
             player.clearMediaItems()
@@ -3246,7 +3280,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                     PlayerChoice(playback.serverAbrStreamingUrl, it.codec, it.height, it.fps,
                         it.bitrate, true, sabrFormat = it)
                 }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-                selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
+                selectVideoStream(streams, codec, quality, prioritizeQualityOverCodec)?.let { stream -> error = null; play(stream) }
                 shortMetadata = YouTubeRepository.videoDetails(item.id)
                 AppLog.event("shorts SABR primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
             }.onFailure { AppLog.failure("shorts SABR primary video=${item.id}", it) }
@@ -3258,7 +3292,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 audio = selectAudioStream(audioTracks, preferredAudioCodec)
                 streams = result.filter { !it.audio && it.height > 0 }.map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-                selectVideoStream(streams, codec, quality)?.let { stream -> error = null; play(stream) }
+                selectVideoStream(streams, codec, quality, prioritizeQualityOverCodec)?.let { stream -> error = null; play(stream) }
             }.onFailure { if (streams.isEmpty()) error = it.message }
         }
     }
@@ -3333,6 +3367,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             player.removeListener(playbackListener)
             player.pause()
             player.stop()
+            (context as? MainActivity)?.unregisterCurrentPlayer(player)
             player.release()
         }
     }
@@ -3689,6 +3724,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 activity.videoPlayerActive(false)
             }
             activity.clearVisiblePlayerView(player)
+            activity.unregisterCurrentPlayer(player)
             player.release()
         }
     }
@@ -3853,7 +3889,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             .onSuccess { channelInfo = it }
             .onFailure { AppLog.failure("video channel metadata video=$videoId", it) }
     }
-    LaunchedEffect(url, codec, audioCodec, quality) {
+    val prioritizeQualityOverCodec = PlaybackPreferences.prioritizeQualityOverCodec
+    LaunchedEffect(url, codec, audioCodec, quality, prioritizeQualityOverCodec) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
         resumeStartMs = if (playlistIndex >= 0 || autoplayRequest) 0L else if (requestedStartMs > 0L || !YouTubeRepository.signedIn()) requestedStartMs else {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.historyResumePosition(videoId) } }
@@ -3875,7 +3912,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     PlayerChoice(extracted.serverAbrStreamingUrl, it.codec, it.height, it.fps,
                         it.bitrate, true, sabrFormat = it)
                 }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
-                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
+                selectVideoStream(availableStreams, codec, quality, prioritizeQualityOverCodec)?.let { chosen -> error = null; play(chosen) }
                 AppLog.event("player SABR primary video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
             }.onFailure { AppLog.failure("player SABR primary video=$videoId", it) }
         }
@@ -3887,7 +3924,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     .map { PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, it.videoOnly) }
                     .distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
                 YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = stableMetadata(it) }
-                selectVideoStream(availableStreams, codec, quality)?.let { chosen -> error = null; play(chosen) }
+                selectVideoStream(availableStreams, codec, quality, prioritizeQualityOverCodec)?.let { chosen -> error = null; play(chosen) }
             }.onFailure { e ->
                 AppLog.failure("player repository fallback video=$videoId", e)
                 if (availableStreams.isEmpty()) error = e.message.orEmpty()
@@ -4602,6 +4639,24 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
         item { ChoiceSection("Preferred video codec", CodecChoice.entries, codec, { it.label }, onCodec) }
         item { ChoiceSection("Preferred audio codec", AudioCodecChoice.entries, audioCodec, { it.label }, onAudioCodec) }
         item { ChoiceSection("Default video quality", QualityChoice.entries, quality, { it.label }, onQuality) }
+        item {
+            val prefs = activity.getSharedPreferences("settings", 0)
+            val prioritizeQuality = PlaybackPreferences.prioritizeQualityOverCodec
+            Row(Modifier.fillMaxWidth().clickable {
+                val updated = !prioritizeQuality
+                PlaybackPreferences.prioritizeQualityOverCodec = updated
+                prefs.edit().putBoolean("prioritize_quality_over_codec", updated).apply()
+            }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Prioritize video quality over preferred codec", style = MaterialTheme.typography.titleMedium)
+                    Text("Select a higher-quality variant in another codec when the preferred codec only has lower quality", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = prioritizeQuality, onCheckedChange = {
+                    PlaybackPreferences.prioritizeQualityOverCodec = it
+                    prefs.edit().putBoolean("prioritize_quality_over_codec", it).apply()
+                })
+            }
+        }
         item { ChoiceSection("Video decoder", DecoderMode.entries, videoDecoderMode, { it.label }, onVideoDecoderMode) }
         item { ChoiceSection("Audio decoder", DecoderMode.entries, audioDecoderMode, { it.label }, onAudioDecoderMode) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }

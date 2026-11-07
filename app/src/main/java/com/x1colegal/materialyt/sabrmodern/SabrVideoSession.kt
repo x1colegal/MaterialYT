@@ -275,6 +275,10 @@ internal class SabrVideoSession(
                 val refreshed = config.reloadPlayer.invoke(reloadToken)
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
+                    runCatching { android.util.Base64.decode(pot, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
+                        .getOrNull()?.takeIf { it.isNotEmpty() }?.let { poToken = it }
+                }
                 requestNumber = 0
                 startupEmptyResponses = 0
                 dry = 0
@@ -289,6 +293,10 @@ internal class SabrVideoSession(
                 val refreshed = config.refreshPlayer.invoke()
                 url = refreshed.first
                 ustreamerConfig = refreshed.second
+                url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
+                    runCatching { android.util.Base64.decode(pot, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
+                        .getOrNull()?.takeIf { it.isNotEmpty() }?.let { poToken = it }
+                }
                 requestNumber = 0
                 cookie = null
                 ctxByType.clear()
@@ -298,9 +306,28 @@ internal class SabrVideoSession(
                 dry = 0
                 continue
             }
+            var refreshedProtectionDuringStartup = false
             val startupResponseWithoutMedia = headers.isEmpty() &&
                 !video.initWritten && !audio.initWritten && video.lastSeq == 0 && audio.lastSeq == 0
-            if (startupResponseWithoutMedia) {
+            if (startupResponseWithoutMedia && protStatus >= SabrProtection.ATTESTATION_REQUIRED &&
+                protStatus > lastProtectionRefreshStatus) {
+                config.refreshPoToken?.let { refresh ->
+                    lastProtectionRefreshAt = System.currentTimeMillis()
+                    lastProtectionRefreshStatus = protStatus
+                    runCatching { refresh() }
+                        .onSuccess { refreshed ->
+                            poToken = refreshed.second
+                            url = url.toHttpUrlOrNull()?.newBuilder()
+                                ?.setQueryParameter("pot", refreshed.first)
+                                ?.build()?.toString() ?: url
+                            attestationStalls = 0
+                            refreshedProtectionDuringStartup = true
+                            AppLog.event("SABR video installed fresh streaming PoToken during startup protection=$protStatus")
+                        }
+                        .onFailure { AppLog.failure("SABR video startup streaming PoToken refresh", it) }
+                }
+            }
+            if (startupResponseWithoutMedia && !refreshedProtectionDuringStartup) {
                 startupEmptyResponses++
                 AppLog.event(
                     "SABR video startup empty response=$startupEmptyResponses refreshes=$emptySessionRefreshes " +
@@ -313,6 +340,10 @@ internal class SabrVideoSession(
                         val refreshed = config.refreshPlayer.invoke()
                         url = refreshed.first
                         ustreamerConfig = refreshed.second
+                        url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
+                            runCatching { android.util.Base64.decode(pot, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
+                                .getOrNull()?.takeIf { it.isNotEmpty() }?.let { poToken = it }
+                        }
                         requestNumber = 0
                         cookie = null
                         ctxByType.clear()

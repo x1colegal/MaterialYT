@@ -1679,14 +1679,7 @@ object YouTubeRepository {
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
 
         val cpn = response.optString("_materialytCpn").takeIf { it.isNotBlank() } ?: java.util.UUID.randomUUID().toString().replace("-", "").take(16)
-        val trackingAsMusic = music
-        val authenticatedTracking = runCatching { authenticatedPlayerTracking(videoId, cpn) }
-            .onFailure { AppLog.failure("authenticated tracking video=$videoId music=$music", it) }.getOrNull()
-        (authenticatedTracking ?: response.optJSONObject("playbackTracking"))?.let { tracking ->
-            val playback = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl").orEmpty()
-            val watchtime = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl").orEmpty()
-            if (playback.isNotBlank() && watchtime.isNotBlank()) synchronized(playbackTracking) { playbackTracking[videoId] = PlaybackTracking(playback, watchtime, cpn, trackingAsMusic) }
-        }
+        cachePlaybackTracking(videoId, response.optJSONObject("playbackTracking"), cpn, music)
 
         if (finalStatus != "OK") {
             error(firstError)
@@ -1779,10 +1772,7 @@ object YouTubeRepository {
         val cpn = response.optString("_materialytCpn")
             .takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no playback nonce")
         PlaybackLoadStatus.show(videoId, "Preparing history tracking…")
-        val accountTracking = runCatching { authenticatedPlayerTracking(videoId, cpn) }
-            .onFailure { AppLog.failure("SABR authenticated tracking video=$videoId", it) }
-            .getOrNull()
-        cachePlaybackTracking(videoId, accountTracking ?: response.optJSONObject("playbackTracking"), cpn, music)
+        cachePlaybackTracking(videoId, response.optJSONObject("playbackTracking"), cpn, music)
         if (!response.optBoolean("_materialytNResolved")) {
             PlaybackLoadStatus.show(videoId, "Solving media URL…")
         }
@@ -1984,6 +1974,7 @@ object YouTubeRepository {
         reloadToken: String? = null,
         cpnOverride: String? = null,
         adPlayback: Boolean = false,
+        forceFreshPoToken: Boolean = false,
     ): JSONObject {
         val clientName = "WEB"
         val clientId = "1"
@@ -2007,7 +1998,14 @@ object YouTubeRepository {
                 else -> "visitor"
             }}"
         )
-        val token = WebPoTokenProvider.get(videoId, requestedVisitor, streamingBinding, origin, WEB_PLAYER_UA)
+        val token = WebPoTokenProvider.get(
+            videoId,
+            requestedVisitor,
+            streamingBinding,
+            origin,
+            WEB_PLAYER_UA,
+            forceFreshChallenge = forceFreshPoToken,
+        )
         // Android 5-7 cannot initialize two WebViews reliably at the same time. Starting the
         // watch-page attestation runtime before BotGuard caused both to contend for the old
         // WebView/JS engine, making BotGuard hit its full 30-second timeout before succeeding
@@ -2126,8 +2124,13 @@ object YouTubeRepository {
     fun refreshWebSabrAdPlayback(info: SabrPlaybackInfo): Pair<String, String> {
         check(info.clientId == 1) { "Ad playback refresh is only supported by the WEB playback client" }
         val originalCpn = info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
-        val response = webPoPlayer(info.videoId, cpnOverride = originalCpn, adPlayback = true)
-        val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        var response = webPoPlayer(info.videoId, cpnOverride = originalCpn, adPlayback = true)
+        var status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        if (status != "OK") {
+            AppLog.event("SABR WEB ad playback refresh status=$status video=${info.videoId}; retrying fresh player session")
+            response = webPoPlayer(info.videoId, forceFreshPoToken = true)
+            status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        }
         val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
         check(status == "OK") { reason.ifBlank { "WEB ad playback refresh returned $status" } }
         val streaming = response.optJSONObject("streamingData")

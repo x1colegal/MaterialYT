@@ -2,6 +2,18 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [5.11] - 2026-11-06
+
+### Added
+- Add a `"Prioritize video quality over preferred codec"` setting (disabled by default) that selects higher-resolution and higher-framerate streams before falling back to preferred video codec ties, while continuing to respect the user's preferred resolution cap.
+
+### Fixed
+- Reuse `playbackTracking` directly from the authenticated `webPoPlayer` response instead of sending a duplicate unattested `/player` request with the same `cpn` that YouTube rejected as `UNPLAYABLE`.
+- Refresh the streaming `PoToken` immediately when `STREAM_PROTECTION_STATUS=3` arrives during an empty SABR startup handshake instead of discarding the active SABR context and failing the session, and keep the refreshed `pot=` query parameter synchronized with the protobuf `poToken`.
+- Fall back to a clean player resolution with a freshly minted `PoToken` when `adPlayback` recovery with the original `cpn` fails.
+- Unregister the active `ExoPlayer` from `MainActivity` before releasing it on disposal so `onStop()` never posts a pause command to a dead player thread.
+- Stop `AutoMusicService` from broadcasting `MediaSession` state updates every 500ms while paused or closed, and deduplicate repeated playback lock and system-bar diagnostic logs.
+
 ## [5.10] - 2026-11-06
 
 ### Fixed

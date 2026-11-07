@@ -1,6 +1,9 @@
 package com.x1colegal.materialyt
 
 import android.content.Context
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.google.android.exoplayer2.DefaultLoadControl
 import com.google.android.exoplayer2.DefaultRenderersFactory
 import com.google.android.exoplayer2.ExoPlayer
@@ -11,6 +14,7 @@ enum class DecoderMode(val label: String) { AUTO("Auto"), HARDWARE("Force HW"), 
 object PlaybackPreferences {
     @Volatile var videoDecoderMode = DecoderMode.AUTO
     @Volatile var audioDecoderMode = DecoderMode.AUTO
+    var prioritizeQualityOverCodec by mutableStateOf(false)
 }
 
 object PlayerFactory {

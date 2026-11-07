@@ -64,9 +64,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     private fun releasePlaybackLocks() {
+        val held = playbackWifiLock.isHeld || playbackWakeLock.isHeld
         if (playbackWifiLock.isHeld) playbackWifiLock.release()
         if (playbackWakeLock.isHeld) playbackWakeLock.release()
-        AppLog.event("music playback locks released")
+        if (held) AppLog.event("music playback locks released")
     }
 
     companion object {
@@ -231,7 +232,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             var lastReported = 0L
             var reportedTrackId: String? = null
             while (true) {
-                position.longValue = player.currentPosition.coerceAtLeast(0L); bufferedPosition.longValue = player.bufferedPosition.coerceAtLeast(position.longValue); duration.longValue = player.duration.coerceAtLeast(0L); publishState()
+                position.longValue = player.currentPosition.coerceAtLeast(0L)
+                bufferedPosition.longValue = player.bufferedPosition.coerceAtLeast(position.longValue)
+                duration.longValue = player.duration.coerceAtLeast(0L)
+                if (player.isPlaying) publishState()
                 val id = currentTrack?.id
                 if (id != reportedTrackId) { reportedTrackId = id; lastReported = 0L }
                 val knownDuration = duration.longValue
@@ -618,6 +622,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     private fun publishState() {
+        if (currentTrack == null || closingPlayback) return
         val state = when {
             player.isPlaying -> PlaybackStateCompat.STATE_PLAYING
             player.playbackState == Player.STATE_BUFFERING -> PlaybackStateCompat.STATE_BUFFERING
@@ -627,7 +632,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         session.setPlaybackState(PlaybackStateCompat.Builder()
             .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH or PlaybackStateCompat.ACTION_SEEK_TO or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_STOP)
             .setState(state, player.currentPosition.coerceAtLeast(0L), if (player.isPlaying) 1f else 0f).build())
-        if (currentTrack != null) getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
     }
 
     private fun requestClosePlayback() {

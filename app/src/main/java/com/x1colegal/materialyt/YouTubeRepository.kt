@@ -2144,24 +2144,28 @@ object YouTubeRepository {
         return refreshed
     }
 
-    /** Recreates a WEB SABR endpoint after the server enters its content-ad context flow. */
-    fun refreshWebSabrAdPlayback(info: SabrPlaybackInfo): Pair<String, String> {
+    /** Recreates a WEB SABR endpoint after the server enters its content-ad context flow or stalls on protection. */
+    fun refreshWebSabrAdPlayback(info: SabrPlaybackInfo, forceFreshCpn: Boolean = true): Pair<String, String> {
         check(info.clientId == 1) { "Ad playback refresh is only supported by the WEB playback client" }
-        val originalCpn = info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
-        var response = webPoPlayer(info.videoId, cpnOverride = originalCpn, adPlayback = true)
-        var status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
-        if (status != "OK") {
-            AppLog.event("SABR WEB ad playback refresh status=$status video=${info.videoId}; retrying fresh player session")
-            response = webPoPlayer(info.videoId, forceFreshPoToken = true)
-            status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        val originalCpn = if (forceFreshCpn) null else info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
+        var response = if (forceFreshCpn) {
+            webPoPlayer(info.videoId, forceFreshPoToken = true)
+        } else {
+            var res = webPoPlayer(info.videoId, cpnOverride = originalCpn, adPlayback = true, forceFreshPoToken = false)
+            if (res.optJSONObject("playabilityStatus")?.optString("status") != "OK") {
+                res = webPoPlayer(info.videoId, forceFreshPoToken = true)
+            }
+            res
         }
+        val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
         check(status == "OK") { reason.ifBlank { "WEB ad playback refresh returned $status" } }
         val streaming = response.optJSONObject("streamingData")
             ?: error("WEB ad playback refresh returned no streamingData")
         val rawUrl = streaming.optString("serverAbrStreamingUrl").takeIf(String::isNotBlank)
             ?: error("WEB ad playback refresh returned no endpoint")
-        val solved = solveNChallenge(info.videoId, rawUrl, playerJavaScript(info.videoId), false)
+        val solved = if (response.optBoolean("_materialytNResolved")) rawUrl
+            else solveNChallenge(info.videoId, rawUrl, playerJavaScript(info.videoId), false)
         val cpn = response.optString("_materialytCpn").ifBlank { originalCpn.orEmpty() }
         val pot = response.optString("_materialytStreamingPot")
         val url = solved.toHttpUrlOrNull()?.newBuilder()
@@ -2188,7 +2192,8 @@ object YouTubeRepository {
         val streaming = response.optJSONObject("streamingData") ?: error("SABR player reload returned no streamingData")
         val rawUrl = streaming.optString("serverAbrStreamingUrl").takeIf(String::isNotBlank)
             ?: error("SABR player reload returned no endpoint")
-        val solved = solveNChallenge(info.videoId, rawUrl, playerJavaScript(info.videoId), false)
+        val solved = if (response.optBoolean("_materialytNResolved")) rawUrl
+            else solveNChallenge(info.videoId, rawUrl, playerJavaScript(info.videoId), false)
         val cpn = response.optString("_materialytCpn")
         val pot = info.streamingPoToken
         val url = solved.toHttpUrlOrNull()?.newBuilder()

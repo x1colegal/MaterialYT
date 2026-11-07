@@ -153,6 +153,7 @@ internal class SabrVideoSession(
         var dry = 0
         var attestationStalls = 0
         var emptySessionRefreshes = 0
+        var midStreamRefreshes = 0
         var startupEmptyResponses = 0
         var lastProtectionRefreshAt = 0L
         var lastProtectionRefreshStatus = 0L
@@ -434,6 +435,34 @@ internal class SabrVideoSession(
                         .onFailure { AppLog.failure("SABR video streaming PoToken refresh", it) }
                 }
             }
+            val refreshPlayer = config.refreshPlayer
+            val midStreamNeedsRefresh = (protStatus >= SabrProtection.ATTESTATION_REQUIRED || attestationStalls >= 2 || dry >= 3) &&
+                (video.lastSeq > 0 || audio.lastSeq > 0) &&
+                refreshPlayer != null && midStreamRefreshes < MAX_MIDSTREAM_REFRESHES
+            if (midStreamNeedsRefresh && refreshPlayer != null) {
+                midStreamRefreshes++
+                AppLog.event("SABR video refreshing player session mid-stream protStatus=$protStatus stalls=$attestationStalls dry=$dry attempt=$midStreamRefreshes")
+                val refreshed = runCatching { refreshPlayer() }
+                    .onFailure { AppLog.failure("SABR video mid-stream player refresh", it) }
+                    .getOrNull()
+                if (refreshed != null) {
+                    url = refreshed.first
+                    ustreamerConfig = refreshed.second
+                    refreshed.first.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
+                        runCatching { android.util.Base64.decode(pot, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
+                            .getOrNull()?.takeIf { it.isNotEmpty() }?.let { poToken = it }
+                    }
+                    requestNumber = 0
+                    cookie = null
+                    ctxByType.clear()
+                    ctxToSend.clear()
+                    dry = 0
+                    attestationStalls = 0
+                    backoffTimeMs = 0
+                    lastProtectionRefreshStatus = 0
+                    continue
+                }
+            }
             if (SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR video attestation cap (STREAM_PROTECTION_STATUS=$protStatus) — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus)", stall = true); return
@@ -483,5 +512,6 @@ internal class SabrVideoSession(
         private const val TAG = "SabrVideoSession"
         private const val STARTUP_EMPTY_LIMIT = 2
         private const val MAX_STARTUP_REFRESHES = 2
+        private const val MAX_MIDSTREAM_REFRESHES = 3
     }
 }

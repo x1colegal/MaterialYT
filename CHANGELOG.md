@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.0] - 2026-11-07
+
+### Fixed
+- Rotate SABR player sessions mid-stream (`refreshPlayer`) in `SabrVideoSession` and `SabrSession` when YouTube signals `STREAM_PROTECTION_STATUS = 3` (`ATTESTATION_REQUIRED`), attestation stalls, or dry buffer cutoffs, requesting fresh player endpoints, ustreamer configuration, and streaming PoTokens without stopping playback or failing with `incomplete drain` around the 1-minute mark.
+- Fix mid-stream session rotation endpoint assignment by using the refreshed URL directly rather than re-running URL preparation, preventing `n` challenge corruption and duplicate stale `pot`/`cpn` parameters that caused `HTTP 403 Forbidden`.
+- Request clean player sessions (`forceFreshPoToken = true`) directly during SABR session rotation, bypassing unsupported ad playback context payloads that returned `UNPLAYABLE`.
+
 ## [5.12] - 2026-11-07
 
 ### Added

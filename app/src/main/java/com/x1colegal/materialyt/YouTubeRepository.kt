@@ -2294,7 +2294,12 @@ object YouTubeRepository {
             .takeUnless(::isChannelMetadataLabel).orEmpty()
         val responseChannelId = responseDetails?.optString("channelId").orEmpty()
         val likeText = findLikeText(primary).orEmpty()
-        val published = text(primary?.opt("dateText")).orEmpty().ifBlank { current.publishedDate }
+        val rawDateText = text(primary?.opt("dateText")).orEmpty()
+        val published = if (current.publishedDate.isNotBlank() && Regex("\\d{4}-\\d{2}-\\d{2}").containsMatchIn(current.publishedDate)) {
+            current.publishedDate
+        } else {
+            rawDateText.ifBlank { current.publishedDate }
+        }
         val attributedDescription = secondary?.optJSONObject("attributedDescription")
         val description = attributedDescription?.optString("content").orEmpty()
             .ifBlank { text(secondary?.opt("description")).orEmpty() }

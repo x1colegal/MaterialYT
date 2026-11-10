@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.1] - 2026-11-10
+
+### Fixed
+- Normalize published date strings and strip redundant prefixes (`Premiered`, `Published on`, `Streamed live on`) across both full dates and ISO timestamps in `displayPublishedDate`, and stabilize `publishedDate` in `stableMetadata` to prevent UI flickering between short, prefixed, and expanded month formats when metadata refreshes asynchronously.
+
 ## [6.0] - 2026-11-07
 
 ### Fixed

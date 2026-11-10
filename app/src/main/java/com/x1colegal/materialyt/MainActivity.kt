@@ -2198,14 +2198,39 @@ private fun cleanChannelDisplayName(value: String?): String? {
 private fun displayChannelName(vararg candidates: String?): String =
     candidates.firstNotNullOfOrNull(::cleanChannelDisplayName) ?: "Loading channel…"
 
+private val PUBLISHED_DATE_PATTERNS = listOf(
+    "MMM d, yyyy",
+    "MMMM d, yyyy",
+    "d MMM yyyy",
+    "d MMMM yyyy",
+    "MMM dd, yyyy",
+    "MMMM dd, yyyy",
+    "dd MMM yyyy",
+    "dd MMMM yyyy",
+    "yyyy-MM-dd",
+)
+
+private val TARGET_PUBLISHED_DATE_FORMATTER =
+    java.time.format.DateTimeFormatter.ofPattern("MMMM d, yyyy", java.util.Locale.ENGLISH)
+
 private fun displayPublishedDate(value: String?): String? {
     val clean = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
-    val isoDate = Regex("^\\d{4}-\\d{2}-\\d{2}").find(clean)?.value ?: return clean
-    return runCatching {
-        java.time.LocalDate.parse(isoDate).format(
-            java.time.format.DateTimeFormatter.ofPattern("MMMM d, yyyy", java.util.Locale.ENGLISH)
-        )
-    }.getOrDefault(clean)
+    val isoDate = Regex("\\d{4}-\\d{2}-\\d{2}").find(clean)?.value
+    if (isoDate != null) {
+        val formatted = runCatching {
+            java.time.LocalDate.parse(isoDate).format(TARGET_PUBLISHED_DATE_FORMATTER)
+        }.getOrNull()
+        if (formatted != null) return formatted
+    }
+    val stripped = clean.replace(Regex("(?i)^(?:premiered|published|streamed(?:\\s+live)?|uploaded)(?:\\s+on)?\\s*:?\\s*"), "").trim()
+    for (pattern in PUBLISHED_DATE_PATTERNS) {
+        val parsed = runCatching {
+            val formatter = java.time.format.DateTimeFormatter.ofPattern(pattern, java.util.Locale.ENGLISH)
+            java.time.LocalDate.parse(stripped, formatter).format(TARGET_PUBLISHED_DATE_FORMATTER)
+        }.getOrNull()
+        if (parsed != null) return parsed
+    }
+    return stripped.ifBlank { clean }
 }
 
 private fun optimisticLikeText(text: String, previous: VideoRating, next: VideoRating): String {
@@ -3664,9 +3689,19 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             it.isNotBlank() && !it.equals("Video", true) && !it.equals("Up Next", true)
         }
         val stableAuthor = cleanChannelDisplayName(current.author)
+        val currentPublished = displayPublishedDate(current.publishedDate)
+        val latestPublished = displayPublishedDate(latest.publishedDate)
+        val stablePublished = if (!currentPublished.isNullOrBlank() && currentPublished == latestPublished) {
+            current.publishedDate
+        } else if (!currentPublished.isNullOrBlank() && latestPublished.isNullOrBlank()) {
+            current.publishedDate
+        } else {
+            latest.publishedDate
+        }
         return latest.copy(
             title = stableTitle ?: latest.title,
             author = stableAuthor ?: latest.author,
+            publishedDate = stablePublished,
         )
     }
     fun bindPlaylistControls(view: PlayerView) {

@@ -990,7 +990,8 @@ private fun AppScaffold(
                         onClick = {
                             activeChannelUrl = null
                             activePlaylistUrl = null
-                            activeVideoUrl = null
+                            // Keep the root-owned player alive while navigating. Clearing the
+                            // URL here released the player instead of collapsing it to MiniPlayer.
                             playerMode = false
                             tab = index
                         },
@@ -1022,7 +1023,8 @@ private fun AppScaffold(
                             onClick = {
                                 activeChannelUrl = null
                                 activePlaylistUrl = null
-                                activeVideoUrl = null
+                                // Playback is intentionally hoisted above individual tabs.
+                                // Switching destinations must only minimize it, never dispose it.
                                 playerMode = false
                                 tab = index
                             },
@@ -2402,7 +2404,7 @@ private fun MusicPlaylistScreen(
                                 Modifier.fillMaxWidth().clickable { selectTrack(item) }.padding(10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("${index + 1}", Modifier.width(36.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                                Text("${index + 1}", Modifier.width(48.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, maxLines = 1, softWrap = false)
                                 AsyncImage(item.thumbnail, null, Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
                                 Column(Modifier.padding(start = 14.dp).weight(1f)) {
                                     Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
@@ -2460,7 +2462,7 @@ private fun MusicPlaylistScreen(
                             Modifier.fillMaxWidth().clickable { selectTrack(item) }.padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("${index + 1}", Modifier.width(32.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                            Text("${index + 1}", Modifier.width(48.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, maxLines = 1, softWrap = false)
                             AsyncImage(item.thumbnail, null, Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
                             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                                 Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
@@ -3566,7 +3568,7 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
                 items(playlistItems.size) { index ->
                     val item = playlistItems[index]
                     Row(Modifier.fillMaxWidth().clickable { openVideo(item.url, playlistItems, index) }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("${index + 1}", Modifier.width(38.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${index + 1}", Modifier.width(48.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, softWrap = false)
                         AsyncImage(item.thumbnail, null, Modifier.width(180.dp).aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
                         Column(Modifier.padding(start = 16.dp).weight(1f)) {
                             Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
@@ -3592,7 +3594,7 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
                     FilledTonalButton(onClick = { val shuffled = playlistItems.shuffled(); openVideo(shuffled.first().url, shuffled, 0) }, Modifier.weight(1f)) { Icon(Icons.Default.Shuffle, null); Spacer(Modifier.width(6.dp)); Text("Shuffle") }
                 }
             } }
-            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { openVideo(item.url, playlistItems, index) }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) }; IconButton(onClick = { saveVideoId = item.id }) { Icon(Icons.Default.PlaylistAdd, "Save to playlist") }; if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist") } } }
+            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { openVideo(item.url, playlistItems, index) }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(48.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, softWrap = false); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) }; IconButton(onClick = { saveVideoId = item.id }) { Icon(Icons.Default.PlaylistAdd, "Save to playlist") }; if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist") } } }
             if (continuation != null || loadingMore) item {
                 LaunchedEffect(continuation) { if (!loadingMore) loadMoreVideos() }
                 Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -4832,6 +4834,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var videoMetadata by remember(videoId) { mutableStateOf(YouTubeRepository.videoDetails(videoId)) }
     var channelInfo by remember { mutableStateOf<ChannelInfo?>(null) }
     var interactions by remember(videoId) { mutableStateOf(VideoInteractionState()) }
+    var isOwnChannel by remember(videoId) { mutableStateOf(false) }
     var interactionBusy by remember(videoId) { mutableStateOf(false) }
     var subscriptionBusy by remember(videoId) { mutableStateOf(false) }
     var relatedLoading by remember(videoId) { mutableStateOf(false) }
@@ -5297,7 +5300,13 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     }
     LaunchedEffect(videoId) {
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.videoInteractions(videoId) } }
-            .onSuccess { interactions = it }
+            .onSuccess { state ->
+                interactions = state
+                isOwnChannel = runCatching {
+                    withContext(Dispatchers.IO) { YouTubeRepository.isSignedInChannel(state.channelId) }
+                }.onFailure { AppLog.failure("video own-channel check channel=${state.channelId}", it) }
+                    .getOrDefault(false)
+            }
             .onFailure { AppLog.failure("video interactions video=$videoId", it) }
     }
     LaunchedEffect(url) {
@@ -5551,7 +5560,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
                                 Text(displayChannelName(videoMetadata?.author, channelInfo?.name), style = MaterialTheme.typography.titleMedium)
                             }
-                            Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
+                            if (!isOwnChannel) Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
                         }
                         HorizontalDivider()
                         Surface(Modifier.fillMaxWidth().padding(12.dp).clickable { phonePanel = VideoPhonePanel.COMMENTS }, shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
@@ -5648,8 +5657,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         }
                     }
                 }
-            } else LazyColumn(Modifier.fillMaxSize()) {
-                item {
+            } else Column(Modifier.fillMaxSize()) {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
                         AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> if (visibility == View.VISIBLE) bindPlaylistControls(this) }); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
                         if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
@@ -5662,6 +5670,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         IconButton(onClick = { fullscreen = true; activity.fullscreen(true) }) { Icon(Icons.Default.Fullscreen, "Fullscreen") }
                         if (Build.VERSION.SDK_INT >= 26) IconButton(onClick = { activity.pip() }) { Icon(Icons.Default.PictureInPicture, "Picture in picture") }
                     }
+                LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                    item {
                     when (phonePanel) {
                         VideoPhonePanel.DETAILS -> {
                             val views = videoMetadata?.viewCount ?: -1L
@@ -5731,7 +5741,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                 val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: videoMetadata?.authorAvatar
                                 if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop) else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
                                 Column(Modifier.padding(horizontal = 12.dp).weight(1f)) { Text(displayChannelName(videoMetadata?.author, null, channelInfo?.name), style = MaterialTheme.typography.titleMedium) }
-                                Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
+                                if (!isOwnChannel) Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
                             }
                             HorizontalDivider()
                             Surface(Modifier.fillMaxWidth().padding(12.dp).clickable { phonePanel = VideoPhonePanel.COMMENTS }, shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
@@ -5774,6 +5784,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         }
                     }
                 }
+            }
             }
         }
     }

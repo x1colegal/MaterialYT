@@ -16,8 +16,8 @@ android {
         applicationId = "com.x1colegal.materialyt"
         minSdk = 21
         targetSdk = 36
-        versionCode = 192
-        versionName = "6.3"
+        versionCode = 193
+        versionName = "6.4"
     }
     signingConfigs {
         getByName("debug") {

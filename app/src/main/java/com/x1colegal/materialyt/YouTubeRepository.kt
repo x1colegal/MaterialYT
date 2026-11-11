@@ -658,7 +658,7 @@ object YouTubeRepository {
             ?: ""
         val pageThumbnail = (findThumbnail(playlistHeader?.opt("playlistHeaderBanner"))
             ?: findThumbnail(playlistHeader?.opt("heroPlaylistThumbnail")))
-            ?.let { highResolutionArtworkUrl(it, 1, 1) }
+            ?.let(::highResolutionPlaylistArtwork)
             ?: ""
         var editable = findBoolean(page, "isEditable") == true || normalizedId in accountPlaylistIds
         var deletable = editable && normalizedId.startsWith("PL")
@@ -667,6 +667,30 @@ object YouTubeRepository {
             val richGrid = findObject(page, "richGridRenderer")?.optJSONObject("richGridRenderer")
             items = richGrid?.let(::parsePlaylistVideos).orEmpty().toMutableList()
             AppLog.event("liked videos rich grid items=${items.size}")
+            if (items.isEmpty()) {
+                // Liked Videos can initially return only its private playlist shell. The
+                // official playlist reload command asks for the unavailable-items view;
+                // that response contains the actual video lockups for the signed-in user.
+                val reloaded = runCatching {
+                    post(
+                        "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+                        JSONObject()
+                            .put("context", context("WEB", bootstrap.version))
+                            .put("browseId", "VLLL")
+                            .put("params", "wgYCCAA="),
+                        origin,
+                    )
+                }.onFailure { AppLog.failure("liked videos unavailable-items reload", it) }.getOrNull()
+                if (reloaded != null) {
+                    val reloadedItems = parseRegularPlaylistVideos(reloaded)
+                        .ifEmpty { parsePlaylistVideos(reloaded) }
+                    if (reloadedItems.isNotEmpty()) {
+                        page = reloaded
+                        items += reloadedItems
+                    }
+                    AppLog.event("liked videos unavailable-items reload items=${reloadedItems.size}")
+                }
+            }
         }
         AppLog.event("playlist browse id=$normalizedId items=${items.size} continuation=${findPlaylistContinuationToken(page) != null}")
         if (items.isEmpty() && normalizedId == "YS") {
@@ -801,7 +825,8 @@ object YouTubeRepository {
         val list = candidates.firstOrNull { candidate ->
             (0 until candidate.length()).any { index ->
                 val item = candidate.optJSONObject(index)
-                item?.has("playlistVideoRenderer") == true || item?.has("playlistPanelVideoRenderer") == true
+                item?.has("playlistVideoRenderer") == true || item?.has("playlistPanelVideoRenderer") == true ||
+                    item?.has("lockupViewModel") == true
             }
         }
         if (list != null) return parsePlaylistVideos(list)
@@ -3912,7 +3937,8 @@ object YouTubeRepository {
             val thumbHeight = if (isMusicItem || isChannel) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
             val rawThumbnail = if ((isMusicItem || isPlaylist || isChannel) && providedThumbnail.isNotBlank()) providedThumbnail else "https://i.ytimg.com/vi/$id/maxresdefault.jpg"
             val thumbnail = if (isMusicItem || isPlaylist || isChannel) {
-                highResolutionArtworkUrl(rawThumbnail, thumbWidth, thumbHeight)
+                (if (isPlaylist) highResolutionPlaylistArtwork(rawThumbnail)
+                else highResolutionArtworkUrl(rawThumbnail, thumbWidth, thumbHeight))
                     .replace(Regex("/(?:default|mqdefault|sddefault)\\.(?:jpg|webp)(?=\\?|$)"), "/hqdefault.jpg")
             } else rawThumbnail
             val channelThumbnail = findChannelThumbnail(renderer)?.let { highResolutionArtworkUrl(it, 1, 1) }
@@ -4354,7 +4380,16 @@ object YouTubeRepository {
         }
     }
 
-    fun highResolutionPlaylistArtwork(url: String): String = highResolutionArtworkUrl(url, 1, 1)
+    fun highResolutionPlaylistArtwork(url: String): String {
+        val upgraded = highResolutionArtworkUrl(url, 1, 1)
+        // Playlist renderers frequently expose only the tiny default/mq/hq URL even
+        // though the source video has a full-size cover. Request YouTube's largest
+        // standard artwork variant for playlist cards and headers.
+        return upgraded.replace(
+            Regex("/(?:default|mqdefault|hqdefault|sddefault)\\.(?:jpg|webp)(?=\\?|$)"),
+            "/maxresdefault.jpg",
+        )
+    }
 
     private fun findThumbnail(value: Any?): String? = when (value) {
         is JSONObject -> value.optString("url").takeIf(::isYouTubeImageUrl)?.let(::normalizeImageUrl)

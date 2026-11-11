@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.4] - 2026-11-11
+
+### Fixed
+- Keep active video and music playback alive in the miniplayer when switching between app destinations.
+- Parse the current `lockupViewModel` playlist rows and reload the signed-in unavailable-items view used by YouTube for Liked Videos.
+- Request high-resolution artwork for playlist cards and playlist headers.
+- Keep four-digit and larger playlist positions on one line.
+- Hide the video player's Subscribe button when the uploader is the signed-in channel.
+- Keep the phone video surface pinned while scrolling player metadata, comments, and recommendations.
+
 ## [6.3] - 2026-11-11
 
 ### Added

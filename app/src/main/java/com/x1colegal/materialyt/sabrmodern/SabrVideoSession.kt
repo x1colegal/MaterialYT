@@ -157,6 +157,8 @@ internal class SabrVideoSession(
         var startupEmptyResponses = 0
         var lastProtectionRefreshAt = 0L
         var lastProtectionRefreshStatus = 0L
+        var protectionRefreshes = 0
+        var protectionMaxRetries = 5
         var backoffTimeMs = 0L
 
         while (!cancelled && iter < maxIter && dry < 6) {
@@ -261,7 +263,9 @@ internal class SabrVideoSession(
                 SabrUmp.RELOAD_PLAYER_RESPONSE -> reloadToken = SabrUmp.reloadToken(p.payload)
                 SabrUmp.SNACKBAR_MESSAGE -> snackbarPayload = p.payload.joinToString("") { "%02x".format(it) }
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
-                    protStatus = SabrProto.read(p.payload).longAt(1)
+                    val status = SabrProto.read(p.payload)
+                    protStatus = status.longAt(1)
+                    status.longAt(2).takeIf { it > 0 }?.let { protectionMaxRetries = it.toInt() }
                     if (protStatus != 1L || iter <= 3) AppLog.event("SABR video protection=$protStatus iter=$iter")
                     Timber.tag(TAG).d("STREAM_PROTECTION_STATUS=$protStatus (1=OK,2=pending,3=attestation-required)")
                 }
@@ -419,7 +423,8 @@ internal class SabrVideoSession(
             val protectionRefreshDue = protStatus >= SabrProtection.ATTESTATION_REQUIRED && protectionEscalated ||
                 attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
                 System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
-            if (protectionRefreshDue) {
+            var protectionTokenRefreshed = false
+            if (protectionRefreshDue && protectionRefreshes < protectionMaxRetries) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
                     lastProtectionRefreshStatus = protStatus
@@ -430,13 +435,28 @@ internal class SabrVideoSession(
                                 ?.setQueryParameter("pot", refreshed.first)
                                 ?.build()?.toString() ?: url
                             attestationStalls = 0
+                            dry = 0
+                            protectionRefreshes++
+                            protectionTokenRefreshed = true
                             AppLog.event("SABR video installed fresh streaming PoToken in URL and request protection=$protStatus")
                         }
                         .onFailure { AppLog.failure("SABR video streaming PoToken refresh", it) }
                 }
             }
+            // This response was produced for the previous token. Keep the active endpoint,
+            // buffered ranges, cookies and contexts, then retry with the new token.
+            if (protectionTokenRefreshed) {
+                backoffTimeMs = maxOf(backoffTimeMs, 1_000L)
+                continue
+            }
+            if (protStatus >= SabrProtection.ATTESTATION_PENDING && !newSeg &&
+                protectionRefreshes < protectionMaxRetries) {
+                dry = 0
+                backoffTimeMs = maxOf(backoffTimeMs, 500L)
+                continue
+            }
             val refreshPlayer = config.refreshPlayer
-            val midStreamNeedsRefresh = (protStatus >= SabrProtection.ATTESTATION_REQUIRED || attestationStalls >= 2 || dry >= 3) &&
+            val midStreamNeedsRefresh = protStatus < SabrProtection.ATTESTATION_PENDING && dry >= 3 &&
                 (video.lastSeq > 0 || audio.lastSeq > 0) &&
                 refreshPlayer != null && midStreamRefreshes < MAX_MIDSTREAM_REFRESHES
             if (midStreamNeedsRefresh && refreshPlayer != null) {

@@ -2,6 +2,49 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.3] - 2026-11-11
+
+### Added
+- Comprehensive YouTube Music playlist management matching YouTube:
+  - Rich playlist detail view (`MusicPlaylistScreen`) featuring a high-resolution cover header, title, author, track counter, "Play all", and "Shuffle" buttons.
+  - Delete playlist action in the playlist header bar with permanent deletion confirmation.
+  - Remove track action on editable playlist rows with confirmation dialog.
+  - Save track to playlist action directly from individual music playlist rows.
+  - Playlist creation dialog accessible directly from the YouTube Music section headers.
+  - Tablet split layout for music playlists (album cover and actions on the left panel, scrollable track list with indices on the right panel).
+  - In `MusicPlayer`: added Skip Previous and Skip Next playback controls alongside Play/Pause on both phone and tablet layouts.
+  - In `MusicPlayer`: added dedicated "Queue" ("Up Next") tab displaying the active playlist/queue with live playing indicator, track indices, and one-tap track selection.
+  - Unified playlist dialog (`SaveVideoToPlaylistDialog`) aggregating both YouTube Music and YouTube video playlists.
+- Native YouTube Music library playlists: Fetch user playlists and albums directly from YouTube Music endpoints (`FEmusic_liked_playlists` and `FEmusic_library_landing` via `WEB_REMIX` client and `https://music.youtube.com`), replacing regular YouTube video playlists in the YT Music feed with native music playlists and albums.
+- Support parsing YouTube Music playlist and album identifiers (`VL`, `PL`, `MPRE`, `LM`, `SS`, `SE`) and direct album browse navigation without synthetic `VL` prefixing.
+- Add support for artists and channels in YouTube Music, including parsing music artist/channel renderers (`musicResponsiveListItemRenderer`, `musicCardShelfRenderer`), dedicated `MusicChannelShelf` rows in search and browse, and interactive navigation to artist channel pages from search, shelves, tracks, and the music player.
+- Add "See all" chevron (`>`) to YouTube Music section titles (such as "Playlists" and carousels) to view all items in a full-screen grid or list with back navigation.
+- Add user Playlists section directly below "Listen Again" on the YouTube Music home screen.
+- Add Android Auto voice/text search support (`onSearch`, `onPlayFromSearch`, `onPrepareFromSearch`), media queue publishing, and slot reservations for previous/next controls.
+
+### Fixed
+- Keep SABR playback on the active endpoint when YouTube reports `ATTESTATION_PENDING`: refresh the streaming PoToken in place, ignore the stale protection response, preserve buffered media and protocol context, honor the server-provided retry limit, and reserve full player reloads for explicit `RELOAD_PLAYER_RESPONSE` frames.
+- Request original YouTube channel and artist artwork from `yt3` image hosts and select the largest available avatar candidate, preventing visibly pixelated profile images in YouTube Music results.
+- Expand YouTube Music search with native filtered sections for songs, albums, artists, playlists, profiles, podcasts, and episodes, including working full-section navigation.
+- Limit standard YouTube playlist parsing to the playlist's own video-list renderer so unrelated recommendations cannot appear as playlist entries.
+- Add a save-to-playlist action to every video row in standard YouTube playlists.
+- Preserve edge-to-edge system bars when switching songs from the YouTube Music queue, even if the previous player's disposal completes after the replacement is visible.
+- Recognize YouTube Music's editable-playlist header renderer so account-owned playlists retain edit and delete actions without exposing them on saved third-party playlists.
+- Continue loading YouTube Music playlist tracks after the first 24 entries when the list reaches its end.
+- Keep the expanded playlist section open after creating a playlist and refresh it in place.
+- Populate the YouTube Music queue with the full native Up Next response instead of showing only the current song.
+- Keep SABR protection refresh and media-URL maintenance status internal after playback has started, preventing stale loading text from covering active YouTube Music playback.
+- Open a selected YouTube Music playlist directly from the expanded playlist section and keep the current track visible when no explicit queue is available.
+- Open the create-playlist dialog immediately from the YouTube Music playlist section instead of deferring it until that screen is closed.
+- Only expose YouTube Music playlist deletion and track removal when YouTube explicitly marks the playlist as editable, instead of treating every saved playlist as account-owned.
+- Fix playlist video playback lifecycle so exiting or navigating back from a playlist screen (`PlaylistScreen`) does not close the playing video. Video playback is hoisted to root `AppScaffold` with active playlist queue and index context, keeping playback uninterrupted in full player or miniplayer while browsing.
+- Add hardware/gesture `BackHandler` in `PlaylistScreen` and `ChannelScreen` so system back gestures cleanly return to the previous view without bubbling to parent activities.
+- Support opening playlists directly from video recommendations and description links.
+- Fix previous video button in playlist video playback: Solved stale state capture in `VideoScreen` where long-running `LaunchedEffect(player)` loop captured initial `playlistIndex = 0` closure, continually disabling the `exo_prev` button even when on video 2 or later. Used `rememberUpdatedState` for playlist index and items, added index change side-effects, and hooked controller visibility listeners to ensure controls reflect the active playlist position immediately.
+- Remove category chips from YouTube Music home screen and ensure section title clicks open the full section instead of mistaking section headers for channel links.
+- Clean up Android Auto root structure to a clean single-feed layout without redundant navigation tabs.
+- Fix mix and playlist playback order so the seed video matches the cover thumbnail.
+
 ## [6.2] - 2026-11-10
 
 ### Fixed

@@ -59,7 +59,7 @@ object SabrMediaFactory {
                 YouTubeRepository.refreshWebSabrPoToken(info).let { it to decode(it) }
             }) else null,
         )
-        PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
+        PlaybackLoadStatus.showInitial(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, config, null, HttpBackend.playbackClient(), initialStartMs = initialStartMs))
         val videoSource = ProgressiveMediaSource.Factory(ModernSabrDataSource.Factory(true))
             .createMediaSource(MediaItem.fromUri(Uri.parse("sabrmodern://$id/video")))
@@ -94,7 +94,7 @@ object SabrMediaFactory {
                 YouTubeRepository.refreshWebSabrPoToken(info).let { it to decode(it) }
             }) else null,
         )
-        PlaybackLoadStatus.show(info.videoId, "Getting init segments…")
+        PlaybackLoadStatus.showInitial(info.videoId, "Getting init segments…")
         ModernSabrRegistry.put(ModernSabrStream(id, null, config, HttpBackend.playbackClient()))
         return ProgressiveMediaSource.Factory(ModernSabrDataSource.Factory(false))
             .createMediaSource(MediaItem.fromUri(Uri.parse("sabrmodern://$id/audio")))

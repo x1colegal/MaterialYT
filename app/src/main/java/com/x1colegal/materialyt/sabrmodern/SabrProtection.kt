@@ -13,7 +13,7 @@ internal object SabrProtection {
     const val ATTESTATION_PENDING = 2L
     const val ATTESTATION_REQUIRED = 3L
     const val REFRESH_AFTER_STALLS = 2
-    const val REFRESH_COOLDOWN_MS = 30_000L
+    const val REFRESH_COOLDOWN_MS = 5_000L
     /** Consecutive no-media responses under active protection before it's an attestation cap. */
     const val STALL_LIMIT = 6
 

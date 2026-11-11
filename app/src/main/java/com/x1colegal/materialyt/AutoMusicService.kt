@@ -16,6 +16,7 @@ import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.media.MediaBrowserServiceCompat
+import androidx.media.utils.MediaConstants
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.google.android.exoplayer2.DefaultLoadControl
@@ -80,6 +81,11 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val duration = androidx.compose.runtime.mutableLongStateOf(0L)
         val availableAudioTracks = androidx.compose.runtime.mutableStateOf<List<PlayableStream>>(emptyList())
         val selectedAudioTrack = androidx.compose.runtime.mutableStateOf<PlayableStream?>(null)
+        val queue = androidx.compose.runtime.mutableStateOf<List<FeedItem>>(emptyList())
+        val queueIndex = androidx.compose.runtime.mutableIntStateOf(-1)
+        val hasNext: Boolean get() = instance?.let {
+            it.playbackQueueIndex in 0 until it.playbackQueue.lastIndex || it.autoplayTrack != null
+        } ?: false
         private var instance: AutoMusicService? = null
         private const val ACTION_PLAY = "com.x1colegal.materialyt.PLAY"
         private const val ACTION_KEEP_ALIVE = "com.x1colegal.materialyt.KEEP_ALIVE"
@@ -118,6 +124,9 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         fun pause() { instance?.player?.let { if (it.isPlaying) it.pause() } }
         fun toggle() { instance?.player?.let { if (it.isPlaying) it.pause() else it.play() } }
         fun seekTo(value: Long) { instance?.player?.seekTo(value) }
+        fun next() { instance?.skipToNext() }
+        fun previous() { instance?.skipToPrevious() }
+        fun skipToQueueItem(index: Int) { instance?.skipToQueueItem(index) }
         fun selectAudioTrack(stream: PlayableStream) { instance?.switchAudioTrack(stream) }
         fun close() { instance?.requestClosePlayback() }
     }
@@ -147,6 +156,11 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             .apply { setReferenceCounted(false) }
         session = MediaSessionCompat(this, "MaterialYT Auto").apply {
             setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS)
+            val sessionExtras = Bundle().apply {
+                putBoolean(MediaConstants.SESSION_EXTRAS_KEY_SLOT_RESERVATION_SKIP_TO_NEXT, true)
+                putBoolean(MediaConstants.SESSION_EXTRAS_KEY_SLOT_RESERVATION_SKIP_TO_PREV, true)
+            }
+            setExtras(sessionExtras)
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) {
                     AppLog.event("Android Auto playFromMediaId id=$mediaId")
@@ -157,10 +171,20 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                     playMediaId(mediaId)
                 }
                 override fun onPlayFromSearch(query: String?, extras: Bundle?) {
+                    AppLog.event("Android Auto playFromSearch query=$query")
                     scope.launch {
-                        val result = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicSearch(query.orEmpty()) } }.getOrDefault(emptyList())
-                        result.firstOrNull()?.let { play(it, preferredAudioCodec, result, 0) }
+                        val result = runCatching {
+                            originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.musicSearch(query.orEmpty()) })
+                        }.getOrDefault(emptyList())
+                        val queue = result.filter { !it.playlist && !it.channel && it.id.length == 11 }
+                        queue.firstOrNull()?.let { play(it, preferredAudioCodec, queue, 0) }
                     }
+                }
+                override fun onPrepareFromSearch(query: String?, extras: Bundle?) {
+                    onPlayFromSearch(query, extras)
+                }
+                override fun onSkipToQueueItem(id: Long) {
+                    skipToQueueItem(id.toInt())
                 }
                 override fun onPlay() {
                     AppLog.event("Android Auto play state=${player.playbackState} mediaItems=${player.mediaItemCount}")
@@ -171,14 +195,10 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 override fun onStop() { requestClosePlayback() }
                 override fun onSeekTo(pos: Long) = player.seekTo(pos)
                 override fun onSkipToNext() {
-                    val next = playbackQueue.getOrNull(playbackQueueIndex + 1) ?: autoplayTrack
-                    if (next != null) play(next, preferredAudioCodec, playbackQueue, playbackQueueIndex + 1)
+                    skipToNext()
                 }
                 override fun onSkipToPrevious() {
-                    if (player.currentPosition > 5_000L) player.seekTo(0L)
-                    else playbackQueue.getOrNull(playbackQueueIndex - 1)?.let {
-                        play(it, preferredAudioCodec, playbackQueue, playbackQueueIndex - 1)
-                    }
+                    skipToPrevious()
                 }
             })
             isActive = true
@@ -302,8 +322,18 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         }
     }
 
-    override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?) =
-        BrowserRoot("materialyt_music", null)
+    override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): BrowserRoot {
+        val rootExtras = Bundle().apply {
+            putBoolean(MediaConstants.BROWSER_SERVICE_EXTRAS_KEY_SEARCH_SUPPORTED, true)
+            putBoolean("android.media.browse.SEARCH_SUPPORTED", true)
+            putInt(STYLE_PLAYABLE, STYLE_GRID)
+            putInt(STYLE_BROWSABLE, STYLE_GRID)
+            putBoolean(LEGACY_STYLE_SUPPORTED, true)
+            putInt(LEGACY_STYLE_PLAYABLE, STYLE_GRID)
+            putInt(LEGACY_STYLE_BROWSABLE, STYLE_GRID)
+        }
+        return BrowserRoot(ROOT_ID, rootExtras)
+    }
 
     override fun onLoadChildren(parentId: String, result: Result<MutableList<MediaBrowserCompat.MediaItem>>) {
         result.detach()
@@ -316,6 +346,25 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                     else -> emptyList()
                 }
             }.onFailure { AppLog.failure("Android Auto browse parent=$parentId", it) }
+                .getOrDefault(emptyList())
+            result.sendResult(children.toMutableList())
+        }
+    }
+
+    override fun onSearch(query: String, extras: Bundle?, result: Result<MutableList<MediaBrowserCompat.MediaItem>>) {
+        result.detach()
+        scope.launch {
+            val children = runCatching {
+                if (query.isBlank()) return@runCatching emptyList<MediaBrowserCompat.MediaItem>()
+                val items = originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.musicSearch(query) })
+                val queue = items.filter { !it.playlist && !it.channel && it.id.length == 11 }
+                if (queue.isEmpty()) return@runCatching emptyList<MediaBrowserCompat.MediaItem>()
+                val playAllId = "play-search:${query.hashCode()}"
+                browserTracks[playAllId] = queue.first()
+                browserQueues[playAllId] = queue to 0
+                listOf(browserItem(playAllId, "Play top result", queue.first().title, queue.first().thumbnail, playable = true)) +
+                    registerPlayableQueue("search-${query.hashCode()}", queue)
+            }.onFailure { AppLog.failure("Android Auto search query=$query", it) }
                 .getOrDefault(emptyList())
             result.sendResult(children.toMutableList())
         }
@@ -435,6 +484,9 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             preferredAudioCodec = preferredCodec
             playbackQueue = queue
             playbackQueueIndex = queueIndex
+            Companion.queue.value = queue
+            Companion.queueIndex.intValue = queueIndex
+            publishQueue(queue)
             autoplayTrack = null
             audioCandidates = emptyList()
             audioCandidateIndex = -1
@@ -453,10 +505,21 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                     .onFailure { AppLog.failure("prepare standard history tracking music=${track.id}", it) }
             }
             scope.launch {
-                autoplayTrack = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicUpNext(track.id) } }
+                val suggestions = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicUpNextQueue(track.id) } }
                     .onFailure { AppLog.failure("music service up next video=${track.id}", it) }
-                    .getOrNull()
-                AppLog.event("music service up next video=${track.id} next=${autoplayTrack?.id ?: "none"}")
+                    .getOrDefault(emptyList())
+                if (currentTrack?.id == track.id && generation == playGeneration) {
+                    if (playbackQueue.isEmpty() && suggestions.isNotEmpty()) {
+                        playbackQueue = (listOf(track) + suggestions).distinctBy { it.id }
+                        playbackQueueIndex = 0
+                        Companion.queue.value = playbackQueue
+                        Companion.queueIndex.intValue = 0
+                        publishQueue(playbackQueue)
+                    } else {
+                        autoplayTrack = suggestions.firstOrNull { candidate -> playbackQueue.none { it.id == candidate.id } }
+                    }
+                    AppLog.event("music service up next video=${track.id} queue=${playbackQueue.size} next=${autoplayTrack?.id ?: "none"}")
+                }
             }
             // Artwork belongs to the playback service, not to the Compose screen. Fetch it in
             // parallel so Android Auto/lock-screen metadata is complete even when the UI never
@@ -625,6 +688,24 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         return builder.build()
     }
 
+    private fun publishQueue(queue: List<FeedItem>) {
+        if (queue.isEmpty()) {
+            session.setQueue(null)
+            return
+        }
+        val items = queue.mapIndexed { index, item ->
+            val desc = MediaDescriptionCompat.Builder()
+                .setMediaId(item.id)
+                .setTitle(item.title)
+                .setSubtitle(item.subtitle.takeIf(String::isNotBlank))
+                .apply { item.thumbnail.takeIf(String::isNotBlank)?.let { setIconUri(Uri.parse(it)) } }
+                .build()
+            MediaSessionCompat.QueueItem(desc, index.toLong())
+        }
+        session.setQueue(items)
+        session.setQueueTitle("Queue")
+    }
+
     private fun publishState() {
         if (currentTrack == null || closingPlayback) return
         val state = when {
@@ -633,10 +714,54 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             else -> PlaybackStateCompat.STATE_PAUSED
         }
         playing.value = player.isPlaying
-        session.setPlaybackState(PlaybackStateCompat.Builder()
-            .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH or PlaybackStateCompat.ACTION_SEEK_TO or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_STOP)
-            .setState(state, player.currentPosition.coerceAtLeast(0L), if (player.isPlaying) 1f else 0f).build())
+        val actions = PlaybackStateCompat.ACTION_PLAY or
+            PlaybackStateCompat.ACTION_PAUSE or
+            PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or
+            PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or
+            PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH or
+            PlaybackStateCompat.ACTION_PREPARE_FROM_SEARCH or
+            PlaybackStateCompat.ACTION_SKIP_TO_QUEUE_ITEM or
+            PlaybackStateCompat.ACTION_SEEK_TO or
+            PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+            PlaybackStateCompat.ACTION_STOP
+
+        val builder = PlaybackStateCompat.Builder()
+            .setActions(actions)
+            .setState(state, player.currentPosition.coerceAtLeast(0L), if (player.isPlaying) 1f else 0f)
+
+        if (playbackQueueIndex >= 0) {
+            builder.setActiveQueueItemId(playbackQueueIndex.toLong())
+        }
+        session.setPlaybackState(builder.build())
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+    }
+
+    fun skipToNext() {
+        val next = playbackQueue.getOrNull(playbackQueueIndex + 1) ?: autoplayTrack
+        if (next != null) {
+            AppLog.event("music service skipToNext from=${currentTrack?.id} to=${next.id}")
+            play(next, preferredAudioCodec, playbackQueue, playbackQueueIndex + 1)
+        }
+    }
+
+    fun skipToPrevious() {
+        if (player.currentPosition > 5_000L) {
+            player.seekTo(0L)
+        } else {
+            playbackQueue.getOrNull(playbackQueueIndex - 1)?.let { prev ->
+                AppLog.event("music service skipToPrevious from=${currentTrack?.id} to=${prev.id}")
+                play(prev, preferredAudioCodec, playbackQueue, playbackQueueIndex - 1)
+            }
+        }
+    }
+
+    fun skipToQueueItem(index: Int) {
+        if (index in playbackQueue.indices) {
+            val track = playbackQueue[index]
+            AppLog.event("music service skipToQueueItem index=$index track=${track.id}")
+            play(track, preferredAudioCodec, playbackQueue, index)
+        }
     }
 
     private fun requestClosePlayback() {
@@ -650,6 +775,8 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         currentArtwork = null
         availableAudioTracks.value = emptyList()
         selectedAudioTrack.value = null
+        Companion.queue.value = emptyList()
+        Companion.queueIndex.intValue = -1
         position.longValue = 0L
         bufferedPosition.longValue = 0L
         duration.longValue = 0L
@@ -660,8 +787,9 @@ class AutoMusicService : MediaBrowserServiceCompat() {
                 player.clearMediaItems()
                 releasePlaybackLocks()
                 session.setMetadata(null)
+                session.setQueue(null)
                 session.setPlaybackState(PlaybackStateCompat.Builder()
-                    .setActions(PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH)
+                    .setActions(PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH or PlaybackStateCompat.ACTION_PREPARE_FROM_SEARCH)
                     .setState(PlaybackStateCompat.STATE_STOPPED, 0L, 0f).build())
                 // Let the active video MediaSession become Android Auto's Now Playing
                 // session when a mixed YT Music playlist advances to a video item.
@@ -673,6 +801,19 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         }
     }
 
-    override fun onDestroy() { instance = null; nowPlaying.value = null; playing.value = false; availableAudioTracks.value = emptyList(); selectedAudioTrack.value = null; releasePlaybackLocks(); scope.cancel(); player.release(); session.release(); super.onDestroy() }
+    override fun onDestroy() {
+        instance = null
+        nowPlaying.value = null
+        playing.value = false
+        availableAudioTracks.value = emptyList()
+        selectedAudioTrack.value = null
+        Companion.queue.value = emptyList()
+        Companion.queueIndex.intValue = -1
+        releasePlaybackLocks()
+        scope.cancel()
+        player.release()
+        session.release()
+        super.onDestroy()
+    }
 
 }

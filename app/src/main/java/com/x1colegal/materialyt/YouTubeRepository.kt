@@ -28,9 +28,37 @@ import kotlin.math.roundToInt
 
 data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L, val short: Boolean = false, val setVideoId: String = "", val musicVideo: Boolean = false)
 data class MusicCategory(val title: String, val browseId: String, val params: String = "")
-data class MusicHomeSection(val title: String, val strapline: String = "", val items: List<FeedItem>, val horizontal: Boolean = false, val continuation: String? = null)
+data class MusicHomeSection(
+    val title: String,
+    val strapline: String = "",
+    val items: List<FeedItem>,
+    val horizontal: Boolean = false,
+    val continuation: String? = null,
+    val browseId: String? = null,
+    val endpointParams: String = "",
+    val endpointQuery: String = "",
+)
 data class MusicHomePage(val categories: List<MusicCategory>, val sections: List<MusicHomeSection>, val hasMore: Boolean = false)
-data class PlaylistPage(val items: List<FeedItem>, val editable: Boolean, val deletable: Boolean)
+data class MusicArtistPage(
+    val id: String,
+    val name: String,
+    val avatar: String,
+    val banner: String,
+    val description: String,
+    val subscribers: String,
+    val channelId: String,
+    val subscribed: Boolean?,
+    val sections: List<MusicHomeSection>,
+)
+data class PlaylistPage(
+    val items: List<FeedItem>,
+    val editable: Boolean,
+    val deletable: Boolean,
+    val title: String = "",
+    val subtitle: String = "",
+    val thumbnail: String = "",
+    val continuation: String? = null,
+)
 data class CanonicalVideoMetadata(val title: String, val author: String)
 data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null)
 data class SabrFormat(
@@ -255,6 +283,7 @@ object YouTubeRepository {
     @Volatile private var musicHomeRadioSeed: String? = null
     @Volatile private var musicHomeRadioMode = false
     @Volatile private var musicSearchToken: String? = null
+    @Volatile private var lastMusicSearchSections: List<MusicHomeSection> = emptyList()
     @Volatile private var activeMusicQuery: String? = null
     private val homeSeenIds = linkedSetOf<String>()
     private val shortsSeenIds = linkedSetOf<String>()
@@ -551,29 +580,95 @@ object YouTubeRepository {
                 .put("setVideoId", setVideoId))), origin)
     }
 
-    fun playlistVideos(playlistId: String): List<FeedItem> = playlistPage(playlistId).items
+    fun playlistVideos(playlistId: String, seedVideoId: String? = null): List<FeedItem> = playlistPage(playlistId, seedVideoId).items
 
-    fun playlistPage(playlistId: String): PlaylistPage {
+    fun playlistPage(playlistId: String, seedVideoId: String? = null): PlaylistPage {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
         val normalizedId = playlistId.removePrefix("VL")
+        if (normalizedId.startsWith("RD")) {
+            val resolvedSeed = seedVideoId?.takeIf { it.length == 11 && !it.startsWith("RD") }
+                ?: if (normalizedId.startsWith("RDAMVM") && normalizedId.length >= 17) normalizedId.removePrefix("RDAMVM").take(11)
+                else if (normalizedId.length == 13) normalizedId.removePrefix("RD")
+                else null
+            val body = JSONObject()
+                .put("context", context("WEB", bootstrap.version))
+                .put("playlistId", normalizedId)
+            if (!resolvedSeed.isNullOrBlank()) {
+                body.put("videoId", resolvedSeed)
+            }
+            val nextResponse = runCatching {
+                post(
+                    "$origin/youtubei/v1/next?key=${bootstrap.key}",
+                    body,
+                    origin,
+                )
+            }.getOrNull()
+            val panel = nextResponse?.optJSONObject("contents")?.optJSONObject("twoColumnWatchNextResults")
+                ?.optJSONObject("playlist")?.optJSONObject("playlist")
+            val playlistContents = panel?.optJSONArray("contents")
+            val mixItems = if (playlistContents != null) parsePlaylistVideos(playlistContents)
+                else if (panel != null) parsePlaylistVideos(panel)
+                else if (nextResponse != null) parsePlaylistVideos(nextResponse)
+                else emptyList()
+            if (mixItems.isNotEmpty()) {
+                val orderedItems = if (!resolvedSeed.isNullOrBlank()) {
+                    val seedIndex = mixItems.indexOfFirst { it.id == resolvedSeed }
+                    if (seedIndex > 0) {
+                        listOf(mixItems[seedIndex]) + mixItems.filterIndexed { idx, _ -> idx != seedIndex }
+                    } else if (seedIndex == -1) {
+                        val cached = videoDetails(resolvedSeed)
+                        if (cached != null) {
+                            listOf(
+                                FeedItem(
+                                    id = resolvedSeed,
+                                    title = cached.title,
+                                    subtitle = cached.author,
+                                    thumbnail = "https://i.ytimg.com/vi/$resolvedSeed/hqdefault.jpg",
+                                    thumbnailWidth = 16,
+                                    thumbnailHeight = 9,
+                                    channelThumbnail = cached.authorAvatar,
+                                    url = "https://www.youtube.com/watch?v=$resolvedSeed",
+                                    channelUrl = cached.authorUrl,
+                                )
+                            ) + mixItems
+                        } else mixItems
+                    } else mixItems
+                } else mixItems
+                val title = text(panel?.opt("title")) ?: "Mix"
+                AppLog.event("playlist next mix id=$normalizedId seed=$resolvedSeed title=$title items=${orderedItems.size}")
+                return PlaylistPage(
+                    orderedItems.distinctBy { it.id },
+                    editable = false,
+                    deletable = false,
+                    title = title,
+                    thumbnail = orderedItems.firstOrNull()?.thumbnail.orEmpty(),
+                )
+            }
+        }
         var page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", "VL$normalizedId"), origin)
+        val initialPage = page
+        val playlistHeader = findObject(initialPage, "playlistHeaderRenderer")?.optJSONObject("playlistHeaderRenderer")
+        val playlistMetadata = findObject(initialPage, "playlistMetadataRenderer")?.optJSONObject("playlistMetadataRenderer")
+        val pageTitle = text(playlistHeader?.opt("title"))
+            ?: playlistMetadata?.optString("title")?.takeIf(String::isNotBlank)
+            ?: "YouTube playlist"
+        val pageSubtitle = text(playlistHeader?.opt("ownerText"))
+            ?: text(playlistHeader?.opt("shortBylineText"))
+            ?: ""
+        val pageThumbnail = (findThumbnail(playlistHeader?.opt("playlistHeaderBanner"))
+            ?: findThumbnail(playlistHeader?.opt("heroPlaylistThumbnail")))
+            ?.let { highResolutionArtworkUrl(it, 1, 1) }
+            ?: ""
         var editable = findBoolean(page, "isEditable") == true || normalizedId in accountPlaylistIds
         var deletable = editable && normalizedId.startsWith("PL")
-        var items = parsePlaylistVideos(page).toMutableList()
-        val seen = mutableSetOf<String>()
-        AppLog.event("playlist browse id=$normalizedId items=${items.size} continuation=${findPlaylistContinuationToken(page) != null}")
-        // Some current playlist responses contain only a continuation in their initial
-        // payload. Consume it before trying HTML; replacing the response with an empty
-        // HTML page here used to discard the only route to the actual videos.
-        while (seen.size < 20) {
-            val token = findPlaylistContinuationToken(page) ?: break
-            if (!seen.add(token)) break
-            page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), origin)
-            val more = parsePlaylistVideos(page)
-            AppLog.event("playlist continuation id=$normalizedId page=${seen.size} items=${more.size}")
-            items += more
+        var items = parseRegularPlaylistVideos(page).toMutableList()
+        if (items.isEmpty() && normalizedId == "LL") {
+            val richGrid = findObject(page, "richGridRenderer")?.optJSONObject("richGridRenderer")
+            items = richGrid?.let(::parsePlaylistVideos).orEmpty().toMutableList()
+            AppLog.event("liked videos rich grid items=${items.size}")
         }
+        AppLog.event("playlist browse id=$normalizedId items=${items.size} continuation=${findPlaylistContinuationToken(page) != null}")
         if (items.isEmpty() && normalizedId == "YS") {
             val mobileCandidates = listOf(
                 Triple("ANDROID", "20.05.35", "3"),
@@ -592,7 +687,7 @@ object YouTubeRepository {
                     )
                 }.onFailure { AppLog.failure("saved shorts $clientName browse", it) }.getOrNull()
                 if (mobile != null) {
-                    val mobileItems = parsePlaylistVideos(mobile)
+                    val mobileItems = parseRegularPlaylistVideos(mobile)
                     AppLog.event("saved shorts client=$clientName items=${mobileItems.size}")
                     items += mobileItems
                     if (items.isNotEmpty()) break
@@ -603,7 +698,7 @@ object YouTubeRepository {
             val mobileHtml = runCatching { initialData(get("https://m.youtube.com/playlist?list=YS&hl=en")) }
                 .onFailure { AppLog.failure("saved shorts MWEB HTML", it) }.getOrNull()
             if (mobileHtml != null) {
-                val mobileItems = parsePlaylistVideos(mobileHtml)
+                val mobileItems = parseRegularPlaylistVideos(mobileHtml)
                 AppLog.event("saved shorts MWEB HTML items=${mobileItems.size}")
                 items += mobileItems
             }
@@ -615,7 +710,7 @@ object YouTubeRepository {
                     .put("browseId", normalizedId), origin)
             }.getOrNull()
             if (direct != null) {
-                val directItems = parsePlaylistVideos(direct)
+                val directItems = parseRegularPlaylistVideos(direct)
                 AppLog.event("playlist direct browse id=$normalizedId items=${directItems.size}")
                 items += directItems
             }
@@ -636,24 +731,38 @@ object YouTubeRepository {
                 page = htmlData
                 editable = editable || findBoolean(htmlData, "isEditable") == true
                 deletable = deletable || (findBoolean(htmlData, "isEditable") == true && normalizedId.startsWith("PL"))
-                items = parsePlaylistVideos(htmlData).toMutableList()
+                items = parseRegularPlaylistVideos(htmlData).toMutableList()
                 AppLog.event("playlist authenticated HTML id=$normalizedId bytes=${html.length} items=${items.size} continuation=${findPlaylistContinuationToken(page) != null}")
             }
-        }
-        while (seen.size < 20) {
-            val token = findPlaylistContinuationToken(page) ?: break
-            if (!seen.add(token)) break
-            page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token), origin)
-            val more = parsePlaylistVideos(page)
-            AppLog.event("playlist continuation id=$normalizedId page=${seen.size} items=${more.size}")
-            items += more
         }
         // Watch Later is editable even when the current renderer generation omits the
         // old top-level isEditable bit. Only expose row removal when YouTube supplied
         // the membership token required by ACTION_REMOVE_VIDEO.
         editable = editable || normalizedId in accountPlaylistIds || (normalizedId == "WL" && items.any { it.setVideoId.isNotBlank() })
         deletable = deletable || (editable && normalizedId.startsWith("PL"))
-        return PlaylistPage(items.distinctBy { item -> item.setVideoId.ifBlank { item.id } }, editable, deletable)
+        return PlaylistPage(
+            items.distinctBy { item -> item.setVideoId.ifBlank { item.id } },
+            editable,
+            deletable,
+            title = pageTitle,
+            subtitle = pageSubtitle,
+            thumbnail = pageThumbnail,
+            continuation = findRegularPlaylistContinuationToken(page).takeIf { items.isNotEmpty() },
+        )
+    }
+
+    fun playlistContinuation(token: String): PlaylistPage {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val response = post(
+            "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+            JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", token),
+            origin,
+        )
+        val items = parseRegularPlaylistVideos(response)
+        val next = findRegularPlaylistContinuationToken(response, token)
+        AppLog.event("playlist continuation items=${items.size} hasMore=${next != null}")
+        return PlaylistPage(items, editable = false, deletable = false, continuation = next)
     }
 
     private fun parsePlaylistVideos(root: Any?): List<FeedItem> {
@@ -676,6 +785,60 @@ object YouTubeRepository {
             if (previous == null || previous.setVideoId.isBlank() && candidate.setVideoId.isNotBlank()) output[parsed.id] = candidate
         }
         return output.values.toList()
+    }
+
+    private fun parseRegularPlaylistVideos(root: Any?): List<FeedItem> {
+        val candidates = listOfNotNull(
+            findObject(root, "playlistVideoListRenderer")
+                ?.optJSONObject("playlistVideoListRenderer")?.optJSONArray("contents"),
+            findObject(root, "playlistVideoListContinuation")
+                ?.optJSONObject("playlistVideoListContinuation")?.optJSONArray("contents"),
+            findObject(root, "appendContinuationItemsAction")
+                ?.optJSONObject("appendContinuationItemsAction")?.optJSONArray("continuationItems"),
+            findObject(root, "reloadContinuationItemsCommand")
+                ?.optJSONObject("reloadContinuationItemsCommand")?.optJSONArray("continuationItems"),
+        )
+        val list = candidates.firstOrNull { candidate ->
+            (0 until candidate.length()).any { index ->
+                val item = candidate.optJSONObject(index)
+                item?.has("playlistVideoRenderer") == true || item?.has("playlistPanelVideoRenderer") == true
+            }
+        }
+        if (list != null) return parsePlaylistVideos(list)
+
+        // Some account-owned system playlists (notably Liked Videos) omit the
+        // playlistVideoListRenderer wrapper. Collect only actual playlist-row
+        // renderers instead of falling back to every video renderer on the page.
+        val rows = JSONArray()
+        fun collectRows(value: Any?) {
+            when (value) {
+                is JSONObject -> {
+                    value.optJSONObject("playlistVideoRenderer")?.let {
+                        rows.put(JSONObject().put("playlistVideoRenderer", it))
+                    }
+                    value.optJSONObject("playlistPanelVideoRenderer")?.let {
+                        rows.put(JSONObject().put("playlistPanelVideoRenderer", it))
+                    }
+                    value.keys().forEach { key ->
+                        if (key != "playlistVideoRenderer" && key != "playlistPanelVideoRenderer") collectRows(value.opt(key))
+                    }
+                }
+                is JSONArray -> for (index in 0 until value.length()) collectRows(value.opt(index))
+            }
+        }
+        collectRows(root)
+        return parsePlaylistVideos(rows)
+    }
+
+    private fun findRegularPlaylistContinuationToken(root: Any?, previous: String? = null): String? {
+        val scoped = listOfNotNull(
+            findObject(root, "playlistVideoListRenderer")?.optJSONObject("playlistVideoListRenderer"),
+            findObject(root, "playlistVideoListContinuation")?.optJSONObject("playlistVideoListContinuation"),
+            findObject(root, "appendContinuationItemsAction")?.optJSONObject("appendContinuationItemsAction"),
+            findObject(root, "reloadContinuationItemsCommand")?.optJSONObject("reloadContinuationItemsCommand"),
+        )
+        return scoped.asSequence().mapNotNull { findNextContinuationToken(it, previous) }.firstOrNull()
+            ?: findNextContinuationToken(root, previous)
     }
 
     private fun findPlaylistContinuationToken(value: Any?): String? = when (value) {
@@ -1175,17 +1338,37 @@ object YouTubeRepository {
         }
         return null
     }
+    fun musicLibraryPlaylists(): List<FeedItem> {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val likedPlaylists = runCatching {
+            val response = post(
+                "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+                JSONObject()
+                    .put("context", context("WEB_REMIX", bootstrap.version))
+                    .put("browseId", "FEmusic_liked_playlists"),
+                origin,
+            )
+            parseItems(response).filter { it.playlist && !it.id.equals("SE", ignoreCase = true) }
+        }.onFailure { AppLog.failure("music liked playlists", it) }.getOrDefault(emptyList())
+        val landingPlaylists = runCatching {
+            val response = post(
+                "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+                JSONObject()
+                    .put("context", context("WEB_REMIX", bootstrap.version))
+                    .put("browseId", "FEmusic_library_landing"),
+                origin,
+            )
+            parseItems(response).filter { it.playlist && !it.id.equals("SE", ignoreCase = true) }
+        }.onFailure { AppLog.failure("music landing playlists", it) }.getOrDefault(emptyList())
+        return (likedPlaylists + landingPlaylists).distinctBy { it.id }
+    }
+
     fun music(): List<FeedItem> {
         val home = musicHome().sections.flatMap { it.items }
-        val playlists = runCatching {
-            val origin = "https://music.youtube.com"
-            val bootstrap = bootstrap(origin, "WEB_REMIX")
-            parseItems(post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
-                .put("context", context("WEB_REMIX", bootstrap.version))
-                .put("browseId", "FEmusic_liked_playlists"), origin))
-        }
-            .onFailure { AppLog.failure("music library playlists", it) }.getOrDefault(emptyList())
-            .filter { it.playlist }
+        val playlists = if (signedIn()) runCatching {
+            musicLibraryPlaylists()
+        }.onFailure { AppLog.failure("music library playlists", it) }.getOrDefault(emptyList()) else emptyList()
         activeMusicQuery = null
         return (playlists + home).distinctBy { "${it.playlist}:${it.id}" }
     }
@@ -1216,18 +1399,27 @@ object YouTubeRepository {
                 .distinctBy { it.id }
                 .take(30)
         }.onFailure { AppLog.failure("music native history", it) }.getOrDefault(emptyList()) else emptyList()
-        val sections = if (historyItems.isEmpty()) homeSections else {
-            val listenAgainStrapline = homeSections.firstOrNull { it.title.contains("listen again", true) }?.strapline.orEmpty()
-            listOf(MusicHomeSection("Listen Again", strapline = listenAgainStrapline, items = historyItems, horizontal = true)) +
-                homeSections.filterNot {
-                    it.title.contains("continue", true) || it.title.contains("listen again", true)
-                }
+        val userPlaylists = if (category == null && signedIn()) runCatching {
+            musicLibraryPlaylists()
+        }.onFailure { AppLog.failure("music library playlists", it) }.getOrDefault(emptyList()) else emptyList()
+        val baseSections = mutableListOf<MusicHomeSection>()
+        val listenAgainStrapline = homeSections.firstOrNull { it.title.contains("listen again", true) }?.strapline.orEmpty()
+        if (historyItems.isNotEmpty()) {
+            baseSections += MusicHomeSection("Listen Again", strapline = listenAgainStrapline, items = historyItems, horizontal = true)
         }
+        if (userPlaylists.isNotEmpty()) {
+            baseSections += MusicHomeSection("Playlists", strapline = "Your playlists", items = userPlaylists, horizontal = true)
+        }
+        val remainingSections = homeSections.filterNot {
+            it.title.contains("continue", true) || it.title.contains("listen again", true) || it.title.equals("playlists", ignoreCase = true)
+        }
+        val sections = if (baseSections.isNotEmpty()) baseSections + remainingSections else homeSections
         musicHomeRadioSeed = sections.asReversed().asSequence().flatMap { it.items.asReversed().asSequence() }
             .firstOrNull { !it.playlist && !it.channel && it.id.length == 11 }?.id
         musicHomeRadioMode = false
-        AppLog.event("music home categories=${categories.size} sections=${sections.size} items=${sections.sumOf { it.items.size }} nativeHistory=${historyItems.size}")
-        return MusicHomePage(categories, sections, musicHomeToken != null || musicHomeRadioSeed != null)
+        val allCategories = (listOf(MusicCategory("All", "FEmusic_home")) + categories).distinctBy { it.title }
+        AppLog.event("music home categories=${allCategories.size} sections=${sections.size} items=${sections.sumOf { it.items.size }} nativeHistory=${historyItems.size}")
+        return MusicHomePage(allCategories, sections, musicHomeToken != null || musicHomeRadioSeed != null)
     }
 
     fun musicHomeContinuation(): MusicHomePage {
@@ -1297,8 +1489,13 @@ object YouTubeRepository {
             val header = renderer.optJSONObject("header")
             val basic = header?.optJSONObject("musicCarouselShelfBasicHeaderRenderer")
                 ?: header?.optJSONObject("musicShelfHeaderRenderer")
-            val title = text(basic?.opt("title")).orEmpty().trim()
+            val title = text(basic?.opt("title")) ?: text(renderer.opt("title")).orEmpty().trim()
             val strapline = text(basic?.opt("strapline")).orEmpty().trim()
+            val browseId = basic?.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)
+                ?.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")?.optString("browseId")
+                ?: renderer.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)
+                ?.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")?.optString("browseId")
+                ?: renderer.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")?.optString("browseId")
             val contents = renderer.optJSONArray("contents") ?: renderer.optJSONArray("items") ?: JSONArray()
             val items = audioOnlyMusicItems(parseItems(contents)).distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
             if (items.isNotEmpty()) result += MusicHomeSection(
@@ -1307,6 +1504,7 @@ object YouTubeRepository {
                 items,
                 horizontal,
                 findContinuationToken(renderer),
+                browseId = browseId,
             )
         }
         fun visit(value: Any?) {
@@ -1329,7 +1527,56 @@ object YouTubeRepository {
         return result.distinctBy { section -> section.title to section.items.joinToString { it.id } }
     }
 
-    fun musicUpNext(videoId: String): FeedItem? {
+    private fun parseMusicSearchSections(root: Any): List<MusicHomeSection> {
+        val result = mutableListOf<MusicHomeSection>()
+        val seenItems = mutableSetOf<String>()
+        fun add(renderer: JSONObject, fallbackTitle: String, horizontal: Boolean, selfRenderer: String? = null) {
+            val title = text(renderer.opt("title")).orEmpty().trim().ifBlank { fallbackTitle }
+            val contents = renderer.optJSONArray("contents") ?: renderer.optJSONArray("items")
+            // Search list rows can depend on metadata stored on their parent shelf.
+            // Parse the complete renderer first; use the bare contents only as a fallback.
+            val wrapped = selfRenderer?.let { JSONObject().put(it, renderer) } ?: renderer
+            val complete = parseItems(wrapped)
+            val parsed = complete.ifEmpty { contents?.let(::parseItems).orEmpty() }
+            val items = audioOnlyMusicItems(parsed)
+                .filterNot { it.musicVideo }
+                .distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+                .filter { seenItems.add("${it.playlist}:${it.channel}:${it.id}") }
+            if (items.isEmpty()) return
+            AppLog.event("music search renderer=$fallbackTitle title=$title raw=${parsed.size} kept=${items.size} contents=${contents?.length() ?: 0}")
+            val browse = findObject(renderer.opt("bottomEndpoint"), "browseEndpoint")?.optJSONObject("browseEndpoint")
+                ?: findObject(renderer.opt("moreContentButton"), "browseEndpoint")?.optJSONObject("browseEndpoint")
+            val search = findObject(renderer.opt("bottomEndpoint"), "searchEndpoint")?.optJSONObject("searchEndpoint")
+                ?: findObject(renderer.opt("moreContentButton"), "searchEndpoint")?.optJSONObject("searchEndpoint")
+            result += MusicHomeSection(
+                title = title,
+                items = items,
+                horizontal = horizontal,
+                continuation = findNextContinuationToken(renderer, null),
+                browseId = browse?.optString("browseId")?.takeIf(String::isNotBlank),
+                endpointParams = browse?.optString("params").orEmpty().ifBlank { search?.optString("params").orEmpty() },
+                endpointQuery = search?.optString("query").orEmpty(),
+            )
+        }
+        fun visit(value: Any?) {
+            when (value) {
+                is JSONObject -> when {
+                    value.has("musicCardShelfRenderer") -> add(value.getJSONObject("musicCardShelfRenderer"), "Top result", true, "musicCardShelfRenderer")
+                    value.has("musicShelfRenderer") -> add(value.getJSONObject("musicShelfRenderer"), "Results", false)
+                    value.has("musicCarouselShelfRenderer") -> add(value.getJSONObject("musicCarouselShelfRenderer"), "Results", true)
+                    value.has("musicImmersiveCarouselShelfRenderer") -> add(value.getJSONObject("musicImmersiveCarouselShelfRenderer"), "Results", true)
+                    value.has("gridRenderer") -> add(value.getJSONObject("gridRenderer"), "Results", true)
+                    value.has("itemSectionRenderer") -> add(value.getJSONObject("itemSectionRenderer"), "Results", false)
+                    else -> value.keys().forEach { visit(value.opt(it)) }
+                }
+                is JSONArray -> for (index in 0 until value.length()) visit(value.opt(index))
+            }
+        }
+        visit(root)
+        return result
+    }
+
+    fun musicUpNextQueue(videoId: String): List<FeedItem> {
         val origin = "https://music.youtube.com"
         val bootstrap = bootstrap(origin, "WEB_REMIX")
         val response = post("$origin/youtubei/v1/next?key=${bootstrap.key}", JSONObject()
@@ -1342,8 +1589,10 @@ object YouTubeRepository {
             it.id.length == 11 && it.id != videoId && !it.channel && !it.playlist && !it.musicVideo
         }
         AppLog.event("music up next response video=$videoId candidates=${candidates.size} ids=${candidates.take(4).joinToString { it.id }}")
-        return candidates.firstOrNull()
+        return candidates.distinctBy { it.id }
     }
+
+    fun musicUpNext(videoId: String): FeedItem? = musicUpNextQueue(videoId).firstOrNull()
 
     fun musicSectionContinuation(token: String): MusicHomeSection {
         val origin = "https://music.youtube.com"
@@ -1359,30 +1608,160 @@ object YouTubeRepository {
         return MusicHomeSection("", items = items, horizontal = true, continuation = next)
     }
 
-    fun musicPlaylistVideos(playlistId: String): List<FeedItem> {
+    fun musicPlaylistPage(playlistId: String, seedVideoId: String? = null): PlaylistPage {
         val origin = "https://music.youtube.com"
         val bootstrap = bootstrap(origin, "WEB_REMIX")
         val normalizedId = playlistId.removePrefix("VL")
+        if (normalizedId.startsWith("RD")) {
+            val resolvedSeed = seedVideoId?.takeIf { it.length == 11 }
+                ?: if (normalizedId.startsWith("RDAMVM") && normalizedId.length >= 17) normalizedId.removePrefix("RDAMVM").take(11)
+                else if (normalizedId.length == 13) normalizedId.removePrefix("RD")
+                else null
+            val body = JSONObject()
+                .put("context", context("WEB_REMIX", bootstrap.version))
+                .put("playlistId", normalizedId)
+                .put("isAudioOnly", true)
+            if (!resolvedSeed.isNullOrBlank()) {
+                body.put("videoId", resolvedSeed)
+            }
+            val response = runCatching {
+                post("$origin/youtubei/v1/next?key=${bootstrap.key}", body, origin)
+            }.getOrNull()
+            val panel = response?.optJSONObject("contents")?.optJSONObject("twoColumnWatchNextResults")
+                ?.optJSONObject("playlist")?.optJSONObject("playlist")
+                ?: response?.optJSONObject("contents")?.optJSONObject("singleColumnMusicWatchNextResultsRenderer")
+                    ?.optJSONObject("tabbedRenderer")?.optJSONObject("watchNextTabbedResultsRenderer")
+            val target = panel ?: response
+            val items = if (target != null) parsePlaylistVideos(target).filterNot { it.playlist || it.channel } else emptyList()
+            if (items.isNotEmpty()) {
+                val ordered = if (!resolvedSeed.isNullOrBlank()) {
+                    val sIdx = items.indexOfFirst { it.id == resolvedSeed }
+                    if (sIdx > 0) listOf(items[sIdx]) + items.filterIndexed { i, _ -> i != sIdx }
+                    else items
+                } else items
+                return PlaylistPage(ordered.distinctBy { it.id }, editable = false, deletable = false)
+            }
+        }
+        val browseId = if (normalizedId.startsWith("MPRE") || normalizedId.startsWith("VL")) normalizedId else "VL$normalizedId"
         var page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
             .put("context", context("WEB_REMIX", bootstrap.version))
-            .put("browseId", "VL$normalizedId"), origin)
+            .put("browseId", browseId), origin)
+        val initialPage = page
         fun shelf(response: JSONObject): JSONObject? =
             findObject(response, "musicPlaylistShelfRenderer")?.optJSONObject("musicPlaylistShelfRenderer")
                 ?: findObject(response, "musicPlaylistShelfContinuation")?.optJSONObject("musicPlaylistShelfContinuation")
         fun tracks(response: JSONObject): List<FeedItem> {
             return shelf(response)?.let(::parsePlaylistVideos).orEmpty()
         }
-        val output = tracks(page).toMutableList()
-        val seen = mutableSetOf<String>()
-        while (seen.size < 20) {
-            val token = shelf(page)?.let(::findPlaylistContinuationToken) ?: break
-            if (!seen.add(token)) break
-            page = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+        val output = tracks(page)
+        val continuation = shelf(page)?.let { findNextContinuationToken(it, null) }
+            ?: findNextContinuationToken(page, null)
+        val items = output.filterNot { it.musicVideo }.distinctBy { item -> item.setVideoId.ifBlank { item.id } }
+        // A playlist being present in the signed-in library does not mean that the
+        // account owns it: liked/saved third-party playlists are returned there too.
+        // Likewise, playlistSetVideoId only identifies a row and is not edit permission.
+        // YouTube Music exposes owned playlists either through isEditable or the
+        // dedicated editable header renderer. Saved third-party playlists use the
+        // regular detail header even though their rows also carry setVideoId values.
+        val editable = findBoolean(initialPage, "isEditable") == true ||
+            findObject(initialPage, "musicEditablePlaylistDetailHeaderRenderer") != null
+        val deletable = editable && normalizedId.startsWith("PL")
+        return PlaylistPage(items, editable, deletable, continuation = continuation)
+    }
+
+    fun musicPlaylistContinuation(token: String): PlaylistPage {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val response = post("$origin/youtubei/v1/browse?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB_REMIX", bootstrap.version))
+            .put("continuation", token), origin)
+        val shelf = findObject(response, "musicPlaylistShelfContinuation")?.optJSONObject("musicPlaylistShelfContinuation")
+            ?: findObject(response, "musicPlaylistShelfRenderer")?.optJSONObject("musicPlaylistShelfRenderer")
+        val items = shelf?.let(::parsePlaylistVideos).orEmpty()
+            .filterNot { it.musicVideo }
+            .distinctBy { item -> item.setVideoId.ifBlank { item.id } }
+        val next = shelf?.let { findNextContinuationToken(it, token) }
+            ?: findNextContinuationToken(response, token)
+        AppLog.event("music playlist continuation items=${items.size} hasMore=${next != null}")
+        return PlaylistPage(items, editable = false, deletable = false, continuation = next)
+    }
+
+    fun musicPlaylistVideos(playlistId: String, seedVideoId: String? = null): List<FeedItem> =
+        musicPlaylistPage(playlistId, seedVideoId).items
+
+    fun musicArtistPage(browseId: String): MusicArtistPage {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val cleanId = browseId.substringAfterLast("/").substringAfterLast("=")
+        val response = post(
+            "$origin/youtubei/v1/browse?key=${bootstrap.key}",
+            JSONObject()
                 .put("context", context("WEB_REMIX", bootstrap.version))
-                .put("continuation", token), origin)
-            output += tracks(page)
-        }
-        return output.filterNot { it.musicVideo }.distinctBy { it.id }
+                .put("browseId", cleanId),
+            origin,
+        )
+        val headerObj = response.optJSONObject("header")
+        val immersiveHeader = headerObj?.optJSONObject("musicImmersiveHeaderRenderer")
+            ?: headerObj?.optJSONObject("musicVisualHeaderRenderer")
+            ?: headerObj?.optJSONObject("musicHeaderRenderer")
+            ?: findObject(response, "musicImmersiveHeaderRenderer")?.optJSONObject("musicImmersiveHeaderRenderer")
+            ?: findObject(response, "musicVisualHeaderRenderer")?.optJSONObject("musicVisualHeaderRenderer")
+
+        val name = text(immersiveHeader?.opt("title"))?.trim().orEmpty().ifBlank { "Artist" }
+        val description = text(immersiveHeader?.opt("description")).orEmpty().trim()
+
+        val subButton = immersiveHeader?.optJSONObject("subscriptionButton")?.optJSONObject("subscribeButtonRenderer")
+            ?: findObject(response, "subscribeButtonRenderer")?.optJSONObject("subscribeButtonRenderer")
+        val channelId = subButton?.optString("channelId").orEmpty().ifBlank { cleanId }
+        val subscribers = text(subButton?.opt("longSubscriberCountText"))
+            ?: text(subButton?.opt("subscriberCountText"))
+            ?: text(subButton?.opt("shortSubscriberCountText"))
+            ?: text(immersiveHeader?.opt("monthlyListenerCount"))
+            ?: ""
+        val subscribed = if (subButton != null && subButton.has("subscribed")) subButton.optBoolean("subscribed", false) else null
+
+        val thumbs = immersiveHeader?.optJSONObject("thumbnail")?.optJSONObject("musicThumbnailRenderer")
+            ?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+            ?: immersiveHeader?.optJSONObject("foregroundThumbnail")?.optJSONObject("musicThumbnailRenderer")
+            ?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+            ?: findObject(response, "musicThumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")
+            ?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+        val candidates = thumbs?.let { list ->
+            (0 until list.length()).mapNotNull(list::optJSONObject)
+        }.orEmpty()
+        val banner = candidates.maxByOrNull { it.optLong("width") * it.optLong("height") }?.optString("url").orEmpty()
+        val avatar = candidates.minByOrNull { kotlin.math.abs(it.optInt("width", 100) - 500) }?.optString("url")
+            ?.ifBlank { banner } ?: banner
+
+        val sections = parseMusicHomeSections(response)
+        AppLog.event("music artist page loaded id=$cleanId name=$name sections=${sections.size} subs=$subscribers channelId=$channelId")
+        return MusicArtistPage(
+            id = cleanId,
+            name = name,
+            avatar = avatar,
+            banner = banner,
+            description = description,
+            subscribers = subscribers,
+            channelId = channelId,
+            subscribed = subscribed,
+            sections = sections,
+        )
+    }
+
+    fun searchArtistBrowseId(query: String): String? {
+        val clean = query.trim()
+        if (clean.isBlank()) return null
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val response = post(
+            "$origin/youtubei/v1/search?key=${bootstrap.key}",
+            JSONObject()
+                .put("context", context("WEB_REMIX", bootstrap.version))
+                .put("query", clean),
+            origin,
+        )
+        val items = parseItems(response)
+        return items.firstOrNull { it.channel }?.id
     }
 
     fun searchSuggestions(query: String, music: Boolean = false): List<String> {
@@ -1586,6 +1965,115 @@ object YouTubeRepository {
     fun musicSearch(query: String): List<FeedItem> = musicRequest("search", JSONObject().put("query", query))
         .also { activeMusicQuery = query }
 
+    fun musicSearchPage(query: String): MusicHomePage {
+        val defaultItems = musicSearch(query)
+        val top = lastMusicSearchSections.firstOrNull()?.items.orEmpty().ifEmpty { defaultItems.take(3) }
+        val filters = listOf(
+            Triple("Songs", "EgWKAQIIAWoMEA4QChADEAQQCRAF", false),
+            Triple("Albums", "EgWKAQIYAWoMEA4QChADEAQQCRAF", false),
+            Triple("Artists", "EgWKAQIgAWoMEA4QChADEAQQCRAF", false),
+            Triple("Playlists", "Eg-KAQwIABAAGAAgACgBMABqChAEEAMQCRAFEAo%3D", true),
+            Triple("Profiles", "EgWKAQJYAWoMEA4QChADEAQQCRAF", false),
+            Triple("Podcasts", "EgWKAQJQAWoMEA4QChADEAQQCRAF", false),
+            Triple("Episodes", "EgWKAQJIAWoMEA4QChADEAQQCRAF", false),
+        )
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
+        val filtered = try {
+            filters.map { (title, params, horizontal) ->
+                executor.submit<MusicHomeSection?> {
+                    runCatching { filteredMusicSearch(query, title, params, horizontal, preview = true) }
+                        .onFailure { AppLog.failure("music filtered search $title", it) }
+                        .getOrNull()
+                }
+            }.mapNotNull { it.get() }
+        } finally {
+            executor.shutdown()
+        }
+        val seen = mutableSetOf<String>()
+        val sections = buildList {
+            val uniqueTop = top.filter { seen.add("${it.playlist}:${it.channel}:${it.id}") }
+            if (uniqueTop.isNotEmpty()) add(MusicHomeSection("Top result", items = uniqueTop, horizontal = true))
+            filtered.forEach { section ->
+                val unique = section.items.filter { seen.add("${it.playlist}:${it.channel}:${it.id}") }
+                if (unique.isNotEmpty()) add(section.copy(items = unique))
+            }
+        }
+        lastMusicSearchSections = sections
+        musicSearchToken = null
+        AppLog.event("music filtered search sections=${sections.joinToString { "${it.title}:${it.items.size}" }}")
+        return MusicHomePage(emptyList(), sections, hasMore = false)
+    }
+
+    private fun filteredMusicSearch(
+        query: String,
+        title: String,
+        params: String,
+        horizontal: Boolean,
+        preview: Boolean,
+    ): MusicHomeSection {
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        var response = post("$origin/youtubei/v1/search?key=${bootstrap.key}", JSONObject()
+            .put("context", context("WEB_REMIX", bootstrap.version))
+            .put("query", query)
+            .put("params", params), origin)
+        val collected = audioOnlyMusicItems(parseItems(response))
+            .filterNot { it.musicVideo }
+            .toMutableList()
+        var token = findNextContinuationToken(response, null)
+        if (!preview) {
+            val seenTokens = mutableSetOf<String>()
+            while (token != null && seenTokens.size < 10 && seenTokens.add(token)) {
+                response = post("$origin/youtubei/v1/search?key=${bootstrap.key}", JSONObject()
+                    .put("context", context("WEB_REMIX", bootstrap.version))
+                    .put("continuation", token), origin)
+                collected += audioOnlyMusicItems(parseItems(response)).filterNot { it.musicVideo }
+                token = findNextContinuationToken(response, token)
+            }
+        }
+        val items = collected.distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+            .let { if (preview) it.take(5) else it }
+        return MusicHomeSection(
+            title = title,
+            items = items,
+            horizontal = horizontal,
+            // Search continuations must go back through /search, while home shelf
+            // continuations use /browse. The See All request above consumes them
+            // through the correct endpoint, so do not hand this token to the home UI.
+            continuation = null,
+            endpointParams = params,
+            endpointQuery = query,
+        )
+    }
+
+    fun musicSearchSection(section: MusicHomeSection): MusicHomeSection {
+        if (section.endpointQuery.isNotBlank() && section.endpointParams.isNotBlank()) {
+            return filteredMusicSearch(
+                section.endpointQuery,
+                section.title,
+                section.endpointParams,
+                section.horizontal,
+                preview = false,
+            )
+        }
+        val origin = "https://music.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB_REMIX")
+        val body = JSONObject().put("context", context("WEB_REMIX", bootstrap.version))
+        val endpoint = if (!section.browseId.isNullOrBlank()) {
+            body.put("browseId", section.browseId)
+            "browse"
+        } else {
+            body.put("query", section.endpointQuery)
+            "search"
+        }
+        section.endpointParams.takeIf(String::isNotBlank)?.let { body.put("params", it) }
+        val response = post("$origin/youtubei/v1/$endpoint?key=${bootstrap.key}", body, origin)
+        val items = audioOnlyMusicItems(parseItems(response))
+            .filterNot { it.musicVideo }
+            .distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+        return section.copy(items = items, continuation = findNextContinuationToken(response, null))
+    }
+
     fun musicContinuation(query: String): List<FeedItem> {
         val searching = query.isNotBlank()
         if (searching && activeMusicQuery != query) return emptyList()
@@ -1612,11 +2100,14 @@ object YouTubeRepository {
         val token = findContinuationToken(response)
         if (endpoint == "search") musicSearchToken = token else musicHomeToken = token
         val items = if (endpoint == "search") {
-            val sections = parseMusicHomeSections(response)
+            val sections = parseMusicSearchSections(response)
             val searchableSections = sections.filterNot { section ->
                 section.title.trim().equals("Videos", ignoreCase = true) ||
                     section.title.contains("music videos", ignoreCase = true)
+            }.mapNotNull { section ->
+                audioOnlyMusicItems(section.items).takeIf { it.isNotEmpty() }?.let { section.copy(items = it) }
             }
+            lastMusicSearchSections = searchableSections
             searchableSections.flatMap { it.items }
                 .distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
                 .ifEmpty { audioOnlyMusicItems(parseItems(response)) }
@@ -1759,7 +2250,7 @@ object YouTubeRepository {
         val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
         check(status == "OK") { reason.ifBlank { "YouTube WEB SABR player returned $status" } }
         AppLog.event("SABR player selected WEB video=$videoId")
-        PlaybackLoadStatus.show(videoId, "Validating stream configuration…")
+        PlaybackLoadStatus.showInitial(videoId, "Validating stream configuration…")
         val streaming = response.optJSONObject("streamingData")
             ?: error("YouTube SABR player returned no streamingData")
         val unresolvedUrl = streaming.optString("serverAbrStreamingUrl")
@@ -1772,10 +2263,10 @@ object YouTubeRepository {
             .takeIf(String::isNotBlank) ?: error("BotGuard returned no SABR player PoToken")
         val cpn = response.optString("_materialytCpn")
             .takeIf(String::isNotBlank) ?: error("YouTube SABR player returned no playback nonce")
-        PlaybackLoadStatus.show(videoId, "Preparing history tracking…")
+        PlaybackLoadStatus.showInitial(videoId, "Preparing history tracking…")
         cachePlaybackTracking(videoId, response.optJSONObject("playbackTracking"), cpn, music)
         if (!response.optBoolean("_materialytNResolved")) {
-            PlaybackLoadStatus.show(videoId, "Solving media URL…")
+            PlaybackLoadStatus.showInitial(videoId, "Solving media URL…")
         }
         val solvedUrl = if (response.optBoolean("_materialytNResolved")) unresolvedUrl
             else solveNChallenge(videoId, unresolvedUrl, playerJavaScript(videoId), false)
@@ -1786,7 +2277,7 @@ object YouTubeRepository {
             ?.setQueryParameter("cpn", cpn)
             ?.setQueryParameter("pot", poToken)
             ?.build()?.toString() ?: solvedUrl
-        PlaybackLoadStatus.show(videoId, "Reading available formats…")
+        PlaybackLoadStatus.showInitial(videoId, "Reading available formats…")
         val formats = mutableListOf<SabrFormat>()
         streaming.optJSONArray("adaptiveFormats")?.let { array ->
             for (index in 0 until array.length()) {
@@ -2003,7 +2494,8 @@ object YouTubeRepository {
         val clientName = "WEB"
         val clientId = "1"
         val origin = "https://www.youtube.com"
-        val showInitialProgress = reloadToken == null && !adPlayback
+        val showInitialProgress = reloadToken == null && !adPlayback &&
+            !PlaybackLoadStatus.hasPlaybackStarted(videoId)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Preparing WEB session…")
         val bootstrap = bootstrap(origin, clientName)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Generating PoToken…")
@@ -3308,25 +3800,51 @@ object YouTubeRepository {
                     )
                 }
             } else null
-            // playlistVideoRenderer is a video inside a playlist, not a playlist card.
-            val musicPlaylistId = if (rendererType.startsWith("music")) findString(renderer, "browseId")?.takeIf { it.startsWith("VL") } else null
-            val playlistRenderer = rendererType in setOf("playlistRenderer", "gridPlaylistRenderer") || lockupPlaylistId != null || musicPlaylistId != null
-            val channelRenderer = rendererType.contains("channel", true)
+            val musicNavBrowseEndpoint = renderer.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
+                ?: renderer.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)?.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
+            val musicPageType = musicNavBrowseEndpoint?.optJSONObject("browseEndpointContextSupportedConfigs")
+                ?.optJSONObject("browseEndpointContextMusicConfig")?.optString("pageType").orEmpty()
+            val musicNavBrowseId = musicNavBrowseEndpoint?.optString("browseId").orEmpty()
+            val isMusicPlaylistOrAlbum = rendererType.startsWith("music") &&
+                (musicPageType in setOf("MUSIC_PAGE_TYPE_PLAYLIST", "MUSIC_PAGE_TYPE_ALBUM") ||
+                 musicNavBrowseId.startsWith("VL") || musicNavBrowseId.startsWith("PL") || musicNavBrowseId.startsWith("MPRE") ||
+                 musicNavBrowseId in setOf("LM", "SS", "SE"))
+            val musicPlaylistId = if (isMusicPlaylistOrAlbum) {
+                musicNavBrowseId.takeIf(String::isNotBlank)
+                    ?: findString(renderer, "browseId")?.takeIf { it.startsWith("VL") || it.startsWith("PL") || it.startsWith("MPRE") || it in setOf("LM", "SS", "SE") }
+                    ?: renderer.optJSONObject("navigationEndpoint")?.optJSONObject("watchPlaylistEndpoint")?.optString("playlistId")
+            } else if (rendererType.startsWith("music")) {
+                findString(renderer, "browseId")?.takeIf { it.startsWith("VL") }
+            } else null
+            val isRadio = rendererType in setOf("radioRenderer", "compactRadioRenderer", "gridRadioRenderer")
+            val playlistRenderer = rendererType in setOf("playlistRenderer", "gridPlaylistRenderer") || isRadio || lockupPlaylistId != null || musicPlaylistId != null
+            val isMusicArtistOrChannel = rendererType.startsWith("music") && musicNavBrowseId.startsWith("UC") &&
+                (musicPageType in setOf("MUSIC_PAGE_TYPE_ARTIST", "MUSIC_PAGE_TYPE_USER_CHANNEL") ||
+                 rendererType == "musicCardShelfRenderer" ||
+                 (renderer.optString("videoId").isBlank() && !playlistRenderer))
+            val channelRenderer = rendererType.contains("channel", true) || isMusicArtistOrChannel
             val lockupVideoId = if (rendererType == "lockupViewModel" && renderer.optString("contentType").let {
                     it == "LOCKUP_CONTENT_TYPE_VIDEO" || it == "LOCKUP_CONTENT_TYPE_SHORT"
                 }) renderer.optString("contentId").takeIf { it.length == 11 } else null
             val videoId = if (playlistRenderer || channelRenderer) "" else renderer.optString("videoId")
                 .ifBlank { lockupVideoId.orEmpty() }
                 .ifBlank { findString(renderer, "videoId").orEmpty() }
-            val channelId = if (channelRenderer) renderer.optString("channelId")
-                .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("UC") }.orEmpty() } else ""
-            val authorChannelId = if (!channelRenderer) findString(renderer, "browseId")
-                ?.takeIf { it.startsWith("UC") }.orEmpty() else ""
+            val channelId = if (channelRenderer) {
+                musicNavBrowseId.takeIf { it.startsWith("UC") }.orEmpty()
+                    .ifBlank { renderer.optString("channelId") }
+                    .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("UC") }.orEmpty() }
+            } else ""
+            val musicArtistBrowseId = if (rendererType.startsWith("music") || renderer.has("flexColumns")) findMusicArtistBrowseId(renderer) else null
+            val authorChannelId = if (!channelRenderer) {
+                musicArtistBrowseId
+                    ?: findString(renderer, "browseId")?.takeIf { it.startsWith("UC") }.orEmpty()
+            } else ""
             val playlistId = if (playlistRenderer) renderer.optString("playlistId")
+                .ifBlank { renderer.optJSONObject("navigationEndpoint")?.optJSONObject("watchEndpoint")?.optString("playlistId").orEmpty() }
                 .ifBlank { findString(renderer, "playlistId").orEmpty() }
                 .ifBlank { lockupPlaylistId.orEmpty() }
                 .ifBlank { musicPlaylistId.orEmpty() }
-                .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("VL") }?.removePrefix("VL").orEmpty() } else ""
+                .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("VL") || it.startsWith("PL") || it.startsWith("MPRE") }?.removePrefix("VL").orEmpty() } else ""
             val isChannel = channelRenderer && channelId.startsWith("UC")
             val isPlaylist = playlistRenderer && playlistId.isNotBlank()
             val id = when { isChannel -> channelId; isPlaylist -> playlistId.removePrefix("VL"); else -> videoId }
@@ -3393,9 +3911,33 @@ object YouTubeRepository {
             val thumbWidth = if (isMusicItem || isChannel) selectedThumb?.optInt("width")?.takeIf { it > 0 } ?: 1 else 16
             val thumbHeight = if (isMusicItem || isChannel) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
             val rawThumbnail = if ((isMusicItem || isPlaylist || isChannel) && providedThumbnail.isNotBlank()) providedThumbnail else "https://i.ytimg.com/vi/$id/maxresdefault.jpg"
-            val thumbnail = if (isMusicItem) highResolutionArtworkUrl(rawThumbnail, thumbWidth, thumbHeight) else rawThumbnail
-            val channelThumbnail = findChannelThumbnail(renderer).orEmpty().ifBlank { if (isChannel) thumbnail else "" }
-            val url = when { isChannel -> "https://www.youtube.com/channel/$id"; isPlaylist -> "https://www.youtube.com/playlist?list=$id"; else -> "https://www.youtube.com/watch?v=$id" }
+            val thumbnail = if (isMusicItem || isPlaylist || isChannel) {
+                highResolutionArtworkUrl(rawThumbnail, thumbWidth, thumbHeight)
+                    .replace(Regex("/(?:default|mqdefault|sddefault)\\.(?:jpg|webp)(?=\\?|$)"), "/hqdefault.jpg")
+            } else rawThumbnail
+            val channelThumbnail = findChannelThumbnail(renderer)?.let { highResolutionArtworkUrl(it, 1, 1) }
+                .orEmpty().ifBlank { if (isChannel) thumbnail else "" }
+            val thumbSeedVideoId = Regex("/vi(?:_webp)?/([a-zA-Z0-9_-]{11})/").find(providedThumbnail)?.groupValues?.get(1)
+                ?.takeIf { candidateId -> candidateId != id && candidateId != playlistId && !candidateId.startsWith("RD") }
+            val playlistSeedVideoId = if (playlistRenderer) {
+                renderer.optString("videoId")
+                    .ifBlank { renderer.optJSONObject("navigationEndpoint")?.optJSONObject("watchEndpoint")?.optString("videoId").orEmpty() }
+                    .ifBlank {
+                        val tap = renderer.optJSONObject("rendererContext")?.optJSONObject("commandContext")?.optJSONObject("onTap")?.optJSONObject("innertubeCommand")
+                        tap?.optJSONObject("watchEndpoint")?.optString("videoId").orEmpty()
+                    }
+                    .ifBlank { findString(renderer, "videoId").orEmpty() }
+                    .takeIf { it.length == 11 && !it.startsWith("RD") }
+                    ?: thumbSeedVideoId
+                    ?: if (id.startsWith("RDAMVM") && id.length >= 17) id.removePrefix("RDAMVM").take(11)
+                    else if (id.startsWith("RD") && id.length == 13) id.removePrefix("RD")
+                    else null
+            } else null
+            val url = when {
+                isChannel -> "https://www.youtube.com/channel/$id"
+                isPlaylist -> if (!playlistSeedVideoId.isNullOrBlank()) "https://www.youtube.com/watch?v=$playlistSeedVideoId&list=$id" else "https://www.youtube.com/playlist?list=$id"
+                else -> "https://www.youtube.com/watch?v=$id"
+            }
             val resume = scanResumeMetadata(renderer)
             val exactResumeMs = resume.resumePlaybackPositionMs?.toLong()
                 ?: resume.startTimeSeconds?.times(1_000.0)?.toLong()
@@ -3414,15 +3956,21 @@ object YouTubeRepository {
                 (durationMs > 0L && rawResumePositionMs >= durationMs - 1_500L)
             ) 0L else rawResumePositionMs
             val musicVideoType = findString(renderer, "musicVideoType").orEmpty()
+            val resolvedChannelUrl = when {
+                isChannel -> "https://music.youtube.com/channel/$id"
+                !musicArtistBrowseId.isNullOrBlank() -> "https://music.youtube.com/channel/$musicArtistBrowseId"
+                authorChannelId.startsWith("UC") -> "https://www.youtube.com/channel/$authorChannelId"
+                else -> ""
+            }
             val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel,
-                channelUrl = authorChannelId.takeIf { it.startsWith("UC") }?.let { "https://www.youtube.com/channel/$it" }.orEmpty(),
+                channelUrl = resolvedChannelUrl,
                 resumePositionMs = resumePositionMs,
                 musicVideo = musicVideoType.isNotBlank() && musicVideoType != "MUSIC_VIDEO_TYPE_ATV")
             if (!isPlaylist && !isChannel) synchronized(videoDetailsCache) {
                 videoDetailsCache[id] = (videoDetailsCache[id] ?: VideoDetails(title, subtitle)).copy(
                     title = title,
                     author = subtitle,
-                    authorUrl = authorChannelId.takeIf { it.startsWith("UC") }?.let { "https://www.youtube.com/channel/$it" }.orEmpty(),
+                    authorUrl = resolvedChannelUrl,
                     authorAvatar = channelThumbnail,
                 )
             }
@@ -3560,6 +4108,7 @@ object YouTubeRepository {
                 if (!blocked) {
                     val supported = setOf(
                         "videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "playlistVideoRenderer", "playlistRenderer", "gridPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
+                        "radioRenderer", "compactRadioRenderer", "gridRadioRenderer",
                         "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "musicCardShelfRenderer", "playlistPanelVideoRenderer", "lockupViewModel"
                     )
                     keys.forEach { key ->
@@ -3691,6 +4240,39 @@ object YouTubeRepository {
         return null
     }
 
+    private fun findMusicArtistBrowseId(value: Any?): String? {
+        when (value) {
+            is JSONObject -> {
+                value.optJSONArray("runs")?.let { runs ->
+                    for (index in 0 until runs.length()) {
+                        val run = runs.optJSONObject(index) ?: continue
+                        val browse = run.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
+                        val browseId = browse?.optString("browseId").orEmpty()
+                        val pageType = browse?.optJSONObject("browseEndpointContextSupportedConfigs")
+                            ?.optJSONObject("browseEndpointContextMusicConfig")?.optString("pageType").orEmpty()
+                        if (browseId.startsWith("UC") || pageType == "MUSIC_PAGE_TYPE_ARTIST") return browseId
+                    }
+                }
+                val directNav = value.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
+                val directId = directNav?.optString("browseId").orEmpty()
+                val directType = directNav?.optJSONObject("browseEndpointContextSupportedConfigs")
+                    ?.optJSONObject("browseEndpointContextMusicConfig")?.optString("pageType").orEmpty()
+                if (directId.startsWith("UC") && (directType == "MUSIC_PAGE_TYPE_ARTIST" || directType == "MUSIC_PAGE_TYPE_USER_CHANNEL")) return directId
+                val keys = value.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (key != "trackingParams" && key != "thumbnail" && key != "thumbnails") {
+                        findMusicArtistBrowseId(value.opt(key))?.let { return it }
+                    }
+                }
+            }
+            is JSONArray -> for (index in 0 until value.length()) {
+                findMusicArtistBrowseId(value.opt(index))?.let { return it }
+            }
+        }
+        return null
+    }
+
     private fun resolveChannelName(channelId: String, videoId: String): String? {
         synchronized(channelNameCache) { channelNameCache[channelId]?.let { return it } }
         val origin = "https://www.youtube.com"
@@ -3742,6 +4324,14 @@ object YouTubeRepository {
     private fun highResolutionArtworkUrl(url: String, declaredWidth: Int, declaredHeight: Int): String {
         val normalized = normalizeImageUrl(url)
         if (!normalized.contains("ggpht.com") && !normalized.contains("googleusercontent.com")) return normalized
+        // YouTube avatar URLs support =s0, which requests the original image instead of
+        // upscaling the first (often 32- or 48-pixel) renderer candidate.
+        if (normalized.contains("yt3.ggpht.com") || normalized.contains("yt3.googleusercontent.com")) {
+            val rawBase = normalized.substringBefore('?')
+            val query = normalized.substringAfter('?', "")
+            val base = rawBase.substringBefore('=')
+            return "$base=s0" + if (query.isBlank()) "" else "?$query"
+        }
         val dimensions = Regex("=w(\\d+)-h(\\d+)").find(normalized)
         val sourceWidth = declaredWidth.takeIf { it > 1 } ?: dimensions?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
         val sourceHeight = declaredHeight.takeIf { it > 1 } ?: dimensions?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 1
@@ -3751,9 +4341,20 @@ object YouTubeRepository {
         return when {
             dimensions != null -> normalized.replaceRange(dimensions.range, "=w$targetWidth-h$targetHeight")
             Regex("=s\\d+(?=-|$)").containsMatchIn(normalized) -> normalized.replace(Regex("=s\\d+(?=-|$)"), "=s1200")
-            else -> normalized
+            else -> {
+                val rawBase = normalized.substringBefore('?')
+                val query = normalized.substringAfter('?', "")
+                val modifier = rawBase.lastIndexOf('=').takeIf { it > rawBase.lastIndexOf('/') }
+                if (modifier != null && rawBase.substring(modifier + 1).equals("rw", ignoreCase = true)) {
+                    rawBase.substring(0, modifier) + "=s512" + if (query.isBlank()) "" else "?$query"
+                } else {
+                    normalized
+                }
+            }
         }
     }
+
+    fun highResolutionPlaylistArtwork(url: String): String = highResolutionArtworkUrl(url, 1, 1)
 
     private fun findThumbnail(value: Any?): String? = when (value) {
         is JSONObject -> value.optString("url").takeIf(::isYouTubeImageUrl)?.let(::normalizeImageUrl)
@@ -3765,7 +4366,7 @@ object YouTubeRepository {
     private fun findChannelThumbnail(value: Any?): String? = when (value) {
         is JSONObject -> value.keys().asSequence()
             .filter { it.contains("avatar", true) || it.contains("channelThumbnail", true) }
-            .mapNotNull { findThumbnail(value.opt(it)) }.firstOrNull()
+            .mapNotNull { findLargestAvatar(value.opt(it)) }.firstOrNull()
             ?: value.keys().asSequence().mapNotNull { findChannelThumbnail(value.opt(it)) }.firstOrNull()
         is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findChannelThumbnail(value.opt(it)) }.firstOrNull()
         else -> null

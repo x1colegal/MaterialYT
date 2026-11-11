@@ -29,6 +29,10 @@ object PlaybackLoadStatus {
         mutableMessage.value = PlaybackLoadMessage(mediaId, text)
     }
 
+    fun showInitial(mediaId: String, text: String) {
+        if (mediaId !in startedMedia) show(mediaId, text)
+    }
+
     fun showSabrBackoff(mediaId: String, text: String) {
         val allowed = if (mediaId !in startedMedia) {
             true

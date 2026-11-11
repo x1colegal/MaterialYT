@@ -52,6 +52,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -265,9 +267,9 @@ private fun Modifier.autoMarquee(): Modifier = basicMarquee(
 )
 
 @Composable
-private fun CenteredMusicTitle(text: String, style: TextStyle) {
+private fun CenteredMusicTitle(text: String, style: TextStyle, modifier: Modifier = Modifier) {
     val measurer = rememberTextMeasurer()
-    BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+    BoxWithConstraints(Modifier.fillMaxWidth().then(modifier), contentAlignment = Alignment.Center) {
         val availableWidth = with(androidx.compose.ui.platform.LocalDensity.current) { maxWidth.roundToPx() }
         val overflows = remember(text, style, availableWidth) {
             measurer.measure(text = text, style = style, maxLines = 1, softWrap = false).size.width > availableWidth
@@ -308,6 +310,7 @@ class MainActivity : ComponentActivity() {
     private var videoPlayerActive = false
     private var playerUiActive = false
     private var musicSystemBarsActive by mutableStateOf(false)
+    private var musicSystemBarsOwners = 0
     private var savedStatusBarColor: Int? = null
     private var savedNavigationBarColor: Int? = null
     private var savedLightNavigationBars: Boolean? = null
@@ -655,7 +658,10 @@ class MainActivity : ComponentActivity() {
 
     fun immersive(enabled: Boolean) {
         immersiveActive = enabled
-        if (enabled) musicSystemBarsActive = false
+        if (enabled) {
+            musicSystemBarsOwners = 0
+            musicSystemBarsActive = false
+        }
         if (enabled) applyImmersiveState() else restoreNormalSystemBars()
     }
 
@@ -669,15 +675,19 @@ class MainActivity : ComponentActivity() {
     }
 
     fun musicPlayerSystemBars(enabled: Boolean) {
-        if (enabled && !musicSystemBarsActive) {
+        val wasActive = musicSystemBarsOwners > 0
+        musicSystemBarsOwners = if (enabled) musicSystemBarsOwners + 1
+            else (musicSystemBarsOwners - 1).coerceAtLeast(0)
+        val active = musicSystemBarsOwners > 0
+        if (active && !wasActive) {
             savedStatusBarColor = window.statusBarColor
             savedNavigationBarColor = window.navigationBarColor
             val controller = WindowCompat.getInsetsController(window, window.decorView)
             savedLightNavigationBars = controller.isAppearanceLightNavigationBars
             if (Build.VERSION.SDK_INT >= 29) savedNavigationBarContrast = window.isNavigationBarContrastEnforced
         }
-        musicSystemBarsActive = enabled
-        if (!enabled) {
+        musicSystemBarsActive = active
+        if (!active) {
             immersiveActive = false
             savedStatusBarColor?.let { window.statusBarColor = it }
             savedNavigationBarColor?.let { window.navigationBarColor = it }
@@ -820,10 +830,18 @@ private fun AppScaffold(
     var expiredSessionWarning by remember { mutableStateOf(false) }
     var playerMode by remember { mutableStateOf(false) }
     var activeVideoUrl by remember { mutableStateOf<String?>(null) }
+    var activePlaylistItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var activePlaylistIndex by remember { mutableIntStateOf(-1) }
     var activeChannelUrl by remember { mutableStateOf<String?>(null) }
     var activePlaylistUrl by remember { mutableStateOf<String?>(null) }
-    val hideNavigation = playerMode || activity.isFullscreen
+    val onOpenVideoWithPlaylist: (String, List<FeedItem>, Int) -> Unit = { videoUrl, items, index ->
+        activePlaylistItems = items
+        activePlaylistIndex = index
+        activeVideoUrl = videoUrl
+        playerMode = true
+    }
     val musicPlayerActive = activity.isMusicPlayerActive
+    val hideNavigation = playerMode || activity.isFullscreen || musicPlayerActive
     LaunchedEffect(playerMode) { activity.playerUiActive(playerMode) }
     DisposableEffect(Unit) {
         onDispose { activity.playerUiActive(false) }
@@ -907,45 +925,56 @@ private fun AppScaffold(
         val effectivePadding = if (activity.isFullscreen) PaddingValues(0.dp) else padding
         Box(Modifier.padding(effectivePadding).fillMaxSize()) {
             when (tabs.getOrNull(tab)?.first) {
-                "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }, {
-                    activeVideoUrl = it
-                    playerMode = true
-                }) { tab = tabs.indexOfFirst { it.first == "Account" } }
+                "Home" -> HomeScreen(activity, codec, audioCodec, quality, onPlayer, { playerMode = it }, onOpenVideoWithPlaylist) { tab = tabs.indexOfFirst { it.first == "Account" } }
                 "Shorts" -> ShortsScreen(activity, codec, audioCodec, quality, onPlayer, { videoUrl ->
+                    activePlaylistItems = emptyList()
+                    activePlaylistIndex = -1
                     activeVideoUrl = videoUrl
                     playerMode = true
                 }) { playerMode = it }
                 "YT Music" -> MusicScreen(activity, audioCodec, reopenMusicPlayer) { playerMode = it }
-                "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, {
-                    activeVideoUrl = it
-                    playerMode = true
-                }, loader = { YouTubeRepository.history() })
-                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer, { playerMode = it }, { videoUrl ->
-                    activeVideoUrl = videoUrl
-                    playerMode = true
-                }) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
-            }
-            activeChannelUrl?.let { channelUrl ->
-                ChannelScreen(activity, channelUrl, codec, audioCodec, quality, onPlayer, { videoUrl ->
-                    activeVideoUrl = videoUrl
-                    playerMode = true
-                }) { activeChannelUrl = null }
-            }
-            activePlaylistUrl?.let { playlistUrl ->
-                PlaylistScreen(activity, playlistUrl, codec, audioCodec, quality, onPlayer, { playerMode = it }) {
-                    activePlaylistUrl = null
-                }
+                "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, onOpenVideoWithPlaylist, loader = { YouTubeRepository.history() })
+                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer, { playerMode = it }, onOpenVideoWithPlaylist) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
             }
             activeVideoUrl?.let { videoUrl ->
                 VideoScreen(activity, videoUrl, codec, audioCodec, quality, onPlayer,
+                    playlistItems = activePlaylistItems,
+                    playlistIndex = activePlaylistIndex,
+                    onPlaylistIndex = { nextIndex ->
+                        activePlaylistIndex = nextIndex
+                        activePlaylistItems.getOrNull(nextIndex)?.let { nextItem ->
+                            activeVideoUrl = nextItem.url
+                        }
+                    },
                     onPlayerMode = { playerMode = it },
-                    onOpenVideo = { nextUrl -> activeVideoUrl = nextUrl; playerMode = true },
+                    onOpenVideo = { nextUrl ->
+                        activePlaylistItems = emptyList()
+                        activePlaylistIndex = -1
+                        activeVideoUrl = nextUrl
+                        playerMode = true
+                    },
                     onOpenChannel = { channelUrl ->
                         activeChannelUrl = channelUrl
-                        playerMode = false
+                    },
+                    onOpenPlaylist = { playlistUrl ->
+                        activePlaylistUrl = playlistUrl
                     }) {
                     activeVideoUrl = null
+                    activePlaylistItems = emptyList()
+                    activePlaylistIndex = -1
                     playerMode = false
+                }
+            }
+            activePlaylistUrl?.let { playlistUrl ->
+                PlaylistScreen(activity, playlistUrl, codec, audioCodec, quality, onPlayer, { playerMode = it }, onOpenVideoWithPlaylist) {
+                    activePlaylistUrl = null
+                    if (activeVideoUrl != null) playerMode = true
+                }
+            }
+            activeChannelUrl?.let { channelUrl ->
+                ChannelScreen(activity, channelUrl, codec, audioCodec, quality, onPlayer, onOpenVideoWithPlaylist) {
+                    activeChannelUrl = null
+                    if (activeVideoUrl != null) playerMode = true
                 }
             }
         }
@@ -955,7 +984,20 @@ private fun AppScaffold(
         Row(Modifier.fillMaxSize()) {
             if (!hideNavigation) NavigationRail {
                 Spacer(Modifier.weight(1f))
-                tabs.forEachIndexed { index, item -> NavigationRailItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first) }) }
+                tabs.forEachIndexed { index, item ->
+                    NavigationRailItem(
+                        selected = tab == index && activeChannelUrl == null && activePlaylistUrl == null && activeVideoUrl == null,
+                        onClick = {
+                            activeChannelUrl = null
+                            activePlaylistUrl = null
+                            activeVideoUrl = null
+                            playerMode = false
+                            tab = index
+                        },
+                        icon = { Icon(item.second, null) },
+                        label = { Text(item.first) },
+                    )
+                }
                 Spacer(Modifier.weight(1f))
             }
             Scaffold(
@@ -971,7 +1013,25 @@ private fun AppScaffold(
             contentWindowInsets = if (musicPlayerActive) ComposeWindowInsets(0, 0, 0, 0)
                 else ScaffoldDefaults.contentWindowInsets,
             bottomBar = {
-            if (!hideNavigation) Column { MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ }; NavigationBar { tabs.forEachIndexed { index, item -> NavigationBarItem(selected = tab == index, onClick = { playerMode = false; tab = index }, icon = { Icon(item.second, null) }, label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) }) } } }
+            if (!hideNavigation) Column {
+                MiniPlayer { tab = tabs.indexOfFirst { it.first == "YT Music" }; reopenMusicPlayer++ }
+                NavigationBar {
+                    tabs.forEachIndexed { index, item ->
+                        NavigationBarItem(
+                            selected = tab == index && activeChannelUrl == null && activePlaylistUrl == null && activeVideoUrl == null,
+                            onClick = {
+                                activeChannelUrl = null
+                                activePlaylistUrl = null
+                                activeVideoUrl = null
+                                playerMode = false
+                                tab = index
+                            },
+                            icon = { Icon(item.second, null) },
+                            label = { Text(item.first, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp, softWrap = false) },
+                        )
+                    }
+                }
+            }
         }, content = content)
     }
     if (!tablet && !musicPlayerActive && !activity.isFullscreen && !activity.pipMode) {
@@ -1152,7 +1212,7 @@ private fun DedicatedSearchScreen(
 }
 
 @Composable
-private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, openAccount: () -> Unit) {
+private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, openAccount: () -> Unit) {
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
@@ -1170,7 +1230,10 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         homeListState.scrollToItem(0)
         homeGridState.scrollToItem(0)
     }
-    if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
+    if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode, openVideo = openVideo, onDeleted = { id ->
+        feed = feed.filterNot { it.id.removePrefix("VL") == id }
+        homeFeed = homeFeed.filterNot { it.id.removePrefix("VL") == id }
+    }) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
     if (searchOpen) {
         DedicatedSearchScreen("Search YouTube", query, false, { searchOpen = false }) { requested ->
@@ -1254,7 +1317,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     }
                 }
                 LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(16.dp)) {
-                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } } }
+                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
                     if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             } else {
@@ -1264,7 +1327,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     }
                 }
                 LazyColumn(state = homeListState) {
-                    items(feed) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } }
+                    items(feed) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
                     if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             }
@@ -1274,7 +1337,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
 }
 
 @Composable
-private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, onBack: (() -> Unit)? = null, allowCreatePlaylist: Boolean = false, loader: () -> List<FeedItem>) {
+private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, onBack: (() -> Unit)? = null, allowCreatePlaylist: Boolean = false, loader: () -> List<FeedItem>) {
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
@@ -1282,7 +1345,9 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
     var showCreatePlaylist by remember { mutableStateOf(false) }
-    if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode) { selectedPlaylist = null }; return }
+    if (selectedPlaylist != null) { PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, onPlayerMode = onPlayerMode, openVideo = openVideo, onDeleted = { id ->
+        feed = feed.filterNot { it.id.removePrefix("VL") == id }
+    }) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
     LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { loader() }) }.onSuccess { feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false }
     Box(Modifier.fillMaxSize()) {
@@ -1294,10 +1359,10 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
         if (tablet) {
             LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp)) {
-                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } } }
+                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
             }
         } else {
-            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url) } } } }
+            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
         }
         }
     }
@@ -1356,8 +1421,12 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
     var tracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var homeTracks by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var musicHome by remember { mutableStateOf(MusicHomePage(emptyList(), emptyList())) }
+    var musicSearchSections by remember { mutableStateOf<List<MusicHomeSection>>(emptyList()) }
     var selected by remember { mutableStateOf<FeedItem?>(null) }
     var selectedPlaylist by remember { mutableStateOf<FeedItem?>(null) }
+    var selectedArtist by remember { mutableStateOf<String?>(null) }
+    var viewingSection by remember { mutableStateOf<MusicHomeSection?>(null) }
+    var showCreatePlaylist by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
     var loadingMore by remember { mutableStateOf(false) }
     var loadingHomeMore by remember { mutableStateOf(false) }
@@ -1377,11 +1446,11 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
     LaunchedEffect(reopenPlayerRequest) {
         if (reopenPlayerRequest > 0) selected = AutoMusicService.nowPlaying.value
     }
-    LaunchedEffect(selected) { onPlayerMode(selected != null) }
+    LaunchedEffect(selected, selectedArtist) { onPlayerMode(selected != null && selectedArtist == null) }
     fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { block() }) }.onSuccess { tracks = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false } }
-    suspend fun loadHome(category: MusicCategory? = null) {
+    suspend fun loadHome() {
         loading = true; error = null
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicHome(category) } }
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicHome() } }
             .onSuccess { page ->
                 val normalized = page.copy(sections = page.sections.map { it.copy(items = originalMetadataItems(it.items)) })
                 musicHome = normalized
@@ -1419,18 +1488,135 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
             loadingHomeMore = false
         }
     }
+    selectedPlaylist?.let { playlist ->
+        MusicPlaylistScreen(activity, playlist, audioCodec, onPlayerMode, onChannelClick = { selectedArtist = it }, onDeleted = { id ->
+            fun withoutDeleted(items: List<FeedItem>) = items.filterNot { it.id.removePrefix("VL") == id }
+            musicHome = musicHome.copy(sections = musicHome.sections.map { it.copy(items = withoutDeleted(it.items)) })
+            homeTracks = withoutDeleted(homeTracks)
+            tracks = withoutDeleted(tracks)
+            viewingSection = viewingSection?.copy(items = withoutDeleted(viewingSection!!.items))
+        }) { selectedPlaylist = null }
+        return
+    }
+    viewingSection?.let { section ->
+        BackHandler { viewingSection = null }
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { viewingSection = null }) { Icon(Icons.Default.ArrowBack, "Back") }
+                Spacer(Modifier.width(8.dp))
+                Text(section.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                if (section.title.contains("Playlist", ignoreCase = true)) {
+                    IconButton(onClick = { showCreatePlaylist = true }) {
+                        Icon(Icons.Default.Add, "New playlist")
+                    }
+                }
+            }
+            val playlists = section.items.filter { it.playlist }
+            if (playlists.isNotEmpty()) {
+                val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+                if (tablet) {
+                    LazyVerticalGrid(
+                        GridCells.Adaptive(minSize = 180.dp),
+                        contentPadding = PaddingValues(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        gridItems(playlists) { playlist ->
+                            Column(
+                                Modifier.clickable { selectedPlaylist = playlist }
+                            ) {
+                                AsyncImage(
+                                    playlist.thumbnail,
+                                    null,
+                                    Modifier.fillMaxWidth().aspectRatio(1f)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text(playlist.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                                Text(if (playlist.subtitle.isNotBlank()) playlist.subtitle else "Playlist", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                } else {
+                    LazyColumn(contentPadding = PaddingValues(bottom = 24.dp), modifier = Modifier.fillMaxSize()) {
+                        items(playlists) { playlist ->
+                            Row(
+                                Modifier.fillMaxWidth().clickable { selectedPlaylist = playlist }.padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AsyncImage(
+                                    playlist.thumbnail,
+                                    null,
+                                    Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Spacer(Modifier.width(16.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(playlist.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                                    Text(if (playlist.subtitle.isNotBlank()) playlist.subtitle else "Playlist", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(contentPadding = PaddingValues(bottom = 24.dp), modifier = Modifier.fillMaxSize()) {
+                    items(section.items) { track ->
+                        MusicTrackRow(track, onChannelClick = {
+                            viewingSection = null
+                            selectedArtist = it
+                        }) {
+                            if (track.channel) {
+                                viewingSection = null
+                                selectedArtist = track.id.ifBlank { track.url }
+                            } else selectTrack(track)
+                        }
+                    }
+                }
+            }
+        }
+        if (showCreatePlaylist) CreatePlaylistDialog(
+            onDismiss = { showCreatePlaylist = false },
+            onCreated = { _, _ ->
+                showCreatePlaylist = false
+                scope.launch {
+                    loadHome()
+                    viewingSection = musicHome.sections.firstOrNull { it.title.contains("Playlist", ignoreCase = true) }
+                        ?: viewingSection
+                }
+            },
+        )
+        return
+    }
+    selectedArtist?.let { artistIdOrUrl ->
+        MusicArtistScreen(
+            activity = activity,
+            artistBrowseId = artistIdOrUrl,
+            preferredCodec = audioCodec,
+            onPlayerMode = onPlayerMode,
+            onTrack = { track ->
+                selectTrack(track)
+                selectedArtist = null
+            },
+            onPlaylist = { selectedPlaylist = it },
+            onArtist = { selectedArtist = it },
+            onBack = { selectedArtist = null },
+        )
+        return
+    }
     selected?.let { selectedTrack ->
         MusicPlayer(
             activity,
             selectedTrack,
             audioCodec,
             onAutoplayTrack = { selected = it },
+            onChannelClick = { selectedArtist = it },
             onBack = { selected = null },
         )
-        return
-    }
-    selectedPlaylist?.let { playlist ->
-        MusicPlaylistScreen(activity, playlist, audioCodec, onPlayerMode) { selectedPlaylist = null }
         return
     }
     if (searchOpen) {
@@ -1442,7 +1628,18 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
             // search layout while the network request is in flight. That made
             // Continue Hearing briefly turn into synthetic Songs/Playlists.
             tracks = emptyList()
-            load { YouTubeRepository.musicSearch(requested) }
+            musicSearchSections = emptyList()
+            scope.launch {
+                loading = true
+                error = null
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicSearchPage(requested) } }
+                    .onSuccess { page ->
+                        musicSearchSections = page.sections.map { it.copy(items = originalMetadataItems(it.items)) }
+                        tracks = musicSearchSections.flatMap { it.items }.distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+                    }
+                    .onFailure { if (!it.isExpectedCancellation()) error = it.message ?: "Search failed" }
+                loading = false
+            }
         }
         return
     }
@@ -1460,7 +1657,7 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
             Image(painterResource(R.drawable.ic_launcher_foreground), "MaterialYT", Modifier.size(56.dp))
             Spacer(Modifier.weight(1f))
             if (query.isNotBlank()) IconButton(onClick = {
-                scrollMusicToTop(); query = ""; error = null; tracks = homeTracks
+                scrollMusicToTop(); query = ""; error = null; tracks = homeTracks; musicSearchSections = emptyList()
             }) { Icon(Icons.Default.Close, "Clear search results") }
             IconButton(onClick = { searchOpen = true }) { Icon(Icons.Default.Search, "Search YT Music") }
             IconButton(onClick = {
@@ -1481,7 +1678,14 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
             }
             LazyColumn(state = musicListState, contentPadding = PaddingValues(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 items(musicHome.sections, key = { "section-${it.title}-${it.items.firstOrNull()?.id}" }) { section ->
-                    MusicHomeSectionView(section, tablet, ::selectTrack, { selectedPlaylist = it })
+                    MusicHomeSectionView(
+                        section,
+                        tablet,
+                        ::selectTrack,
+                        { selectedPlaylist = it },
+                        { selectedArtist = it.id.ifBlank { it.url } },
+                        onSeeAll = { viewingSection = it }
+                    )
                 }
                 if (loadingHomeMore) item { Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 if (homeContinuationError != null) item {
@@ -1492,7 +1696,39 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
             }
             return@Column
         }
+        if (query.isNotBlank() && musicSearchSections.isNotEmpty()) {
+            LazyColumn(
+                state = musicListState,
+                contentPadding = PaddingValues(bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                items(musicSearchSections, key = { "search-${it.title}-${it.items.firstOrNull()?.id}" }) { section ->
+                    MusicHomeSectionView(
+                        section,
+                        tablet,
+                        ::selectTrack,
+                        { selectedPlaylist = it },
+                        { selectedArtist = it.id.ifBlank { it.url } },
+                        onSeeAll = { section ->
+                            viewingSection = section
+                            if (!section.browseId.isNullOrBlank() || section.endpointQuery.isNotBlank()) {
+                                scope.launch {
+                                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicSearchSection(section) } }
+                                        .onSuccess { expanded -> viewingSection = expanded.copy(items = originalMetadataItems(expanded.items)) }
+                                        .onFailure { if (!it.isExpectedCancellation()) error = it.message ?: "Could not load section" }
+                                }
+                            }
+                        },
+                    )
+                }
+                if (loadingMore) item {
+                    Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                }
+            }
+            return@Column
+        }
         val musicPlaylists = tracks.filter { it.playlist }
+        val musicChannels = tracks.filter { it.channel }
         val musicSongs = tracks.filterNot { it.playlist || it.channel }
         if (tablet) {
             LaunchedEffect(musicGridState, tracks.size, query) {
@@ -1508,10 +1744,13 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                if (musicChannels.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
+                    MusicChannelShelf(musicChannels, cardWidth = 184.dp) { selectedArtist = it.id.ifBlank { it.url } }
+                }
                 if (musicPlaylists.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
                     MusicCollectionShelf(musicPlaylists, cardWidth = 184.dp) { selectedPlaylist = it }
                 }
-                gridItems(musicSongs) { track -> MusicTrackRow(track) { selectTrack(track) } }
+                gridItems(musicSongs) { track -> MusicTrackRow(track, onChannelClick = { selectedArtist = it }) { selectTrack(track) } }
                 if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         } else {
@@ -1521,17 +1760,32 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
                 }
             }
             LazyColumn(state = musicListState, contentPadding = PaddingValues(bottom = 16.dp)) {
+                if (musicChannels.isNotEmpty()) item { MusicChannelShelf(musicChannels, cardWidth = 148.dp) { selectedArtist = it.id.ifBlank { it.url } } }
                 if (musicPlaylists.isNotEmpty()) item { MusicCollectionShelf(musicPlaylists, cardWidth = 148.dp) { selectedPlaylist = it } }
                 if (musicSongs.isNotEmpty()) item { Text("Songs", Modifier.padding(horizontal = 16.dp, vertical = 12.dp), style = MaterialTheme.typography.titleLarge) }
-                items(musicSongs, key = { "music-${it.id}" }) { track -> MusicTrackRow(track) { selectTrack(track) } }
+                items(musicSongs, key = { "music-${it.id}" }) { track -> MusicTrackRow(track, onChannelClick = { selectedArtist = it }) { selectTrack(track) } }
                 if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
         }
     }
+    if (showCreatePlaylist) CreatePlaylistDialog(
+        onDismiss = { showCreatePlaylist = false },
+        onCreated = { id, name ->
+            showCreatePlaylist = false
+            scope.launch { loadHome() }
+        }
+    )
 }
 
 @Composable
-private fun MusicHomeSectionView(section: MusicHomeSection, tablet: Boolean, onTrack: (FeedItem) -> Unit, onPlaylist: (FeedItem) -> Unit) {
+private fun MusicHomeSectionView(
+    section: MusicHomeSection,
+    tablet: Boolean,
+    onTrack: (FeedItem) -> Unit,
+    onPlaylist: (FeedItem) -> Unit,
+    onChannel: (FeedItem) -> Unit = {},
+    onSeeAll: ((MusicHomeSection) -> Unit)? = null,
+) {
     val scope = rememberCoroutineScope()
     val rowState = rememberLazyListState()
     var visibleItems by remember(section.title) { mutableStateOf(section.items) }
@@ -1542,9 +1796,37 @@ private fun MusicHomeSectionView(section: MusicHomeSection, tablet: Boolean, onT
         continuation = section.continuation
         loadingMore = false
     }
+    val isTitleClickable = onSeeAll != null
+
     Column(Modifier.fillMaxWidth()) {
         if (section.strapline.isNotBlank()) Text(section.strapline.uppercase(), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(section.title, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (isTitleClickable) Modifier.clickable {
+                        onSeeAll?.invoke(section)
+                    } else Modifier
+                )
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                section.title,
+                modifier = Modifier.weight(1f, fill = false),
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            if (isTitleClickable) {
+                Spacer(Modifier.width(6.dp))
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = "See all",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
         val horizontalSongs = section.horizontal || section.title.contains("continue", true) || section.title.contains("listen again", true) || section.title.contains("quick picks", true)
         val collections = section.items.count { it.playlist || it.channel } >= section.items.size / 2
         if (collections || horizontalSongs) {
@@ -1568,7 +1850,7 @@ private fun MusicHomeSectionView(section: MusicHomeSection, tablet: Boolean, onT
             LazyRow(state = rowState, contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 items(visibleItems, key = { "${section.title}-${it.id}" }) { item ->
                     val width = if (tablet) 208.dp else 168.dp
-                    Column(Modifier.width(width).clickable { if (item.playlist) onPlaylist(item) else onTrack(item) }) {
+                    Column(Modifier.width(width).clickable { when { item.channel -> onChannel(item); item.playlist -> onPlaylist(item); else -> onTrack(item) } }) {
                         AsyncImage(
                             item.thumbnail,
                             null,
@@ -1578,12 +1860,53 @@ private fun MusicHomeSectionView(section: MusicHomeSection, tablet: Boolean, onT
                             contentScale = ContentScale.Crop,
                         )
                         Text(item.title, Modifier.padding(top = 8.dp).height(24.dp).autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
-                        Text(item.subtitle, Modifier.height(20.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            item.subtitle,
+                            Modifier.height(20.dp).then(
+                                if (item.channelUrl.isNotBlank()) Modifier.clickable {
+                                    onChannel(item.copy(url = item.channelUrl, id = item.channelUrl.substringAfterLast("/").substringAfterLast("=")))
+                                } else Modifier
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
                 if (loadingMore) item { Box(Modifier.width(72.dp).height(184.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
             }
-        } else section.items.take(if (tablet) 12 else 8).forEach { item -> MusicTrackRow(item) { onTrack(item) } }
+        } else section.items.take(if (tablet) 12 else 8).forEach { item ->
+            MusicTrackRow(item, onChannelClick = { target -> onChannel(item.copy(url = target, id = target.substringAfterLast("/").substringAfterLast("="))) }) {
+                if (item.channel) onChannel(item) else onTrack(item)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MusicChannelShelf(items: List<FeedItem>, cardWidth: androidx.compose.ui.unit.Dp, onClick: (FeedItem) -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        Text("Artists & Channels", Modifier.padding(horizontal = 16.dp, vertical = 10.dp), style = MaterialTheme.typography.titleLarge)
+        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            items(items, key = { "music-channel-${it.id}" }) { item ->
+                Column(
+                    Modifier.width(cardWidth).clickable { onClick(item) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    AsyncImage(
+                        item.thumbnail,
+                        null,
+                        Modifier.fillMaxWidth().aspectRatio(1f).clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentScale = ContentScale.Crop,
+                    )
+                    Text(item.title, Modifier.padding(top = 8.dp).height(24.dp).autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall, textAlign = TextAlign.Center)
+                    Text(item.subtitle, Modifier.height(20.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
     }
 }
 
@@ -1611,36 +1934,393 @@ private fun MusicCollectionShelf(items: List<FeedItem>, cardWidth: androidx.comp
 }
 
 @Composable
-private fun MusicTrackRow(item: FeedItem, onClick: () -> Unit) {
+private fun MusicTrackRow(item: FeedItem, onChannelClick: ((String) -> Unit)? = null, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 7.dp),
+        Modifier.fillMaxWidth()
+            .clickable {
+                if (item.channel && onChannelClick != null) onChannelClick(item.url.ifBlank { item.id })
+                else onClick()
+            }
+            .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AsyncImage(item.thumbnail, null, Modifier.size(64.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
+        AsyncImage(
+            item.thumbnail,
+            null,
+            Modifier.size(64.dp)
+                .clip(if (item.channel) CircleShape else RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentScale = ContentScale.Crop,
+        )
         Column(Modifier.padding(start = 12.dp).weight(1f)) {
             Text(item.title, Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleMedium)
-            Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                item.subtitle,
+                modifier = if (onChannelClick != null && (item.channelUrl.isNotBlank() || item.subtitle.isNotBlank())) {
+                    Modifier.clickable {
+                        val target = item.channelUrl.ifBlank { item.id.takeIf { item.channel } }.orEmpty().ifBlank { item.subtitle }
+                        onChannelClick(target)
+                    }
+                } else Modifier,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        Icon(Icons.Default.PlayArrow, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Icon(if (item.channel) Icons.Default.AccountCircle else Icons.Default.PlayArrow, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
-private fun MusicPlaylistScreen(activity: MainActivity, playlist: FeedItem, preferredCodec: AudioCodecChoice, onPlayerMode: (Boolean) -> Unit, onBack: () -> Unit) {
+private fun MusicArtistScreen(
+    activity: MainActivity,
+    artistBrowseId: String,
+    preferredCodec: AudioCodecChoice,
+    onPlayerMode: (Boolean) -> Unit,
+    onTrack: (FeedItem) -> Unit,
+    onPlaylist: (FeedItem) -> Unit,
+    onArtist: (String) -> Unit,
+    onBack: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    var artistPage by remember(artistBrowseId) { mutableStateOf<MusicArtistPage?>(null) }
+    var loading by remember(artistBrowseId) { mutableStateOf(true) }
+    var error by remember(artistBrowseId) { mutableStateOf<String?>(null) }
+    var subscribedState by remember(artistBrowseId) { mutableStateOf<Boolean?>(null) }
+    var subLoading by remember(artistBrowseId) { mutableStateOf(false) }
+    var selectedTrack by remember(artistBrowseId) { mutableStateOf<FeedItem?>(null) }
+    var selectedPlaylist by remember(artistBrowseId) { mutableStateOf<FeedItem?>(null) }
+    var showBioDialog by remember(artistBrowseId) { mutableStateOf(false) }
+    BackHandler { onBack() }
+
+    fun selectArtistTrack(track: FeedItem, queue: List<FeedItem>) {
+        val finalQueue = if (queue.isNotEmpty()) queue else listOf(track)
+        val index = finalQueue.indexOfFirst { it.id == track.id }
+        AutoMusicService.play(activity, track, preferredCodec, finalQueue, index)
+        selectedTrack = track
+    }
+
+    LaunchedEffect(artistBrowseId) {
+        loading = true
+        error = null
+        val cleanId = artistBrowseId.substringAfterLast("/").substringAfterLast("=")
+        runCatching {
+            withContext(Dispatchers.IO) {
+                val targetId = if (cleanId.startsWith("UC")) cleanId
+                    else YouTubeRepository.searchArtistBrowseId(cleanId) ?: cleanId
+                YouTubeRepository.musicArtistPage(targetId)
+            }
+        }.onSuccess { page ->
+            artistPage = page
+            subscribedState = page.subscribed
+            loading = false
+        }.onFailure { e ->
+            if (!e.isExpectedCancellation()) {
+                error = e.message ?: "Failed to load artist"
+            }
+            loading = false
+        }
+    }
+
+    LaunchedEffect(selectedTrack) { if (selectedTrack != null) onPlayerMode(true) }
+
+    selectedTrack?.let { track ->
+        val allArtistSongs = artistPage?.sections?.flatMap { it.items }?.filterNot { it.playlist || it.channel }.orEmpty()
+        val queue = if (allArtistSongs.any { it.id == track.id }) allArtistSongs else listOf(track)
+        val currentIndex = queue.indexOfFirst { it.id == track.id }
+        MusicPlayer(
+            activity,
+            track,
+            preferredCodec,
+            queue = queue,
+            queueIndex = currentIndex,
+            onQueueIndex = { index -> queue.getOrNull(index)?.let { selectedTrack = it } },
+            onAutoplayTrack = { next ->
+                val queued = queue.firstOrNull { it.id == next.id }
+                selectedTrack = queued ?: next
+            },
+            onChannelClick = { onArtist(it) },
+            onBack = { selectedTrack = null },
+        )
+        return
+    }
+
+    selectedPlaylist?.let { playlist ->
+        MusicPlaylistScreen(
+            activity,
+            playlist,
+            preferredCodec,
+            onPlayerMode,
+            onChannelClick = { onArtist(it) },
+            onBack = { selectedPlaylist = null },
+        )
+        return
+    }
+
+    if (showBioDialog && artistPage?.description?.isNotBlank() == true) {
+        AlertDialog(
+            onDismissRequest = { showBioDialog = false },
+            title = { Text(artistPage?.name ?: "About") },
+            text = {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 350.dp)) {
+                    item { Text(artistPage?.description.orEmpty(), style = MaterialTheme.typography.bodyMedium) }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showBioDialog = false }) { Text("Close") }
+            }
+        )
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+            }
+            Text(
+                artistPage?.name ?: "Artist",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            )
+        }
+
+        if (loading) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+
+        error?.let { err ->
+            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(err, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = {
+                        loading = true
+                        error = null
+                        scope.launch {
+                            val cleanId = artistBrowseId.substringAfterLast("/").substringAfterLast("=")
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    val targetId = if (cleanId.startsWith("UC")) cleanId
+                                        else YouTubeRepository.searchArtistBrowseId(cleanId) ?: cleanId
+                                    YouTubeRepository.musicArtistPage(targetId)
+                                }
+                            }.onSuccess {
+                                artistPage = it
+                                subscribedState = it.subscribed
+                                loading = false
+                            }.onFailure {
+                                error = it.message ?: "Failed to load artist"
+                                loading = false
+                            }
+                        }
+                    }) {
+                        Text("Retry")
+                    }
+                }
+            }
+            return
+        }
+
+        artistPage?.let { artist ->
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                item {
+                    Column(Modifier.fillMaxWidth()) {
+                        Box(Modifier.fillMaxWidth()) {
+                            if (artist.banner.isNotBlank()) {
+                                AsyncImage(
+                                    artist.banner,
+                                    null,
+                                    Modifier.fillMaxWidth().height(if (tablet) 220.dp else 160.dp),
+                                    contentScale = ContentScale.Crop,
+                                )
+                                Box(
+                                    Modifier.fillMaxWidth().height(if (tablet) 220.dp else 160.dp)
+                                        .background(
+                                            Brush.verticalGradient(
+                                                listOf(ComposeColor.Transparent, MaterialTheme.colorScheme.background.copy(alpha = 0.85f), MaterialTheme.colorScheme.background)
+                                            )
+                                        )
+                                )
+                            }
+                        }
+                        Column(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            val avatarUrl = artist.avatar.ifBlank { artist.banner }
+                            if (avatarUrl.isNotBlank()) {
+                                AsyncImage(
+                                    avatarUrl,
+                                    artist.name,
+                                    Modifier.size(110.dp).clip(CircleShape).border(2.dp, MaterialTheme.colorScheme.surfaceVariant, CircleShape),
+                                    contentScale = ContentScale.Crop,
+                                )
+                                Spacer(Modifier.height(12.dp))
+                            }
+                            Text(
+                                artist.name,
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                            )
+                            if (artist.subscribers.isNotBlank()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    artist.subscribers,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center,
+                                )
+                            }
+                            if (artist.channelId.isNotBlank()) {
+                                Spacer(Modifier.height(10.dp))
+                                val isSub = subscribedState == true
+                                Button(
+                                    onClick = {
+                                        if (subLoading) return@Button
+                                        if (!YouTubeRepository.signedIn()) {
+                                            android.widget.Toast.makeText(activity, "Sign in to subscribe", android.widget.Toast.LENGTH_SHORT).show()
+                                            return@Button
+                                        }
+                                        val newSub = !isSub
+                                        subscribedState = newSub
+                                        subLoading = true
+                                        scope.launch {
+                                            runCatching {
+                                                withContext(Dispatchers.IO) {
+                                                    YouTubeRepository.setSubscription(artist.channelId, newSub)
+                                                }
+                                            }.onFailure { e ->
+                                                subscribedState = isSub
+                                                android.widget.Toast.makeText(activity, e.message ?: "Subscription update failed", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                            subLoading = false
+                                        }
+                                    },
+                                    colors = if (isSub) ButtonDefaults.outlinedButtonColors() else ButtonDefaults.buttonColors(),
+                                    shape = RoundedCornerShape(20.dp),
+                                ) {
+                                    Icon(
+                                        if (isSub) Icons.Default.Check else Icons.Default.Add,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (isSub) "Subscribed" else "Subscribe")
+                                }
+                            }
+                            if (artist.description.isNotBlank()) {
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    artist.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.clickable { showBioDialog = true },
+                                    textAlign = TextAlign.Center,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                items(artist.sections, key = { "artist-sec-${it.title}-${it.items.firstOrNull()?.id}" }) { section ->
+                    MusicHomeSectionView(
+                        section = section,
+                        tablet = tablet,
+                        onTrack = { track -> selectArtistTrack(track, section.items.filterNot { it.playlist || it.channel }) },
+                        onPlaylist = onPlaylist,
+                        onChannel = { onArtist(it.id.ifBlank { it.url }) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MusicPlaylistScreen(
+    activity: MainActivity,
+    playlist: FeedItem,
+    preferredCodec: AudioCodecChoice,
+    onPlayerMode: (Boolean) -> Unit,
+    onChannelClick: ((String) -> Unit)? = null,
+    onDeleted: (String) -> Unit = {},
+    onBack: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val playlistId = remember(playlist.id, playlist.url) {
+        (Regex("[?&]list=([^&]+)").find(playlist.url)?.groupValues?.get(1) ?: playlist.id.substringAfterLast('/')).removePrefix("VL")
+    }
     var tracks by remember(playlist.id) { mutableStateOf<List<FeedItem>>(emptyList()) }
+    var editable by remember(playlist.id) { mutableStateOf(false) }
+    var deletable by remember(playlist.id) { mutableStateOf(false) }
     var selected by remember(playlist.id) { mutableStateOf<FeedItem?>(null) }
     var loading by remember(playlist.id) { mutableStateOf(true) }
     var error by remember(playlist.id) { mutableStateOf<String?>(null) }
-    fun selectTrack(track: FeedItem) {
-        val index = tracks.indexOfFirst { it.id == track.id }
-        AutoMusicService.play(activity, track, preferredCodec, tracks, index)
+    var confirmDelete by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
+    var pendingRemoval by remember { mutableStateOf<FeedItem?>(null) }
+    var removing by remember { mutableStateOf(false) }
+    var saveTrackId by remember { mutableStateOf<String?>(null) }
+    var continuation by remember(playlist.id) { mutableStateOf<String?>(null) }
+    var loadingMore by remember(playlist.id) { mutableStateOf(false) }
+    val trackListState = rememberLazyListState()
+    val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+
+    val seedVideoId = remember(playlist.url, playlist.thumbnail) {
+        Regex("[?&]v=([^&]+)").find(playlist.url)?.groupValues?.get(1)
+            ?: Regex("/vi(?:_webp)?/([a-zA-Z0-9_-]{11})/").find(playlist.url)?.groupValues?.get(1)
+            ?: Regex("/vi(?:_webp)?/([a-zA-Z0-9_-]{11})/").find(playlist.thumbnail)?.groupValues?.get(1)
+    }
+    BackHandler { onBack() }
+    fun selectTrack(track: FeedItem, queue: List<FeedItem> = tracks) {
+        val index = queue.indexOfFirst { it.id == track.id }
+        AutoMusicService.play(activity, track, preferredCodec, queue, index)
         selected = track
     }
     LaunchedEffect(playlist.id) {
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicPlaylistVideos(playlist.id) } }
-            .onSuccess { tracks = it }
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicPlaylistPage(playlistId, seedVideoId) } }
+            .onSuccess { page ->
+                tracks = page.items
+                editable = page.editable
+                deletable = page.deletable
+                continuation = page.continuation
+            }
             .onFailure { error = it.message ?: "Could not load playlist" }
         loading = false
+    }
+    fun loadMoreTracks() {
+        val token = continuation ?: return
+        if (loadingMore) return
+        loadingMore = true
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicPlaylistContinuation(token) } }
+                .onSuccess { page ->
+                    tracks = (tracks + page.items).distinctBy { it.setVideoId.ifBlank { it.id } }
+                    continuation = page.continuation.takeIf { page.items.isNotEmpty() }
+                }
+                .onFailure { error = it.message ?: "Could not load more tracks" }
+            loadingMore = false
+        }
+    }
+    LaunchedEffect(trackListState, tracks.size, continuation) {
+        snapshotFlow { trackListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+            if (continuation != null && tracks.isNotEmpty() && last >= tracks.lastIndex - 3) loadMoreTracks()
+        }
     }
     LaunchedEffect(selected) { onPlayerMode(selected != null) }
     selected?.let { track ->
@@ -1656,34 +2336,194 @@ private fun MusicPlaylistScreen(activity: MainActivity, playlist: FeedItem, pref
                 val queued = tracks.firstOrNull { it.id == next.id }
                 selected = queued ?: next
             },
+            onChannelClick = onChannelClick,
         ) { selected = null }
         return
     }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back to YT Music") }
-            Column(Modifier.weight(1f)) {
-                Text(playlist.title, style = MaterialTheme.typography.headlineSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${tracks.size} tracks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+    val coverThumbnail = YouTubeRepository.highResolutionPlaylistArtwork(
+        playlist.thumbnail.ifBlank { tracks.firstOrNull()?.thumbnail.orEmpty() }
+    )
+
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back to YT Music") }
+                Text("Playlist", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                if (deletable) IconButton(onClick = { confirmDelete = true }) {
+                    Icon(Icons.Default.Delete, "Delete playlist")
+                }
             }
-            if (tracks.isNotEmpty()) FilledTonalButton(onClick = { selectTrack(tracks.first()) }) {
-                Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Play")
-            }
-        }
-        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
-            items(tracks, key = { it.id }) { track ->
-                Row(Modifier.fillMaxWidth().clickable { selectTrack(track) }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    AsyncImage(track.thumbnail, null, Modifier.size(72.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
-                    Column(Modifier.padding(start = 14.dp).weight(1f)) {
-                        Text(track.title, Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleMedium)
-                        Text(track.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+            error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
+
+            if (!loading && tablet) {
+                Row(Modifier.weight(1f).fillMaxWidth()) {
+                    Column(
+                        Modifier.widthIn(min = 300.dp, max = 380.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        if (coverThumbnail.isNotBlank()) {
+                            AsyncImage(
+                                coverThumbnail,
+                                null,
+                                Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                                contentScale = ContentScale.Crop,
+                            )
+                        }
+                        Text(playlist.title, style = MaterialTheme.typography.headlineMedium)
+                        if (playlist.subtitle.isNotBlank()) {
+                            Text(playlist.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text("${tracks.size} tracks loaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (tracks.isNotEmpty()) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { selectTrack(tracks.first()) }, Modifier.weight(1f)) {
+                                    Icon(Icons.Default.PlayArrow, null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Play all")
+                                }
+                                FilledTonalButton(onClick = {
+                                    val shuffled = tracks.shuffled()
+                                    selectTrack(shuffled.first(), shuffled)
+                                }, Modifier.weight(1f)) {
+                                    Icon(Icons.Default.Shuffle, null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Shuffle")
+                                }
+                            }
+                        }
                     }
-                    Icon(Icons.Default.PlayArrow, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    VerticalDivider(Modifier.fillMaxHeight())
+                    LazyColumn(Modifier.weight(1f), state = trackListState, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+                        items(tracks.size) { index ->
+                            val item = tracks[index]
+                            Row(
+                                Modifier.fillMaxWidth().clickable { selectTrack(item) }.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("${index + 1}", Modifier.width(36.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                                AsyncImage(item.thumbnail, null, Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
+                                Column(Modifier.padding(start = 14.dp).weight(1f)) {
+                                    Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                                    Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                                }
+                                IconButton(onClick = { saveTrackId = item.id }) { Icon(Icons.Default.PlaylistAdd, "Save to playlist", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            }
+                        }
+                        if (continuation != null || loadingMore) item {
+                            LaunchedEffect(continuation) { if (!loadingMore) loadMoreTracks() }
+                            Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                        }
+                    }
+                }
+            } else if (!loading) {
+                LazyColumn(Modifier.weight(1f), state = trackListState, contentPadding = PaddingValues(bottom = 24.dp)) {
+                    item {
+                        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            if (coverThumbnail.isNotBlank()) {
+                                AsyncImage(
+                                    coverThumbnail,
+                                    null,
+                                    Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                                    contentScale = ContentScale.Crop,
+                                )
+                            }
+                            Text(playlist.title, style = MaterialTheme.typography.headlineMedium)
+                            if (playlist.subtitle.isNotBlank()) {
+                                Text(playlist.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Text("${tracks.size} tracks loaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (tracks.isNotEmpty()) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Button(onClick = { selectTrack(tracks.first()) }, Modifier.weight(1f)) {
+                                        Icon(Icons.Default.PlayArrow, null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Play all")
+                                    }
+                                    FilledTonalButton(onClick = {
+                                        val shuffled = tracks.shuffled()
+                                        selectTrack(shuffled.first(), shuffled)
+                                    }, Modifier.weight(1f)) {
+                                        Icon(Icons.Default.Shuffle, null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Shuffle")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    items(tracks.size) { index ->
+                        val item = tracks[index]
+                        Row(
+                            Modifier.fillMaxWidth().clickable { selectTrack(item) }.padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("${index + 1}", Modifier.width(32.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                            AsyncImage(item.thumbnail, null, Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
+                            Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                                Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                            }
+                            IconButton(onClick = { saveTrackId = item.id }) { Icon(Icons.Default.PlaylistAdd, "Save to playlist", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        }
+                    }
+                    if (continuation != null || loadingMore) item {
+                        LaunchedEffect(continuation) { if (!loadingMore) loadMoreTracks() }
+                        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    }
                 }
             }
         }
+    }
+
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { if (!deleting) confirmDelete = false },
+        title = { Text("Delete playlist?") },
+        text = { Text("This playlist will be permanently deleted from your YouTube account.") },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }, enabled = !deleting) { Text("Cancel") } },
+        confirmButton = {
+            Button(onClick = {
+                deleting = true
+                scope.launch {
+                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.deletePlaylist(playlistId) } }
+                        .onSuccess { confirmDelete = false; onDeleted(playlistId); onBack() }
+                        .onFailure { error = it.message ?: "Could not delete playlist"; confirmDelete = false }
+                    deleting = false
+                }
+            }, enabled = !deleting, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
+                Text(if (deleting) "Deleting…" else "Delete")
+            }
+        },
+    )
+    pendingRemoval?.let { item ->
+        AlertDialog(
+            onDismissRequest = { if (!removing) pendingRemoval = null },
+            title = { Text("Remove track?") },
+            text = { Text("Remove “${item.title}” from this playlist?") },
+            dismissButton = { TextButton(onClick = { pendingRemoval = null }, enabled = !removing) { Text("Cancel") } },
+            confirmButton = {
+                Button(onClick = {
+                    removing = true
+                    scope.launch {
+                        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.removeVideoFromPlaylist(playlistId, item.setVideoId) } }
+                            .onSuccess {
+                                tracks = tracks.filterNot { it.setVideoId == item.setVideoId }
+                                pendingRemoval = null
+                            }
+                            .onFailure { error = it.message ?: "Could not remove track"; pendingRemoval = null }
+                        removing = false
+                    }
+                }, enabled = !removing, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
+                    Text(if (removing) "Removing…" else "Remove")
+                }
+            },
+        )
+    }
+    saveTrackId?.let { videoId ->
+        SaveVideoToPlaylistDialog(videoId) { saveTrackId = null }
     }
 }
 
@@ -1696,9 +2536,11 @@ private fun MusicPlayer(
     queueIndex: Int = -1,
     onQueueIndex: (Int) -> Unit = {},
     onAutoplayTrack: (FeedItem) -> Unit = {},
+    onChannelClick: ((String) -> Unit)? = null,
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    var showQueue by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
     var showComments by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
@@ -1726,6 +2568,10 @@ private fun MusicPlayer(
     val audioTracks = AutoMusicService.availableAudioTracks.value
     val selectedAudioTrack = AutoMusicService.selectedAudioTrack.value
     val serviceTrack = AutoMusicService.nowPlaying.value
+    val currentQueue = (if (queue.isNotEmpty()) queue else AutoMusicService.queue.value).ifEmpty { listOf(track) }
+    val currentQueueIndex = if (queueIndex >= 0) queueIndex else AutoMusicService.queueIndex.intValue
+    val hasPrev = currentQueueIndex > 0 || position > 5_000L
+    val hasNext = (currentQueueIndex >= 0 && currentQueueIndex < currentQueue.lastIndex) || AutoMusicService.hasNext
     val musicLoadStatus by PlaybackLoadStatus.message.collectAsState()
     val musicLoadMessage = musicLoadStatus?.takeIf {
         it.mediaId == track.id &&
@@ -1851,7 +2697,23 @@ private fun MusicPlayer(
                             AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
-                        Spacer(Modifier.height(18.dp)); CenteredMusicTitle(track.title, MaterialTheme.typography.headlineSmall); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(18.dp))
+                        CenteredMusicTitle(
+                            track.title,
+                            MaterialTheme.typography.headlineSmall,
+                            modifier = if (track.channel && onChannelClick != null) Modifier.clickable { onChannelClick(track.url.ifBlank { track.id }) } else Modifier
+                        )
+                        Text(
+                            track.subtitle,
+                            modifier = if (onChannelClick != null && (track.channelUrl.isNotBlank() || track.subtitle.isNotBlank())) Modifier.clickable {
+                                val target = track.channelUrl.ifBlank { track.id.takeIf { track.channel } }.orEmpty().ifBlank { track.subtitle }
+                                onChannelClick(target)
+                            } else Modifier,
+                            color = ComposeColor.White.copy(alpha = .72f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                        )
                         Spacer(Modifier.height(14.dp))
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
@@ -1861,17 +2723,86 @@ private fun MusicPlayer(
                         }
                         Row(Modifier.fillMaxWidth()) { Text(formatTime(position), color = ComposeColor.White.copy(alpha = .75f)); Spacer(Modifier.weight(1f)); Text(formatTime(duration), color = ComposeColor.White.copy(alpha = .75f)) }
                         Spacer(Modifier.height(8.dp))
-                        IconButton(onClick = { AutoMusicService.toggle() }, Modifier.size(76.dp)) { Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White) }
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = { AutoMusicService.previous() }, enabled = hasPrev, modifier = Modifier.size(54.dp)) {
+                                Icon(Icons.Default.SkipPrevious, "Previous", Modifier.size(36.dp), tint = if (hasPrev) ComposeColor.White else ComposeColor.White.copy(alpha = .35f))
+                            }
+                            IconButton(onClick = { AutoMusicService.toggle() }, Modifier.size(76.dp)) {
+                                Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White)
+                            }
+                            IconButton(onClick = { AutoMusicService.next() }, enabled = hasNext, modifier = Modifier.size(54.dp)) {
+                                Icon(Icons.Default.SkipNext, "Next", Modifier.size(36.dp), tint = if (hasNext) ComposeColor.White else ComposeColor.White.copy(alpha = .35f))
+                            }
+                        }
                     }
                     Column(Modifier.weight(1f).fillMaxHeight().background(ComposeColor.Black.copy(alpha = .28f), RoundedCornerShape(20.dp)).padding(16.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (showComments) "Comments" else "Lyrics", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
-                            TextButton(onClick = { if (lyricsError != null) retryLyrics(); showComments = false }) { Text("Lyrics", color = if (!showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
-                            TextButton(onClick = { showComments = true }) { Text("Comments", color = if (showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
+                            Text(if (showQueue) "Queue" else if (showComments) "Comments" else "Lyrics", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                            TextButton(onClick = { showQueue = true; showComments = false }) { Text("Queue", color = if (showQueue) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
+                            TextButton(onClick = { if (lyricsError != null) retryLyrics(); showQueue = false; showComments = false }) { Text("Lyrics", color = if (!showQueue && !showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
+                            TextButton(onClick = { showQueue = false; showComments = true }) { Text("Comments", color = if (showComments) ComposeColor.White else ComposeColor.White.copy(alpha = .55f)) }
                             if (showComments) IconButton(onClick = { commentsRefresh++ }, enabled = !commentsLoading) { Icon(Icons.Default.Refresh, "Refresh comments", tint = ComposeColor.White) }
                         }
                         HorizontalDivider(color = ComposeColor.White.copy(alpha = .18f), modifier = Modifier.padding(bottom = 12.dp))
-                        if (showComments) {
+                        if (showQueue) {
+                            LazyColumn(Modifier.fillMaxSize()) {
+                                item {
+                                    Text(
+                                        "Playing next (${currentQueue.size} songs)",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = ComposeColor.White,
+                                        modifier = Modifier.padding(bottom = 12.dp)
+                                    )
+                                }
+                                items(currentQueue.size) { idx ->
+                                    val qItem = currentQueue[idx]
+                                    val isCurrent = (idx == currentQueueIndex) || (qItem.id == track.id)
+                                    Row(
+                                        Modifier.fillMaxWidth()
+                                            .clickable {
+                                                AutoMusicService.skipToQueueItem(idx)
+                                                onQueueIndex(idx)
+                                            }
+                                            .padding(vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        if (isCurrent) {
+                                            Icon(Icons.Default.GraphicEq, "Playing", Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
+                                            Spacer(Modifier.width(12.dp))
+                                        } else {
+                                            Text("${idx + 1}", Modifier.width(28.dp), color = ComposeColor.White.copy(alpha = .6f), style = MaterialTheme.typography.bodyMedium)
+                                            Spacer(Modifier.width(8.dp))
+                                        }
+                                        AsyncImage(
+                                            qItem.thumbnail,
+                                            null,
+                                            Modifier.size(48.dp).clip(RoundedCornerShape(6.dp)),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                            Text(
+                                                qItem.title,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = if (isCurrent) MaterialTheme.colorScheme.primary else ComposeColor.White,
+                                                style = MaterialTheme.typography.titleSmall
+                                            )
+                                            Text(
+                                                qItem.subtitle,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = ComposeColor.White.copy(alpha = .7f),
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (showComments) {
                             CommentComposer(createCommentParams, commentsLoading, onPosted = { posted ->
                                 if (posted.id.startsWith("local-")) commentsRefresh++
                                 else comments = (listOf(posted) + comments).distinctBy { it.id }
@@ -1895,8 +2826,8 @@ private fun MusicPlayer(
                     }
                 }
             } else {
-                Crossfade(if (showComments) 2 else if (showLyrics) 1 else 0, label = "music page", modifier = Modifier.weight(1f)) { page ->
-                    if (page == 2) LazyColumn(contentPadding = PaddingValues(vertical = 12.dp)) {
+                Crossfade(if (showComments) 3 else if (showLyrics) 2 else if (showQueue) 1 else 0, label = "music page", modifier = Modifier.weight(1f)) { page ->
+                    if (page == 3) LazyColumn(contentPadding = PaddingValues(vertical = 12.dp)) {
                         item {
                             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("Comments", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall)
@@ -1911,7 +2842,7 @@ private fun MusicPlayer(
                         }
                         items(comments, key = { it.id }) { comment -> VideoCommentNode(track.id, comment) { changed -> comments = if (changed == null) comments.filterNot { it.id == comment.id } else comments.map { if (it.id == comment.id) changed else it } } }
                         item { CommentPaginationFooter(commentsLoading, commentsContinuation, commentsError, ::loadMoreMusicComments) }
-                    } else if (page == 1) LazyColumn(state = lyricsState, contentPadding = PaddingValues(horizontal = 28.dp, vertical = 220.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                    } else if (page == 2) LazyColumn(state = lyricsState, contentPadding = PaddingValues(horizontal = 28.dp, vertical = 220.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                         if (lines.isEmpty()) item {
                             Column {
                                 Text(lyricsError ?: "Loading lyrics…", color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall)
@@ -1919,6 +2850,58 @@ private fun MusicPlayer(
                             }
                         }
                         else items(lines.size) { index -> Text(lines[index].text, Modifier.clickable(enabled = lines[index].startMs >= 0) { AutoMusicService.seekTo(lines[index].startMs) }, color = if (index == currentLine) ComposeColor.White else ComposeColor.White.copy(alpha = .48f), style = if (index == currentLine) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge) }
+                    } else if (page == 1) LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp), modifier = Modifier.fillMaxSize()) {
+                        item {
+                            Text(
+                                "Playing next (${currentQueue.size} songs)",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = ComposeColor.White,
+                                modifier = Modifier.padding(bottom = 12.dp, top = 4.dp)
+                            )
+                        }
+                        items(currentQueue.size) { idx ->
+                            val qItem = currentQueue[idx]
+                            val isCurrent = (idx == currentQueueIndex) || (qItem.id == track.id)
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .clickable {
+                                        AutoMusicService.skipToQueueItem(idx)
+                                        onQueueIndex(idx)
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (isCurrent) {
+                                    Icon(Icons.Default.GraphicEq, "Playing", Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.width(12.dp))
+                                } else {
+                                    Text("${idx + 1}", Modifier.width(28.dp), color = ComposeColor.White.copy(alpha = .6f), style = MaterialTheme.typography.bodyMedium)
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                                AsyncImage(
+                                    qItem.thumbnail,
+                                    null,
+                                    Modifier.size(48.dp).clip(RoundedCornerShape(6.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                    Text(
+                                        qItem.title,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = if (isCurrent) MaterialTheme.colorScheme.primary else ComposeColor.White,
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                    Text(
+                                        qItem.subtitle,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = ComposeColor.White.copy(alpha = .7f),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
                     } else Column(
                         Modifier.fillMaxSize().padding(horizontal = 24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1928,7 +2911,23 @@ private fun MusicPlayer(
                             AsyncImage(track.thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                             if (musicLoadMessage != null) MusicPlaybackLoadingStatus(musicLoadMessage, Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
                         }
-                        Spacer(Modifier.height(22.dp)); CenteredMusicTitle(track.title, MaterialTheme.typography.headlineSmall); Text(track.subtitle, color = ComposeColor.White.copy(alpha = .72f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(22.dp))
+                        CenteredMusicTitle(
+                            track.title,
+                            MaterialTheme.typography.headlineSmall,
+                            modifier = if (track.channel && onChannelClick != null) Modifier.clickable { onChannelClick(track.url.ifBlank { track.id }) } else Modifier
+                        )
+                        Text(
+                            track.subtitle,
+                            modifier = if (onChannelClick != null && (track.channelUrl.isNotBlank() || track.subtitle.isNotBlank())) Modifier.clickable {
+                                val target = track.channelUrl.ifBlank { track.id.takeIf { track.channel } }.orEmpty().ifBlank { track.subtitle }
+                                onChannelClick(target)
+                            } else Modifier,
+                            color = ComposeColor.White.copy(alpha = .72f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                        )
                         Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
                             val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
                             drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)
@@ -1936,7 +2935,21 @@ private fun MusicPlayer(
                             drawLine(ComposeColor.White, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (position / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
                         }
                         Row(Modifier.fillMaxWidth()) { Text(formatTime(position), color = ComposeColor.White.copy(alpha = .75f)); Spacer(Modifier.weight(1f)); Text(formatTime(duration), color = ComposeColor.White.copy(alpha = .75f)) }
-                        IconButton(onClick = { AutoMusicService.toggle() }, Modifier.size(82.dp)) { Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White) }
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = { AutoMusicService.previous() }, enabled = hasPrev, modifier = Modifier.size(54.dp)) {
+                                Icon(Icons.Default.SkipPrevious, "Previous", Modifier.size(36.dp), tint = if (hasPrev) ComposeColor.White else ComposeColor.White.copy(alpha = .35f))
+                            }
+                            IconButton(onClick = { AutoMusicService.toggle() }, Modifier.size(82.dp)) {
+                                Icon(if (playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play or pause", Modifier.fillMaxSize(), tint = ComposeColor.White)
+                            }
+                            IconButton(onClick = { AutoMusicService.next() }, enabled = hasNext, modifier = Modifier.size(54.dp)) {
+                                Icon(Icons.Default.SkipNext, "Next", Modifier.size(36.dp), tint = if (hasNext) ComposeColor.White else ComposeColor.White.copy(alpha = .35f))
+                            }
+                        }
                     }
                 }
                 NavigationBar(containerColor = ComposeColor.Black.copy(alpha = .38f)) {
@@ -1947,9 +2960,10 @@ private fun MusicPlayer(
                         unselectedIconColor = ComposeColor.White.copy(alpha = .68f),
                         unselectedTextColor = ComposeColor.White.copy(alpha = .68f),
                     )
-                    NavigationBarItem(!showLyrics && !showComments, { showLyrics = false; showComments = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }, colors = musicNavigationColors)
-                    NavigationBarItem(showLyrics, { if (lyricsError != null) retryLyrics(); showLyrics = true; showComments = false }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }, colors = musicNavigationColors)
-                    NavigationBarItem(showComments, { showLyrics = false; showComments = true }, { Icon(Icons.Default.Comment, null) }, label = { Text("Comments") }, colors = musicNavigationColors)
+                    NavigationBarItem(!showQueue && !showLyrics && !showComments, { showQueue = false; showLyrics = false; showComments = false }, { Icon(Icons.Default.GraphicEq, null) }, label = { Text("Player") }, colors = musicNavigationColors)
+                    NavigationBarItem(showQueue, { showQueue = true; showLyrics = false; showComments = false }, { Icon(Icons.Default.QueueMusic, null) }, label = { Text("Queue") }, colors = musicNavigationColors)
+                    NavigationBarItem(showLyrics, { if (lyricsError != null) retryLyrics(); showLyrics = true; showQueue = false; showComments = false }, { Icon(Icons.Default.Lyrics, null) }, label = { Text("Lyrics") }, colors = musicNavigationColors)
+                    NavigationBarItem(showComments, { showQueue = false; showLyrics = false; showComments = true }, { Icon(Icons.Default.Comment, null) }, label = { Text("Comments") }, colors = musicNavigationColors)
                 }
             }
         }
@@ -2461,29 +3475,67 @@ private fun TopicChips(labels: List<String>) {
 }
 
 @Composable
-private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit = {}, onBack: () -> Unit) {
+private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit = {}, openVideo: (String, List<FeedItem>, Int) -> Unit, onDeleted: (String) -> Unit = {}, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val seedVideoId = remember(url) {
+        Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1)
+            ?: Regex("/vi(?:_webp)?/([a-zA-Z0-9_-]{11})/").find(url)?.groupValues?.get(1)
+    }
     val playlistId = remember(url) { (Regex("[?&]list=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')).removePrefix("VL") }
     var playlistItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var editable by remember { mutableStateOf(false) }
     var deletable by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
-    var selectedIndex by remember { mutableStateOf<Int?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     var pendingRemoval by remember { mutableStateOf<FeedItem?>(null) }
     var removing by remember { mutableStateOf(false) }
+    var playlistTitle by remember(url) { mutableStateOf("YouTube playlist") }
+    var playlistSubtitle by remember(url) { mutableStateOf("") }
+    var playlistThumbnail by remember(url) { mutableStateOf("") }
+    var saveVideoId by remember { mutableStateOf<String?>(null) }
+    var continuation by remember(url) { mutableStateOf<String?>(null) }
+    var loadingMore by remember(url) { mutableStateOf(false) }
+    val playlistListState = rememberLazyListState()
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    BackHandler { onBack() }
     LaunchedEffect(url) {
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistPage(playlistId) } }
-            .onSuccess { page -> playlistItems = page.items; editable = page.editable; deletable = page.deletable }
+        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistPage(playlistId, seedVideoId) } }
+            .onSuccess { page ->
+                playlistItems = page.items
+                editable = page.editable
+                deletable = page.deletable
+                playlistTitle = page.title.ifBlank { "YouTube playlist" }
+                playlistSubtitle = page.subtitle
+                playlistThumbnail = page.thumbnail.ifBlank { page.items.firstOrNull()?.thumbnail.orEmpty() }
+                continuation = page.continuation
+            }
             .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
         loading = false
     }
+    fun loadMoreVideos() {
+        val token = continuation ?: return
+        if (loadingMore) return
+        loadingMore = true
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistContinuation(token) } }
+                .onSuccess { page ->
+                    playlistItems = (playlistItems + page.items).distinctBy { it.setVideoId.ifBlank { it.id } }
+                    continuation = page.continuation.takeIf { page.items.isNotEmpty() }
+                }
+                .onFailure { failure -> error = failure.message ?: "Could not load more videos" }
+            loadingMore = false
+        }
+    }
+    LaunchedEffect(playlistListState, playlistItems.size, continuation) {
+        snapshotFlow { playlistListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+            if (continuation != null && playlistItems.isNotEmpty() && last >= playlistItems.lastIndex - 3) loadMoreVideos()
+        }
+    }
     Box(Modifier.fillMaxSize()) {
       Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Playlist", Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); if (deletable) IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "Delete playlist") } }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("Playlist", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge); if (deletable) IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "Delete playlist") } }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
         if (!loading && tablet) Row(Modifier.weight(1f).fillMaxWidth()) {
@@ -2491,59 +3543,62 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
                 Modifier.widthIn(min = 300.dp, max = 380.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                playlistItems.firstOrNull()?.thumbnail?.let {
-                    AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
+                playlistThumbnail.takeIf(String::isNotBlank)?.let {
+                    AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
                 }
-                Text("YouTube playlist", style = MaterialTheme.typography.headlineMedium)
-                Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodyMedium)
-                if (playlistItems.isNotEmpty()) Button(onClick = { selectedIndex = 0 }, Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play all")
+                Text(playlistTitle, style = MaterialTheme.typography.headlineMedium)
+                if (playlistSubtitle.isNotBlank()) Text(playlistSubtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (playlistItems.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { openVideo(playlistItems.first().url, playlistItems, 0) }, Modifier.weight(1f)) {
+                        Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Play all")
+                    }
+                    FilledTonalButton(onClick = {
+                        val shuffled = playlistItems.shuffled()
+                        openVideo(shuffled.first().url, shuffled, 0)
+                    }, Modifier.weight(1f)) {
+                        Icon(Icons.Default.Shuffle, null); Spacer(Modifier.width(6.dp)); Text("Shuffle")
+                    }
                 }
             }
             VerticalDivider(Modifier.fillMaxHeight())
-            LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+            LazyColumn(Modifier.weight(1f), state = playlistListState, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
                 items(playlistItems.size) { index ->
                     val item = playlistItems[index]
-                    Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().clickable { openVideo(item.url, playlistItems, index) }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("${index + 1}", Modifier.width(38.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
                         AsyncImage(item.thumbnail, null, Modifier.width(180.dp).aspectRatio(16f / 9f), contentScale = ContentScale.Crop)
                         Column(Modifier.padding(start = 16.dp).weight(1f)) {
                             Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                             Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        IconButton(onClick = { saveVideoId = item.id }) { Icon(Icons.Default.PlaylistAdd, "Save to playlist") }
                         if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist") }
                     }
                 }
+                if (continuation != null || loadingMore) item {
+                    LaunchedEffect(continuation) { if (!loadingMore) loadMoreVideos() }
+                    Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                }
             }
-        } else if (!loading) LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
+        } else if (!loading) LazyColumn(Modifier.weight(1f), state = playlistListState, contentPadding = PaddingValues(bottom = 24.dp)) {
             item { Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                playlistItems.firstOrNull()?.thumbnail?.let { AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(24.dp)), contentScale = ContentScale.Crop) }
-                Text("YouTube playlist", style = MaterialTheme.typography.headlineMedium)
-                Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodyMedium)
-                if (playlistItems.isNotEmpty()) Button(onClick = { selectedIndex = 0 }, Modifier.fillMaxWidth()) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Play") }
+                playlistThumbnail.takeIf(String::isNotBlank)?.let { AsyncImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop) }
+                Text(playlistTitle, style = MaterialTheme.typography.headlineMedium)
+                if (playlistSubtitle.isNotBlank()) Text(playlistSubtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("${playlistItems.size} videos loaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (playlistItems.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(onClick = { openVideo(playlistItems.first().url, playlistItems, 0) }, Modifier.weight(1f)) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Play all") }
+                    FilledTonalButton(onClick = { val shuffled = playlistItems.shuffled(); openVideo(shuffled.first().url, shuffled, 0) }, Modifier.weight(1f)) { Icon(Icons.Default.Shuffle, null); Spacer(Modifier.width(6.dp)); Text("Shuffle") }
+                }
             } }
-            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { selectedIndex = index }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) }; if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist") } } }
+            items(playlistItems.size) { index -> val item = playlistItems[index]; Row(Modifier.fillMaxWidth().clickable { openVideo(item.url, playlistItems, index) }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("${index + 1}", Modifier.width(34.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); AsyncImage(item.thumbnail, null, Modifier.size(128.dp, 72.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); Column(Modifier.padding(start = 12.dp).weight(1f)) { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text(item.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) }; IconButton(onClick = { saveVideoId = item.id }) { Icon(Icons.Default.PlaylistAdd, "Save to playlist") }; if (editable && item.setVideoId.isNotBlank()) IconButton(onClick = { pendingRemoval = item }) { Icon(Icons.Default.Delete, "Remove from playlist") } } }
+            if (continuation != null || loadingMore) item {
+                LaunchedEffect(continuation) { if (!loadingMore) loadMoreVideos() }
+                Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            }
         }
       }
-      selectedIndex?.let { selected ->
-        if (playlistItems.isNotEmpty()) {
-            val index = selected.coerceIn(0, playlistItems.lastIndex)
-            val selectedItem = playlistItems[index]
-            if (selectedItem.short) {
-                LaunchedEffect(index) { onPlayerMode(true) }
-                BackHandler { selectedIndex = null; onPlayerMode(false) }
-                Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
-                    ShortPlayer(activity, selectedItem, true, codec, audioCodec, quality, onPlayer, onOpenChannel = {})
-                    IconButton(onClick = { selectedIndex = null; onPlayerMode(false) }, modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(8.dp)) {
-                        Icon(Icons.Default.ArrowBack, "Back to playlist", tint = ComposeColor.White)
-                    }
-                }
-            } else VideoScreen(activity, selectedItem.url, codec, audioCodec, quality, onPlayer, playlistItems, index, { selectedIndex = it }, onPlayerMode = onPlayerMode) {
-                    selectedIndex = null
-                    onPlayerMode(false)
-                }
-            }
-        }
     }
     if (confirmDelete) AlertDialog(
         onDismissRequest = { if (!deleting) confirmDelete = false },
@@ -2554,7 +3609,7 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
             deleting = true
             scope.launch {
                 runCatching { withContext(Dispatchers.IO) { YouTubeRepository.deletePlaylist(playlistId) } }
-                    .onSuccess { confirmDelete = false; onBack() }
+                    .onSuccess { confirmDelete = false; onDeleted(playlistId); onBack() }
                     .onFailure { error = it.message ?: "Could not delete playlist"; confirmDelete = false }
                 deleting = false
             }
@@ -2575,27 +3630,129 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
             }
         }, enabled = !removing, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text(if (removing) "Removing…" else "Remove") } },
     ) }
+    saveVideoId?.let { videoId -> SaveVideoToPlaylistDialog(videoId) { saveVideoId = null } }
 }
 
 @Composable
-private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onBack: () -> Unit) {
+private fun ChannelDescriptionScreen(
+    channelName: String,
+    description: String,
+    subscribers: String,
+    avatar: String,
+    onBack: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "Back to channel")
+            }
+            Text(
+                "About $channelName",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            )
+        }
+        HorizontalDivider()
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            item {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    if (avatar.isNotBlank()) {
+                        AsyncImage(
+                            avatar,
+                            null,
+                            Modifier.size(56.dp).clip(CircleShape),
+                            contentScale = ContentScale.Crop,
+                        )
+                    }
+                    Column {
+                        Text(channelName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        if (subscribers.isNotBlank()) {
+                            Text(subscribers, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            item {
+                Text(
+                    "Description",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            item {
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(
+                        description.ifBlank { "No description provided." },
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, onBack: () -> Unit) {
     var channel by remember { mutableStateOf<NativeChannelPage?>(null) }
     var channelItems by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var posts by remember { mutableStateOf<List<CommunityPost>>(emptyList()) }
     var selectedPost by remember { mutableStateOf<CommunityPost?>(null) }
     var selectedTab by remember { mutableStateOf("videos") }
     var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
+    var selectedPlaylist by remember { mutableStateOf<String?>(null) }
+    var showDescriptionScreen by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var subscribed by remember(url) { mutableStateOf<Boolean?>(null) }
     var isOwnChannel by remember(url) { mutableStateOf(false) }
     var subscriptionBusy by remember(url) { mutableStateOf(false) }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     val scope = rememberCoroutineScope()
+    if (selectedPlaylist != null) {
+        PlaylistScreen(activity, selectedPlaylist!!, codec, audioCodec, quality, onPlayer, openVideo = openVideo) {
+            selectedPlaylist = null
+        }
+        return
+    }
     BackHandler {
         when {
+            selectedPlaylist != null -> selectedPlaylist = null
+            showDescriptionScreen -> showDescriptionScreen = false
             selectedPost != null -> selectedPost = null
             selectedShort != null -> selectedShort = null
             else -> onBack()
+        }
+    }
+    if (showDescriptionScreen) {
+        channel?.let { data ->
+            ChannelDescriptionScreen(
+                channelName = data.name,
+                description = data.description,
+                subscribers = data.subscribers,
+                avatar = data.avatar,
+                onBack = { showDescriptionScreen = false },
+            )
+            return
         }
     }
     LaunchedEffect(url) { runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url) } }
@@ -2664,7 +3821,20 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                         Column(Modifier.padding(start = 20.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(data.name, style = MaterialTheme.typography.headlineMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             if (data.subscribers.isNotBlank()) Text(data.subscribers, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(data.description, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            if (data.description.isNotBlank()) {
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { showDescriptionScreen = true }
+                                        .padding(vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(data.description, modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    Spacer(Modifier.width(6.dp))
+                                    Icon(Icons.Default.ChevronRight, "About channel", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                         }
                         Spacer(Modifier.width(20.dp))
                         if (!isOwnChannel) subscriptionButton()
@@ -2676,7 +3846,21 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                         data.avatar.takeIf(String::isNotBlank)?.let { AsyncImage(it, null, Modifier.size(88.dp).clip(CircleShape), contentScale = ContentScale.Crop) }
                         Text(data.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                         if (data.subscribers.isNotBlank()) Text(data.subscribers, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(data.description, Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        if (data.description.isNotBlank()) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { showDescriptionScreen = true }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(data.description, modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                                Spacer(Modifier.width(4.dp))
+                                Icon(Icons.Default.ChevronRight, "About channel", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                         if (!isOwnChannel) subscriptionButton()
                     }
                 }
@@ -2717,17 +3901,25 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
             } else if (tablet) items(channelItems.chunked(2)) { rowItems ->
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         rowItems.forEach { item -> ChannelTabletItem(item, Modifier.weight(1f)) {
-                            if (selectedTab == "shorts") selectedShort = item else {
-                                YouTubeRepository.seedVideoDetails(item.id, item.title, channel?.name.orEmpty(), url, channel?.avatar.orEmpty())
-                                openVideo(item.url)
+                            when {
+                                item.playlist -> selectedPlaylist = item.url
+                                selectedTab == "shorts" -> selectedShort = item
+                                else -> {
+                                    YouTubeRepository.seedVideoDetails(item.id, item.title, channel?.name.orEmpty(), url, channel?.avatar.orEmpty())
+                                    openVideo(item.url, emptyList(), -1)
+                                }
                             }
                         } }
                         if (rowItems.size == 1) Spacer(Modifier.weight(1f))
                     }
             } else items(channelItems) { item -> FeedRow(item) {
-                    if (selectedTab == "shorts") selectedShort = item else {
-                        YouTubeRepository.seedVideoDetails(item.id, item.title, channel?.name.orEmpty(), url, channel?.avatar.orEmpty())
-                        openVideo(item.url)
+                    when {
+                        item.playlist -> selectedPlaylist = item.url
+                        selectedTab == "shorts" -> selectedShort = item
+                        else -> {
+                            YouTubeRepository.seedVideoDetails(item.id, item.title, channel?.name.orEmpty(), url, channel?.avatar.orEmpty())
+                            openVideo(item.url, emptyList(), -1)
+                        }
                     }
             } }
         }
@@ -3177,7 +4369,7 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
         onDispose { activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
     if (channelUrl != null) {
-        ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer, openVideo) { channelUrl = null }
+        ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer, { url, _, _ -> openVideo(url) }) { channelUrl = null }
         return
     }
     LaunchedEffect(Unit) {
@@ -3579,7 +4771,13 @@ private fun SaveVideoToPlaylistDialog(videoId: String, onDismiss: () -> Unit) {
     var savingId by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
-        runCatching { withContext(Dispatchers.IO) { YouTubeRepository.library().filter { it.playlist } } }
+        runCatching {
+            withContext(Dispatchers.IO) {
+                val regular = runCatching { YouTubeRepository.library().filter { it.playlist } }.getOrDefault(emptyList())
+                val music = runCatching { YouTubeRepository.musicLibraryPlaylists() }.getOrDefault(emptyList())
+                (music + regular).distinctBy { it.id.removePrefix("VL") }
+            }
+        }
             .onSuccess { playlists = it }
             .onFailure { error = it.message ?: "Could not load playlists" }
         loading = false
@@ -3624,7 +4822,7 @@ private fun SaveVideoToPlaylistDialog(videoId: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onOpenChannel: ((String) -> Unit)? = null, onOpenVideo: ((String) -> Unit)? = null, onBack: () -> Unit) {
+private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, playlistItems: List<FeedItem> = emptyList(), playlistIndex: Int = -1, onPlaylistIndex: (Int) -> Unit = {}, onPlayerMode: ((Boolean) -> Unit)? = null, onOpenChannel: ((String) -> Unit)? = null, onOpenPlaylist: ((String) -> Unit)? = null, onOpenVideo: ((String) -> Unit)? = null, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
@@ -3713,15 +4911,34 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             publishedDate = stablePublished,
         )
     }
+    val currentPlaylistIndex by rememberUpdatedState(playlistIndex)
+    val currentPlaylistItems by rememberUpdatedState(playlistItems)
+    val currentOnPlaylistIndex by rememberUpdatedState(onPlaylistIndex)
     fun bindPlaylistControls(view: PlayerView) {
         val previous = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_prev)
         val next = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_next)
-        previous?.isEnabled = playlistIndex > 0
-        previous?.alpha = if (playlistIndex > 0) 1f else .35f
-        previous?.setOnClickListener { if (playlistIndex > 0) onPlaylistIndex(playlistIndex - 1) }
-        next?.isEnabled = playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex
-        next?.alpha = if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) 1f else .35f
-        next?.setOnClickListener { if (playlistIndex >= 0 && playlistIndex < playlistItems.lastIndex) onPlaylistIndex(playlistIndex + 1) }
+        val idx = currentPlaylistIndex
+        val items = currentPlaylistItems
+        val hasPrev = idx > 0
+        val hasNext = idx >= 0 && idx < items.lastIndex
+        previous?.isEnabled = hasPrev
+        previous?.isClickable = hasPrev
+        previous?.alpha = if (hasPrev) 1f else .35f
+        previous?.setOnClickListener {
+            val i = currentPlaylistIndex
+            if (i > 0) currentOnPlaylistIndex(i - 1)
+        }
+        next?.isEnabled = hasNext
+        next?.isClickable = hasNext
+        next?.alpha = if (hasNext) 1f else .35f
+        next?.setOnClickListener {
+            val i = currentPlaylistIndex
+            val list = currentPlaylistItems
+            if (i >= 0 && i < list.lastIndex) currentOnPlaylistIndex(i + 1)
+        }
+    }
+    LaunchedEffect(playlistIndex, playlistItems.size) {
+        currentPlayerView?.let(::bindPlaylistControls)
     }
     fun play(stream: PlayerChoice) {
         val currentPosition = if (selectedStream != null) player.currentPosition.coerceAtLeast(0L) else 0L
@@ -4263,7 +5480,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     if (fullscreen) {
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
             AndroidView(
-                factory = { context -> PlayerView(context).apply { useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE }); attachPlayerView(this); post { bindPlaylistControls(this); (findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_position)?.parent as? View)?.let { bottomControls -> val inset = (8f * context.resources.displayMetrics.density).roundToInt(); bottomControls.setPadding(bottomControls.paddingLeft, bottomControls.paddingTop, bottomControls.paddingRight, maxOf(bottomControls.paddingBottom, inset)) }; hideController(); controllerVisible = false } } },
+                factory = { context -> PlayerView(context).apply { useController = true; controllerShowTimeoutMs = 3_000; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> controllerVisible = visibility == View.VISIBLE; if (visibility == View.VISIBLE) bindPlaylistControls(this) }); attachPlayerView(this); post { bindPlaylistControls(this); (findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_position)?.parent as? View)?.let { bottomControls -> val inset = (8f * context.resources.displayMetrics.density).roundToInt(); bottomControls.setPadding(bottomControls.paddingLeft, bottomControls.paddingTop, bottomControls.paddingRight, maxOf(bottomControls.paddingBottom, inset)) }; hideController(); controllerVisible = false } } },
                 update = { attachPlayerView(it); bindPlaylistControls(it) },
                 modifier = Modifier.fillMaxSize()
             )
@@ -4289,7 +5506,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 Row(Modifier.fillMaxSize()) {
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                            AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
+                            AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> if (visibility == View.VISIBLE) bindPlaylistControls(this) }); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
                             if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message ->
                                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                             }
@@ -4326,7 +5543,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                         HorizontalDivider()
                         Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !videoMetadata?.authorUrl.isNullOrBlank()) {
                             val target = videoMetadata?.authorUrl
-                            if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) }
+                            if (!target.isNullOrBlank()) { onOpenChannel?.invoke(target) }
                         }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: videoMetadata?.authorAvatar
                             if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
@@ -4359,7 +5576,12 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             Text("Recommended", Modifier.padding(horizontal = 16.dp, vertical = 18.dp), style = MaterialTheme.typography.titleLarge)
                             HorizontalDivider()
                             LazyColumn(Modifier.fillMaxSize()) {
-                                items(interactions.related, key = { "tablet-related-${it.id}" }) { related -> FeedRow(related) { onOpenVideo?.invoke(related.url) } }
+                                items(interactions.related, key = { "tablet-related-${it.id}" }) { related ->
+                                    FeedRow(related) {
+                                        if (related.playlist && onOpenPlaylist != null) onOpenPlaylist(related.url)
+                                        else onOpenVideo?.invoke(related.url)
+                                    }
+                                }
                                 item {
                                     if (interactions.relatedContinuation != null && !relatedLoading && relatedError == null) LaunchedEffect(interactions.relatedContinuation) { loadMoreRelated() }
                                     Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
@@ -4415,7 +5637,10 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                         val resolved = unwrapYouTubeRedirect(target)
                                         val uri = android.net.Uri.parse(resolved)
                                         val channelPath = uri.host?.endsWith("youtube.com", true) == true && (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
-                                        if (channelPath && onOpenChannel != null) { phonePanel = VideoPhonePanel.MAIN; isMinimized = true; onOpenChannel(resolved) }
+                                        val isPlaylist = uri.host?.endsWith("youtube.com", true) == true &&
+                                            (uri.path == "/playlist" || !uri.getQueryParameter("list").isNullOrBlank())
+                                        if (channelPath && onOpenChannel != null) { phonePanel = VideoPhonePanel.MAIN; onOpenChannel(resolved) }
+                                        else if (isPlaylist && onOpenPlaylist != null) { phonePanel = VideoPhonePanel.MAIN; onOpenPlaylist(resolved) }
                                         else activity.openExternalLink(uri)
                                     },
                                 )
@@ -4426,7 +5651,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             } else LazyColumn(Modifier.fillMaxSize()) {
                 item {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                        AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
+                        AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> if (visibility == View.VISIBLE) bindPlaylistControls(this) }); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
                         if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
                         if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                     }
@@ -4465,10 +5690,14 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                         val uri = android.net.Uri.parse(resolved)
                                         val channelPath = uri.host?.endsWith("youtube.com", true) == true &&
                                             (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
+                                        val isPlaylist = uri.host?.endsWith("youtube.com", true) == true &&
+                                            (uri.path == "/playlist" || !uri.getQueryParameter("list").isNullOrBlank())
                                         if (channelPath && onOpenChannel != null) {
                                             phonePanel = VideoPhonePanel.MAIN
-                                            isMinimized = true
                                             onOpenChannel(resolved)
+                                        } else if (isPlaylist && onOpenPlaylist != null) {
+                                            phonePanel = VideoPhonePanel.MAIN
+                                            onOpenPlaylist(resolved)
                                         } else activity.openExternalLink(uri)
                                     },
                                 )
@@ -4498,7 +5727,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                 item { VideoActionButton(Icons.Default.PlaylistAdd, "Save") { showSavePlaylist = true } }
                             }
                             HorizontalDivider()
-                            Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !videoMetadata?.authorUrl.isNullOrBlank()) { val target = videoMetadata?.authorUrl; if (!target.isNullOrBlank()) { isMinimized = true; onOpenChannel?.invoke(target) } }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !videoMetadata?.authorUrl.isNullOrBlank()) { val target = videoMetadata?.authorUrl; if (!target.isNullOrBlank()) { onOpenChannel?.invoke(target) } }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: videoMetadata?.authorAvatar
                                 if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop) else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
                                 Column(Modifier.padding(horizontal = 12.dp).weight(1f)) { Text(displayChannelName(videoMetadata?.author, null, channelInfo?.name), style = MaterialTheme.typography.titleMedium) }
@@ -4529,7 +5758,12 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 }
                 if (phonePanel == VideoPhonePanel.MAIN && interactions.related.isNotEmpty()) {
                     item { HorizontalDivider(); Text("Recommended", Modifier.padding(horizontal = 16.dp, vertical = 14.dp), style = MaterialTheme.typography.titleLarge) }
-                    items(interactions.related, key = { "related-${it.id}" }) { related -> FeedRow(related) { onOpenVideo?.invoke(related.url) } }
+                    items(interactions.related, key = { "related-${it.id}" }) { related ->
+                        FeedRow(related) {
+                            if (related.playlist && onOpenPlaylist != null) onOpenPlaylist(related.url)
+                            else onOpenVideo?.invoke(related.url)
+                        }
+                    }
                     item {
                         if (interactions.relatedContinuation != null && !relatedLoading && relatedError == null) LaunchedEffect(interactions.relatedContinuation) { loadMoreRelated() }
                         Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
@@ -4594,7 +5828,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             (uri.path.orEmpty().startsWith("/@") || uri.path.orEmpty().startsWith("/channel/"))
                         if (channelPath && onOpenChannel != null) {
                             showVideoDetails = false
-                            isMinimized = true
                             onOpenChannel(resolvedTarget)
                         } else {
                             activity.openExternalLink(uri)
@@ -4653,7 +5886,7 @@ private fun LoginScreen(onBack: () -> Unit, onSignedIn: () -> Unit) {
 }
 
 @Composable
-private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onBack: () -> Unit) {
+private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, onBack: () -> Unit) {
     var channelUrl by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
@@ -4669,7 +5902,7 @@ private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCo
 }
 
 @Composable
-private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String) -> Unit, onAuth: (Boolean) -> Unit) {
+private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, onAuth: (Boolean) -> Unit) {
     var destination by remember { mutableStateOf("account") }
     var signedIn by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     if (destination == "login") { LoginScreen({ destination = "account" }) { signedIn = true; onAuth(true); destination = "account" }; return }

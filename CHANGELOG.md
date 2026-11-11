@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.2] - 2026-11-10
+
+### Fixed
+- Fix reply sheets layout and scrolling lockups when viewing long parent comments by moving the parent comment inside the scrollable `LazyColumn`, replacing fixed `fillMaxHeight` with flexible `.weight(1f)` bounds, and adding expandable "Read more" / "Show less" toggles for lengthy comments.
+
 ## [6.1] - 2026-11-10
 
 ### Fixed

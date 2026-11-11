@@ -2890,7 +2890,7 @@ private fun CommunityCommentNode(postId: String, comment: CommunityComment, onCh
                 Text(comment.author, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                 CommunityCommentActions(postId, comment, onChanged)
             }
-            Text(comment.text, style = MaterialTheme.typography.bodyMedium)
+            ExpandableCommentText(comment.text)
             if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (comment.replyCount > 0 || comment.repliesContinuation != null || comment.createReplyParams != null) {
                 TextButton(onClick = { showReplies = true }) {
@@ -2990,15 +2990,6 @@ private fun CommunityRepliesSheet(postId: String, parent: CommunityComment, onPa
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         HorizontalDivider()
-        CommunityReplyRow(postId, parentComment) { changed ->
-            if (changed == null) {
-                onParentChanged(null)
-                onDismiss()
-            } else {
-                parentComment = changed
-                onParentChanged(changed)
-            }
-        }
         if (YouTubeRepository.signedIn()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
@@ -3041,8 +3032,26 @@ private fun CommunityRepliesSheet(postId: String, parent: CommunityComment, onPa
                     }
                 }) { if (posting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Reply") }
             }
+            HorizontalDivider()
         }
-        LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
+        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+            item(key = "parent_${parentComment.id}") {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    CommunityReplyRow(postId, parentComment) { changed ->
+                        if (changed == null) {
+                            onParentChanged(null)
+                            onDismiss()
+                        } else {
+                            parentComment = changed
+                            onParentChanged(changed)
+                        }
+                    }
+                }
+                HorizontalDivider()
+            }
             items(replies, key = { it.id }) { reply ->
                 CommunityReplyRow(postId, reply) { changed ->
                     replies = if (changed == null) replies.filterNot { it.id == reply.id }
@@ -3075,7 +3084,7 @@ private fun CommunityReplyRow(postId: String, comment: CommunityComment, onChang
                 Text(comment.author, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                 CommunityCommentActions(postId, comment, onChanged)
             }
-            Text(comment.text, style = MaterialTheme.typography.bodyMedium)
+            ExpandableCommentText(comment.text)
             if (comment.published.isNotBlank()) Text(comment.published, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -4847,12 +4856,48 @@ private fun VideoCommentsSheet(videoId: String, onDismiss: () -> Unit) {
         }) { params, text ->
             withContext(Dispatchers.IO) { YouTubeRepository.postCommentWithParams(params, text) }
         }
-        LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
+        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
             items(comments, key = { it.id }) { comment -> VideoCommentNode(videoId, comment) { changed ->
                 comments = if (changed == null) comments.filterNot { it.id == comment.id }
                 else comments.map { if (it.id == comment.id) changed else it }
             } }
             item { CommentPaginationFooter(loading, continuation, error, ::loadMore) }
+        }
+    }
+}
+
+@Composable
+private fun ExpandableCommentText(
+    text: String,
+    modifier: Modifier = Modifier,
+    style: TextStyle = MaterialTheme.typography.bodyMedium,
+    collapsedMaxLines: Int = 6,
+) {
+    var expanded by remember(text) { mutableStateOf(false) }
+    var hasOverflow by remember(text) { mutableStateOf(false) }
+
+    Column(modifier = modifier) {
+        Text(
+            text = text,
+            maxLines = if (expanded) Int.MAX_VALUE else collapsedMaxLines,
+            overflow = TextOverflow.Ellipsis,
+            onTextLayout = { textLayoutResult ->
+                if (!expanded && textLayoutResult.hasVisualOverflow) {
+                    hasOverflow = true
+                }
+            },
+            style = style,
+        )
+        if (hasOverflow || expanded) {
+            Text(
+                text = if (expanded) "Show less" else "Read more",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable { expanded = !expanded }
+                    .padding(vertical = 4.dp),
+            )
         }
     }
 }
@@ -4871,7 +4916,7 @@ private fun VideoCommentNode(videoId: String, comment: VideoComment, onChanged: 
             CommentActions(videoId, comment, onChanged)
         }
         Spacer(Modifier.height(6.dp))
-        Text(comment.text)
+        ExpandableCommentText(comment.text)
         if (comment.likes.isNotBlank()) Text("${comment.likes} likes", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (comment.replyCount > 0 || comment.repliesContinuation != null || comment.createReplyParams != null) {
             TextButton(onClick = { showReplies = true }) {
@@ -4939,14 +4984,25 @@ private fun CommentRepliesSheet(videoId: String, comment: VideoComment, onDismis
             IconButton(onClick = { refresh++ }, enabled = !loading) { Icon(Icons.Default.Refresh, "Refresh replies") }
         }
         HorizontalDivider()
-        VideoCommentNodeSummary(videoId, parentComment) { }
         CommentComposer(parentComment.createReplyParams, loading, "Add a reply", "Reply", onPosted = { posted ->
             if (posted.id.startsWith("local-")) refresh++
             else replies = (listOf(posted) + replies).distinctBy { it.id }
         }) { params, text ->
             withContext(Dispatchers.IO) { YouTubeRepository.postCommentReply(params, text) }
         }
-        LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
+        HorizontalDivider()
+        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+            item(key = "parent_${parentComment.id}") {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    VideoCommentNodeSummary(videoId, parentComment) { changed ->
+                        if (changed != null) parentComment = changed
+                    }
+                }
+                HorizontalDivider()
+            }
             items(replies, key = { it.id }) { reply -> VideoCommentNodeSummary(videoId, reply) { changed ->
                 replies = if (changed == null) replies.filterNot { it.id == reply.id }
                 else replies.map { if (it.id == reply.id) changed else it }
@@ -4968,7 +5024,7 @@ private fun VideoCommentNodeSummary(videoId: String, comment: VideoComment, onCh
             }
             CommentActions(videoId, comment, onChanged)
         }
-        Text(comment.text, Modifier.padding(top = 6.dp))
+        ExpandableCommentText(comment.text, Modifier.padding(top = 6.dp))
         if (comment.likes.isNotBlank()) Text("${comment.likes} likes", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

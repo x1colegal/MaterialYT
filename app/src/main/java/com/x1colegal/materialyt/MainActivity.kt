@@ -3094,9 +3094,6 @@ private fun PremiereCountdownOverlay(
         SimpleDateFormat("EEE, MMM d, yyyy 'at' h:mm a", Locale.ENGLISH)
             .format(Date(details.scheduledStartTimeMs))
     }
-    // Gradually uncover the thumbnail over the final day before the event.
-    val revealProgress = (1f - remainingMs.toFloat() / TimeUnit.HOURS.toMillis(24).toFloat()).coerceIn(0f, 1f)
-    val overlayAlpha = .76f * (1f - revealProgress)
     Box(modifier.background(ComposeColor.Black).pointerInput(Unit) { detectTapGestures { } }) {
         AsyncImage(
             model = "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg",
@@ -3104,7 +3101,6 @@ private fun PremiereCountdownOverlay(
             modifier = Modifier.matchParentSize(),
             contentScale = ContentScale.Crop,
         )
-        Box(Modifier.matchParentSize().background(ComposeColor.Black.copy(alpha = overlayAlpha)))
         Column(
             Modifier.align(Alignment.BottomStart).fillMaxWidth()
                 .background(ComposeColor.Black.copy(alpha = .64f))

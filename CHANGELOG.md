@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.9] - 2026-11-13
+
+### Changed
+- Show scheduled premiere and live stream thumbnails at their original brightness instead of applying a progressive dark overlay.
+
 ## [6.8] - 2026-11-13
 
 ### Added

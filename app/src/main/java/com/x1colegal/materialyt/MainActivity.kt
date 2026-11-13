@@ -1222,6 +1222,37 @@ private fun DedicatedSearchScreen(
 }
 
 @Composable
+private fun ShortsShelf(items: List<FeedItem>, tablet: Boolean, onClick: (FeedItem) -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Text(
+            "Shorts",
+            Modifier.padding(horizontal = if (tablet) 8.dp else 16.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+        )
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = if (tablet) 8.dp else 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (tablet) 16.dp else 10.dp),
+        ) {
+            items(items, key = { "home-short-${it.id}" }) { item ->
+                Column(Modifier.width(if (tablet) 180.dp else 142.dp).clickable { onClick(item) }) {
+                    AsyncImage(
+                        item.thumbnail,
+                        item.title,
+                        Modifier.fillMaxWidth().aspectRatio(9f / 16f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentScale = ContentScale.Crop,
+                    )
+                    Text(item.title, Modifier.padding(top = 8.dp), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+                    VerifiedChannelName(item.subtitle, item.channelVerified, modifier = Modifier.padding(top = 3.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, openAccount: () -> Unit) {
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
@@ -1231,6 +1262,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
+    var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
     var searchOpen by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
     val initialContentFocus = remember { FocusRequester() }
@@ -1245,6 +1277,26 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         homeFeed = homeFeed.filterNot { it.id.removePrefix("VL") == id }
     }) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
+    selectedShort?.let { short ->
+        BackHandler { selectedShort = null }
+        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+            ShortPlayer(activity, short, true, codec, audioCodec, quality, onPlayer) { channelUrl ->
+                selectedShort = null
+                selectedChannel = channelUrl
+            }
+            IconButton(
+                onClick = { selectedShort = null },
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(8.dp)
+                    .background(ComposeColor.Black.copy(alpha = 0.55f), CircleShape),
+            ) {
+                Icon(Icons.Default.ArrowBack, "Back", tint = ComposeColor.White)
+            }
+        }
+        return
+    }
     if (searchOpen) {
         DedicatedSearchScreen("Search YouTube", query, false, { searchOpen = false }) { requested ->
             query = requested
@@ -1320,24 +1372,31 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             }
         } else {
             val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+            val shorts = feed.filter { it.short }
+            val regularFeed = feed.filterNot { it.short }
             if (tablet) {
                 LaunchedEffect(homeGridState, feed.size, query) {
                     snapshotFlow { homeGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
-                        if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
+                        if (regularFeed.isNotEmpty() && last >= regularFeed.lastIndex - 3) loadMore()
                     }
                 }
                 LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(16.dp)) {
-                    gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
+                    if (shorts.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { ShortsShelf(shorts, true) { selectedShort = it } }
+                    gridItems(
+                        items = regularFeed,
+                        span = { item -> if (item.channel) GridItemSpan(maxLineSpan) else GridItemSpan(1) },
+                    ) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
                     if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             } else {
                 LaunchedEffect(homeListState, feed.size, query) {
                     snapshotFlow { homeListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
-                        if (feed.isNotEmpty() && last >= feed.lastIndex - 3) loadMore()
+                        if (regularFeed.isNotEmpty() && last >= regularFeed.lastIndex - 3) loadMore()
                     }
                 }
                 LazyColumn(state = homeListState) {
-                    items(feed) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
+                    if (shorts.isNotEmpty()) item { ShortsShelf(shorts, false) { selectedShort = it } }
+                    items(regularFeed) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
                     if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             }
@@ -3314,6 +3373,23 @@ private fun cleanChannelDisplayName(value: String?): String? {
 private fun displayChannelName(vararg candidates: String?): String =
     candidates.firstNotNullOfOrNull(::cleanChannelDisplayName) ?: "Loading channel…"
 
+@Composable
+private fun VerifiedChannelName(
+    name: String,
+    verified: Boolean,
+    style: TextStyle = MaterialTheme.typography.bodySmall,
+    color: ComposeColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text(name, Modifier.weight(1f, fill = false), style = style, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (verified) {
+            Spacer(Modifier.width(4.dp))
+            Icon(Icons.Default.Verified, "Verified channel", Modifier.size(15.dp), tint = color)
+        }
+    }
+}
+
 private val PUBLISHED_DATE_PATTERNS = listOf(
     "MMM d, yyyy",
     "MMMM d, yyyy",
@@ -3462,12 +3538,11 @@ private fun ChannelRow(item: FeedItem, click: () -> Unit) {
         }
         Spacer(Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = item.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+            VerifiedChannelName(
+                item.title,
+                item.channelVerified,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onSurface,
             )
             if (item.subtitle.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
@@ -3498,11 +3573,19 @@ internal suspend fun originalMetadataItems(items: List<FeedItem>): List<FeedItem
             if (item.channel || item.playlist || item.id.length != 11) return@async item
             requests.withPermit {
                 val metadata = YouTubeRepository.canonicalVideoMetadata(item.id) ?: return@withPermit item
+                val channel = if (item.channelThumbnail.isBlank() || item.channelUrl.isBlank()) {
+                    runCatching { YouTubeRepository.channelInfo(item.id) }.getOrNull()
+                } else null
                 item.copy(
                     title = metadata.title.takeIf(String::isNotBlank) ?: item.title,
-                    subtitle = (metadata.author.takeIf(String::isNotBlank) ?: item.subtitle)
+                    subtitle = (metadata.author.takeIf(String::isNotBlank) ?: channel?.name ?: item.subtitle)
                         .replace(Regex("\\s+-\\s+Topic$", RegexOption.IGNORE_CASE), "")
                         .trim(),
+                    channelThumbnail = item.channelThumbnail.ifBlank { channel?.thumbnail.orEmpty() },
+                    channelVerified = item.channelVerified || channel?.verified == true,
+                    channelUrl = item.channelUrl.ifBlank {
+                        channel?.channelId?.takeIf(String::isNotBlank)?.let { "https://www.youtube.com/channel/$it" }.orEmpty()
+                    },
                 )
             }
         }
@@ -3542,7 +3625,7 @@ private fun FeedRow(item: FeedItem, onChannelClick: (() -> Unit)? = null, click:
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                 Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(3.dp))
-                Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                VerifiedChannelName(item.subtitle, item.channelVerified)
             }
         }
     }
@@ -3627,7 +3710,7 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
     LaunchedEffect(url) {
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistPage(playlistId, seedVideoId) } }
             .onSuccess { page ->
-                playlistItems = page.items
+                playlistItems = if (playlistId.startsWith("RD")) page.items else originalMetadataItems(page.items)
                 editable = page.editable
                 deletable = page.deletable
                 playlistTitle = page.title.ifBlank { "YouTube playlist" }
@@ -3645,7 +3728,9 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistContinuation(token) } }
                 .onSuccess { page ->
-                    playlistItems = (playlistItems + page.items).distinctBy { it.setVideoId.ifBlank { it.id } }
+                    val resolvedItems = if (playlistId.startsWith("RD")) page.items
+                        else withContext(Dispatchers.IO) { originalMetadataItems(page.items) }
+                    playlistItems = (playlistItems + resolvedItems).distinctBy { it.setVideoId.ifBlank { it.id } }
                     continuation = page.continuation.takeIf { page.items.isNotEmpty() }
                 }
                 .onFailure { failure -> error = failure.message ?: "Could not load more videos" }
@@ -5690,7 +5775,13 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     }
                     Column(Modifier.padding(horizontal = 10.dp).weight(1f)) {
                         Text(videoMetadata?.title ?: "Video", Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.titleSmall)
-                        Text(displayChannelName(videoMetadata?.author, channelInfo?.name), Modifier.autoMarquee(), maxLines = 1, softWrap = false, style = MaterialTheme.typography.bodySmall)
+                        VerifiedChannelName(
+                            displayChannelName(videoMetadata?.author, channelInfo?.name),
+                            channelInfo?.verified == true || videoMetadata?.authorVerified == true,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                     var playing by remember { mutableStateOf(player.isPlaying) }
                     DisposableEffect(player) {
@@ -5786,7 +5877,12 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                             if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                             else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
                             Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                                Text(displayChannelName(videoMetadata?.author, channelInfo?.name), style = MaterialTheme.typography.titleMedium)
+                                VerifiedChannelName(
+                                    displayChannelName(videoMetadata?.author, channelInfo?.name),
+                                    channelInfo?.verified == true || videoMetadata?.authorVerified == true,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
                             }
                             if (!isOwnChannel) Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
                         }
@@ -5974,7 +6070,14 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                                 Row(Modifier.fillMaxWidth().clickable(enabled = onOpenChannel != null && !videoMetadata?.authorUrl.isNullOrBlank()) { val target = videoMetadata?.authorUrl; if (!target.isNullOrBlank()) { onOpenChannel?.invoke(target) } }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                     val avatar = channelInfo?.thumbnail?.takeIf { it.isNotBlank() } ?: videoMetadata?.authorAvatar
                                     if (!avatar.isNullOrBlank()) AsyncImage(avatar, null, Modifier.size(42.dp).clip(CircleShape), contentScale = ContentScale.Crop) else Surface(Modifier.size(42.dp), CircleShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.Default.Person, null, Modifier.padding(9.dp)) }
-                                    Column(Modifier.padding(horizontal = 12.dp).weight(1f)) { Text(displayChannelName(videoMetadata?.author, null, channelInfo?.name), style = MaterialTheme.typography.titleMedium) }
+                                    Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
+                                        VerifiedChannelName(
+                                            displayChannelName(videoMetadata?.author, null, channelInfo?.name),
+                                            channelInfo?.verified == true || videoMetadata?.authorVerified == true,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    }
                                     if (!isOwnChannel) Button(onClick = { updateSubscription() }, enabled = !subscriptionBusy && interactions.channelId.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = if (interactions.subscribed) MaterialTheme.colorScheme.surfaceVariant else ComposeColor(0xFFFF0000), contentColor = if (interactions.subscribed) MaterialTheme.colorScheme.onSurfaceVariant else ComposeColor.White), contentPadding = PaddingValues(horizontal = 14.dp)) { Text(if (interactions.subscribed) "Subscribed" else "Subscribe") }
                                 }
                                 HorizontalDivider()

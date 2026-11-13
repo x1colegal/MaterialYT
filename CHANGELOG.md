@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.10] - 2026-11-13
+
+### Added
+- Add a dedicated responsive Shorts shelf to the YouTube Home and search results, opening results directly in the optimized Shorts player.
+- Add an explicit back button when a Short is opened from Home or search.
+
+### Fixed
+- Preserve author profile pictures and canonical metadata when opening regular playlists, including subsequent continuation pages.
+- Keep mixes free from misleading single-author profile metadata.
+
 ## [6.9] - 2026-11-13
 
 ### Changed

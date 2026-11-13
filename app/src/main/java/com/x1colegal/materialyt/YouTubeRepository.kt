@@ -28,7 +28,7 @@ import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlin.math.roundToInt
 
-data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L, val short: Boolean = false, val setVideoId: String = "", val musicVideo: Boolean = false, val upcoming: Boolean = false, val upcomingText: String = "")
+data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L, val short: Boolean = false, val setVideoId: String = "", val musicVideo: Boolean = false, val upcoming: Boolean = false, val upcomingText: String = "", val channelVerified: Boolean = false)
 data class MusicCategory(val title: String, val browseId: String, val params: String = "")
 data class MusicHomeSection(
     val title: String,
@@ -122,7 +122,7 @@ data class SabrPlaybackInfo(
     val durationMs: Long,
     val formats: List<SabrFormat>
 )
-data class ChannelInfo(val name: String, val thumbnail: String)
+data class ChannelInfo(val name: String, val thumbnail: String, val verified: Boolean = false, val channelId: String = "")
 data class NativeChannelPage(
     val id: String,
     val name: String,
@@ -134,7 +134,7 @@ data class NativeChannelPage(
 )
 data class AccountSearchEntry(val text: String, val feedbackToken: String? = null)
 data class DescriptionLinkTarget(val start: Int, val end: Int, val target: String)
-data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "", val descriptionLinks: List<DescriptionLinkTarget> = emptyList(), val isLive: Boolean = false, val isUpcoming: Boolean = false, val scheduledStartTimeMs: Long = 0L, val concurrentViewers: Long = -1L)
+data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "", val descriptionLinks: List<DescriptionLinkTarget> = emptyList(), val isLive: Boolean = false, val isUpcoming: Boolean = false, val scheduledStartTimeMs: Long = 0L, val concurrentViewers: Long = -1L, val authorVerified: Boolean = false)
 enum class VideoRating { NONE, LIKE, DISLIKE }
 data class VideoInteractionState(
     val rating: VideoRating = VideoRating.NONE,
@@ -3521,7 +3521,9 @@ object YouTubeRepository {
         val directName = metadataName.takeIf(String::isNotBlank)?.takeUnless(::isChannelMetadataLabel)
             ?: responseName.takeIf(String::isNotBlank)?.takeUnless(::isChannelMetadataLabel)
             ?: ownerName.takeIf(String::isNotBlank)?.takeUnless(::isChannelMetadataLabel)
-        val browsedName = if (directName == null && channelId.isNotBlank()) runCatching {
+        val ownerAvatar = owner?.let(::findLargestAvatar).orEmpty()
+        val ownerVerified = owner?.let(::hasVerifiedBadge) == true
+        val channelMetadata = if (channelId.isNotBlank() && (directName == null || ownerAvatar.isBlank() || !ownerVerified)) runCatching {
             val channelResponse = post(
                 "$origin/youtubei/v1/browse?key=${bootstrap.key}",
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", channelId),
@@ -3529,13 +3531,24 @@ object YouTubeRepository {
             )
             val metadata = findObject(channelResponse, "channelMetadataRenderer")
                 ?.optJSONObject("channelMetadataRenderer")
-            metadata?.optString("title")?.trim()?.takeIf(String::isNotBlank)
-                ?: findObject(channelResponse, "pageHeaderRenderer")
-                    ?.optJSONObject("pageHeaderRenderer")?.let { text(it.opt("pageTitle")) }?.trim()?.takeIf(String::isNotBlank)
+            val pageHeader = findObject(channelResponse, "pageHeaderRenderer")
+                ?.optJSONObject("pageHeaderRenderer")
+            Triple(
+                metadata?.optString("title")?.trim()?.takeIf(String::isNotBlank)
+                    ?: pageHeader?.let { text(it.opt("pageTitle")) }?.trim()?.takeIf(String::isNotBlank),
+                findChannelThumbnail(pageHeader)?.let(::highResolutionAvatarUrl).orEmpty()
+                    .ifBlank { findChannelThumbnail(metadata)?.let(::highResolutionAvatarUrl).orEmpty() },
+                hasVerifiedBadge(pageHeader) || hasVerifiedBadge(metadata),
+            )
         }.getOrNull() else null
-        val name = directName ?: browsedName
+        val name = directName ?: channelMetadata?.first
             ?: error("Channel data is unavailable")
-        return ChannelInfo(name, owner?.let(::findLargestAvatar).orEmpty())
+        return ChannelInfo(
+            name,
+            ownerAvatar.ifBlank { channelMetadata?.second.orEmpty() },
+            ownerVerified || channelMetadata?.third == true,
+            channelId,
+        )
     }
 
     private fun isChannelMetadataLabel(value: String): Boolean {
@@ -3568,6 +3581,21 @@ object YouTubeRepository {
         }
         visit(value)
         return bestUrl?.let(::highResolutionAvatarUrl)
+    }
+
+    private fun hasVerifiedBadge(value: Any?): Boolean = when (value) {
+        is JSONObject -> {
+            val style = value.optString("style")
+            val iconType = value.optJSONObject("icon")?.optString("iconType").orEmpty()
+            val badgeType = value.optString("badgeStyle").ifBlank { value.optString("badgeType") }
+            style.contains("VERIFIED", ignoreCase = true) ||
+                badgeType.contains("VERIFIED", ignoreCase = true) ||
+                iconType.contains("VERIFIED", ignoreCase = true) ||
+                iconType == "CHECK_CIRCLE_THICK" ||
+                value.keys().asSequence().any { hasVerifiedBadge(value.opt(it)) }
+        }
+        is JSONArray -> (0 until value.length()).any { hasVerifiedBadge(value.opt(it)) }
+        else -> false
     }
 
     private fun highResolutionAvatarUrl(url: String): String = normalizeImageUrl(url)
@@ -4208,6 +4236,15 @@ object YouTubeRepository {
                     )
                 }
             } else null
+            val lockupChannelId = if (rendererType == "lockupViewModel") {
+                val contentId = renderer.optString("contentId")
+                val browseId = findString(renderer, "browseId").orEmpty()
+                when {
+                    contentId.startsWith("UC") -> contentId
+                    browseId.startsWith("UC") && renderer.optString("contentType").contains("CHANNEL", true) -> browseId
+                    else -> null
+                }
+            } else null
             val musicNavBrowseEndpoint = renderer.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
                 ?: renderer.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)?.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
             val musicPageType = musicNavBrowseEndpoint?.optJSONObject("browseEndpointContextSupportedConfigs")
@@ -4230,7 +4267,7 @@ object YouTubeRepository {
                 (musicPageType in setOf("MUSIC_PAGE_TYPE_ARTIST", "MUSIC_PAGE_TYPE_USER_CHANNEL") ||
                  rendererType == "musicCardShelfRenderer" ||
                  (renderer.optString("videoId").isBlank() && !playlistRenderer))
-            val channelRenderer = rendererType.contains("channel", true) || isMusicArtistOrChannel
+            val channelRenderer = rendererType.contains("channel", true) || isMusicArtistOrChannel || lockupChannelId != null
             val lockupVideoId = if (rendererType == "lockupViewModel" && lockupPlaylistId == null) {
                 renderer.optString("contentId").takeIf { it.length == 11 }
             } else null
@@ -4238,7 +4275,8 @@ object YouTubeRepository {
                 .ifBlank { lockupVideoId.orEmpty() }
                 .ifBlank { findString(renderer, "videoId").orEmpty() }
             val channelId = if (channelRenderer) {
-                musicNavBrowseId.takeIf { it.startsWith("UC") }.orEmpty()
+                lockupChannelId.orEmpty()
+                    .ifBlank { musicNavBrowseId.takeIf { it.startsWith("UC") }.orEmpty() }
                     .ifBlank { renderer.optString("channelId") }
                     .ifBlank { findString(renderer, "browseId")?.takeIf { it.startsWith("UC") }.orEmpty() }
             } else ""
@@ -4326,6 +4364,11 @@ object YouTubeRepository {
             } else rawThumbnail
             val channelThumbnail = findChannelThumbnail(renderer)?.let { highResolutionArtworkUrl(it, 1, 1) }
                 .orEmpty().ifBlank { if (isChannel) thumbnail else "" }
+            val channelVerified = hasVerifiedBadge(renderer)
+            val isShort = rendererType == "reelItemRenderer" ||
+                renderer.optString("contentType") == "LOCKUP_CONTENT_TYPE_SHORT" ||
+                findObject(renderer, "reelWatchEndpoint") != null ||
+                findStringNearKey(renderer, "url", "/shorts/") != null
             val thumbSeedVideoId = Regex("/vi(?:_webp)?/([a-zA-Z0-9_-]{11})/").find(providedThumbnail)?.groupValues?.get(1)
                 ?.takeIf { candidateId -> candidateId != id && candidateId != playlistId && !candidateId.startsWith("RD") }
             val playlistSeedVideoId = if (playlistRenderer) {
@@ -4345,6 +4388,7 @@ object YouTubeRepository {
             val url = when {
                 isChannel -> "https://www.youtube.com/channel/$id"
                 isPlaylist -> if (!playlistSeedVideoId.isNullOrBlank()) "https://www.youtube.com/watch?v=$playlistSeedVideoId&list=$id" else "https://www.youtube.com/playlist?list=$id"
+                isShort -> "https://www.youtube.com/shorts/$id"
                 else -> "https://www.youtube.com/watch?v=$id"
             }
             val resume = scanResumeMetadata(renderer)
@@ -4414,9 +4458,11 @@ object YouTubeRepository {
             val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel,
                 channelUrl = resolvedChannelUrl,
                 resumePositionMs = resumePositionMs,
+                short = isShort,
                 musicVideo = musicVideoType.isNotBlank() && musicVideoType != "MUSIC_VIDEO_TYPE_ATV",
                 upcoming = isUpcoming,
-                upcomingText = upcomingEventText)
+                upcomingText = upcomingEventText,
+                channelVerified = channelVerified)
             if (!isPlaylist && !isChannel) synchronized(videoDetailsCache) {
                 val current = videoDetailsCache[id] ?: VideoDetails(title, subtitle)
                 videoDetailsCache[id] = current.copy(
@@ -4424,6 +4470,7 @@ object YouTubeRepository {
                     author = subtitle,
                     authorUrl = resolvedChannelUrl,
                     authorAvatar = channelThumbnail,
+                    authorVerified = channelVerified,
                     isUpcoming = if (isUpcoming) true else current.isUpcoming,
                 )
             }

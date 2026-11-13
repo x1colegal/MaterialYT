@@ -2,6 +2,18 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.11] - 2026-11-13
+
+### Changed
+- Preserve the original YouTube feed position of the Shorts shelf instead of forcing every Short to the top.
+- Use a clean, top-aligned back button when Shorts are opened from Home or search.
+
+### Fixed
+- Parse playlist videos delivered through YouTube's newer `listViewModel` and `lockupViewModel` structures.
+- Display playlist contents immediately while channel metadata continues loading in the background.
+- Parse official artist cards from the normal YouTube search UI, including their dedicated metadata and badge.
+- Prevent official artist cards from borrowing profile pictures from videos in their related shelf.
+
 ## [6.10] - 2026-11-13
 
 ### Added

@@ -931,8 +931,14 @@ object YouTubeRepository {
                     value.optJSONObject("playlistPanelVideoRenderer")?.let {
                         rows.put(JSONObject().put("playlistPanelVideoRenderer", it))
                     }
+                    value.optJSONObject("lockupViewModel")?.takeIf { lockup ->
+                        lockup.optString("contentId").length == 11 ||
+                            findString(lockup, "videoId")?.length == 11
+                    }?.let {
+                        rows.put(JSONObject().put("lockupViewModel", it))
+                    }
                     value.keys().forEach { key ->
-                        if (key != "playlistVideoRenderer" && key != "playlistPanelVideoRenderer") collectRows(value.opt(key))
+                        if (key != "playlistVideoRenderer" && key != "playlistPanelVideoRenderer" && key != "lockupViewModel") collectRows(value.opt(key))
                     }
                 }
                 is JSONArray -> for (index in 0 until value.length()) collectRows(value.opt(index))
@@ -4227,6 +4233,7 @@ object YouTubeRepository {
         val output = linkedMapOf<String, FeedItem>()
         walkFeedRenderers(root) { renderer ->
             val rendererType = renderer.optString("_materialytRendererType")
+            val officialCard = rendererType == "officialCardViewModel"
             val lockupPlaylistId = if (rendererType == "lockupViewModel") {
                 renderer.optString("contentId").removePrefix("VL").takeIf { contentId ->
                     contentId.isNotBlank() && contentId.length != 11 && (
@@ -4267,7 +4274,7 @@ object YouTubeRepository {
                 (musicPageType in setOf("MUSIC_PAGE_TYPE_ARTIST", "MUSIC_PAGE_TYPE_USER_CHANNEL") ||
                  rendererType == "musicCardShelfRenderer" ||
                  (renderer.optString("videoId").isBlank() && !playlistRenderer))
-            val channelRenderer = rendererType.contains("channel", true) || isMusicArtistOrChannel || lockupChannelId != null
+            val channelRenderer = rendererType.contains("channel", true) || isMusicArtistOrChannel || lockupChannelId != null || officialCard
             val lockupVideoId = if (rendererType == "lockupViewModel" && lockupPlaylistId == null) {
                 renderer.optString("contentId").takeIf { it.length == 11 }
             } else null
@@ -4296,7 +4303,11 @@ object YouTubeRepository {
             val id = when { isChannel -> channelId; isPlaylist -> playlistId.removePrefix("VL"); else -> videoId }
             if (!isChannel && !isPlaylist && id.length != 11) return@walkFeedRenderers
             val columns = flexColumnTexts(renderer)
-            val rawTitle = text(renderer.opt("title")) ?: text(renderer.opt("headline")) ?: columns.firstOrNull()
+            val officialCardTitle = if (officialCard) {
+                findObject(renderer, "dynamicTextViewModel")?.optJSONObject("dynamicTextViewModel")
+                    ?.opt("text")?.let(::text)
+            } else null
+            val rawTitle = officialCardTitle ?: text(renderer.opt("title")) ?: text(renderer.opt("headline")) ?: columns.firstOrNull()
                 ?: deepText(renderer, "title") ?: deepText(renderer, "headline") ?: return@walkFeedRenderers
             // Autoplay containers can expose their UI heading ("Up Next") as `title`
             // while keeping the actual video's title in `videoTitle`. Never let that
@@ -4312,7 +4323,18 @@ object YouTubeRepository {
                     it.isNotBlank() && !it.trim().equals("Up Next", ignoreCase = true)
                 } ?: rawTitle
             } else rawTitle
-            val channelSubtitle = if (isChannel) {
+            val channelSubtitle = if (officialCard) {
+                findObject(renderer, "contentMetadataViewModel")?.optJSONObject("contentMetadataViewModel")
+                    ?.optJSONArray("metadataRows")?.let { rows ->
+                        (0 until rows.length()).flatMap { rowIndex ->
+                            rows.optJSONObject(rowIndex)?.optJSONArray("metadataParts")?.let { parts ->
+                                (0 until parts.length()).mapNotNull { partIndex ->
+                                    parts.optJSONObject(partIndex)?.opt("text")?.let(::text)
+                                }
+                            }.orEmpty()
+                        }.joinToString(" • ").takeIf(String::isNotBlank)
+                    }
+            } else if (isChannel) {
                 val subs = text(renderer.opt("subscriberCountText"))
                 val vids = text(renderer.opt("videoCountText"))
                 listOfNotNull(subs, vids).joinToString(" • ").ifBlank { null }
@@ -4344,7 +4366,13 @@ object YouTubeRepository {
             // walkFeedRenderers already rejects ad subtrees before yielding a renderer. Repeating
             // the recursive ad scan here doubled the work for every history entry.
             if (isAdString(title) || isAdString(subtitle)) return@walkFeedRenderers
-            val thumbnails = renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+            val officialCardThumbnails = if (officialCard) {
+                renderer.optJSONObject("header")?.optJSONObject("pageHeaderViewModel")
+                    ?.optJSONObject("image")?.optJSONObject("contentPreviewImageViewModel")
+                    ?.optJSONObject("image")?.optJSONArray("sources")
+            } else null
+            val thumbnails = officialCardThumbnails
+                ?: renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 ?: renderer.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
             val selectedThumb = thumbnails?.let { candidates ->
                 (0 until candidates.length()).mapNotNull(candidates::optJSONObject).maxByOrNull { candidate ->
@@ -4352,7 +4380,8 @@ object YouTubeRepository {
                 }
             }
             val providedThumbnail = selectedThumb?.optString("url").orEmpty()
-                .ifBlank { findThumbnail(renderer).orEmpty() }.let { if (it.startsWith("//")) "https:$it" else it }
+                .ifBlank { if (officialCard) "" else findThumbnail(renderer).orEmpty() }
+                .let { if (it.startsWith("//")) "https:$it" else it }
             val isMusicItem = renderer.has("flexColumns") || renderer.has("thumbnailRenderer") || renderer.has("subtitle")
             val thumbWidth = if (isMusicItem || isChannel) selectedThumb?.optInt("width")?.takeIf { it > 0 } ?: 1 else 16
             val thumbHeight = if (isMusicItem || isChannel) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
@@ -4362,9 +4391,12 @@ object YouTubeRepository {
                 else highResolutionArtworkUrl(rawThumbnail, thumbWidth, thumbHeight))
                     .replace(Regex("/(?:default|mqdefault|sddefault)\\.(?:jpg|webp)(?=\\?|$)"), "/hqdefault.jpg")
             } else rawThumbnail
-            val channelThumbnail = findChannelThumbnail(renderer)?.let { highResolutionArtworkUrl(it, 1, 1) }
-                .orEmpty().ifBlank { if (isChannel) thumbnail else "" }
-            val channelVerified = hasVerifiedBadge(renderer)
+            val channelThumbnail = if (officialCard) thumbnail else {
+                findChannelThumbnail(renderer)?.let { highResolutionArtworkUrl(it, 1, 1) }
+                    .orEmpty().ifBlank { if (isChannel) thumbnail else "" }
+            }
+            val channelVerified = hasVerifiedBadge(renderer) ||
+                (officialCard && findStringNearKey(renderer, "imageName", "AUDIO_BADGE") != null)
             val isShort = rendererType == "reelItemRenderer" ||
                 renderer.optString("contentType") == "LOCKUP_CONTENT_TYPE_SHORT" ||
                 findObject(renderer, "reelWatchEndpoint") != null ||
@@ -4609,7 +4641,7 @@ object YouTubeRepository {
                     val supported = setOf(
                         "videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "playlistVideoRenderer", "playlistRenderer", "gridPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
                         "radioRenderer", "compactRadioRenderer", "gridRadioRenderer",
-                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "musicCardShelfRenderer", "playlistPanelVideoRenderer", "lockupViewModel"
+                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "musicCardShelfRenderer", "playlistPanelVideoRenderer", "lockupViewModel", "officialCardViewModel"
                     )
                     keys.forEach { key ->
                         val candidate = value.optJSONObject(key) ?: return@forEach

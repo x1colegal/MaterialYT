@@ -1288,9 +1288,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 onClick = { selectedShort = null },
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .statusBarsPadding()
-                    .padding(8.dp)
-                    .background(ComposeColor.Black.copy(alpha = 0.55f), CircleShape),
+                    .padding(4.dp),
             ) {
                 Icon(Icons.Default.ArrowBack, "Back", tint = ComposeColor.White)
             }
@@ -1374,6 +1372,13 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
             val shorts = feed.filter { it.short }
             val regularFeed = feed.filterNot { it.short }
+            val firstShortPosition = feed.indexOfFirst { it.short }
+            val itemsBeforeShorts = if (firstShortPosition >= 0) {
+                feed.take(firstShortPosition).filterNot { it.short }
+            } else regularFeed
+            val itemsAfterShorts = if (firstShortPosition >= 0) {
+                feed.drop(firstShortPosition).filterNot { it.short }
+            } else emptyList()
             if (tablet) {
                 LaunchedEffect(homeGridState, feed.size, query) {
                     snapshotFlow { homeGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
@@ -1381,9 +1386,13 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     }
                 }
                 LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(16.dp)) {
+                    gridItems(
+                        items = itemsBeforeShorts,
+                        span = { item -> if (item.channel) GridItemSpan(maxLineSpan) else GridItemSpan(1) },
+                    ) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
                     if (shorts.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { ShortsShelf(shorts, true) { selectedShort = it } }
                     gridItems(
-                        items = regularFeed,
+                        items = itemsAfterShorts,
                         span = { item -> if (item.channel) GridItemSpan(maxLineSpan) else GridItemSpan(1) },
                     ) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
                     if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
@@ -1395,8 +1404,9 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                     }
                 }
                 LazyColumn(state = homeListState) {
+                    items(itemsBeforeShorts) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
                     if (shorts.isNotEmpty()) item { ShortsShelf(shorts, false) { selectedShort = it } }
-                    items(regularFeed) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
+                    items(itemsAfterShorts) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
                     if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             }
@@ -3570,10 +3580,18 @@ internal suspend fun originalMetadataItems(items: List<FeedItem>): List<FeedItem
     val requests = Semaphore(4)
     items.map { item ->
         async(Dispatchers.IO) {
-            if (item.channel || item.playlist || item.id.length != 11) return@async item
+            if (item.channel) return@async item
+            if (item.playlist) {
+                if (item.id.startsWith("RD") || item.channelThumbnail.isNotBlank() || item.channelUrl.isBlank()) return@async item
+                return@async requests.withPermit {
+                    val owner = runCatching { YouTubeRepository.channelPage(item.channelUrl) }.getOrNull()
+                    item.copy(channelThumbnail = owner?.avatar.orEmpty())
+                }
+            }
+            if (item.id.length != 11) return@async item
             requests.withPermit {
                 val metadata = YouTubeRepository.canonicalVideoMetadata(item.id) ?: return@withPermit item
-                val channel = if (item.channelThumbnail.isBlank() || item.channelUrl.isBlank()) {
+                val channel = if (item.channelThumbnail.isBlank() || item.channelUrl.isBlank() || !item.channelVerified) {
                     runCatching { YouTubeRepository.channelInfo(item.id) }.getOrNull()
                 } else null
                 item.copy(
@@ -3710,13 +3728,17 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
     LaunchedEffect(url) {
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistPage(playlistId, seedVideoId) } }
             .onSuccess { page ->
-                playlistItems = if (playlistId.startsWith("RD")) page.items else originalMetadataItems(page.items)
+                playlistItems = page.items
                 editable = page.editable
                 deletable = page.deletable
                 playlistTitle = page.title.ifBlank { "YouTube playlist" }
                 playlistSubtitle = page.subtitle
                 playlistThumbnail = page.thumbnail.ifBlank { page.items.firstOrNull()?.thumbnail.orEmpty() }
                 continuation = page.continuation
+                loading = false
+                if (!playlistId.startsWith("RD")) {
+                    playlistItems = originalMetadataItems(page.items)
+                }
             }
             .onFailure { if (it !is kotlinx.coroutines.CancellationException) error = it.message }
         loading = false
@@ -3728,10 +3750,16 @@ private fun PlaylistScreen(activity: MainActivity, url: String, codec: CodecChoi
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playlistContinuation(token) } }
                 .onSuccess { page ->
-                    val resolvedItems = if (playlistId.startsWith("RD")) page.items
-                        else withContext(Dispatchers.IO) { originalMetadataItems(page.items) }
-                    playlistItems = (playlistItems + resolvedItems).distinctBy { it.setVideoId.ifBlank { it.id } }
+                    playlistItems = (playlistItems + page.items).distinctBy { it.setVideoId.ifBlank { it.id } }
                     continuation = page.continuation.takeIf { page.items.isNotEmpty() }
+                    loadingMore = false
+                    if (!playlistId.startsWith("RD")) {
+                        val resolvedItems = withContext(Dispatchers.IO) { originalMetadataItems(page.items) }
+                        val resolvedByKey = resolvedItems.associateBy { it.setVideoId.ifBlank { it.id } }
+                        playlistItems = playlistItems.map { item ->
+                            resolvedByKey[item.setVideoId.ifBlank { item.id }] ?: item
+                        }
+                    }
                 }
                 .onFailure { failure -> error = failure.message ?: "Could not load more videos" }
             loadingMore = false

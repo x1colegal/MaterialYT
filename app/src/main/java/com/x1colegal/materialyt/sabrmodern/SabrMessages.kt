@@ -19,6 +19,13 @@ internal object SabrMessages {
         val contentLength: Long,
         val xtags: String = "",
         val audioTrackId: String = "",
+        val codec: String = "",
+        val width: Int = 0,
+        val height: Int = 0,
+        val fps: Int = 0,
+        val bitrate: Int = 0,
+        val audioChannels: Int = 0,
+        val targetDurationMs: Long = 0L,
     )
 
     /** Identity for the SABR streamerContext.clientInfo (must match the /player request client). */
@@ -83,11 +90,62 @@ internal object SabrMessages {
             vField(5, t.bufferedEndSeg.toLong()),
         )
 
-    // ClientAbrState { playerTimeMs=28, enabledTrackTypesBitfield=40 }  (40=1 -> audio only)
-    private fun clientAbrState(playerTimeMs: Long, audioTrackId: String): ByteArray = concat(
+    private fun videoCodecCode(codec: String): Long = when {
+        codec.startsWith("avc", true) || codec.startsWith("hev", true) || codec.startsWith("hvc", true) -> 2
+        codec.startsWith("vp", true) -> 4
+        codec.startsWith("av01", true) -> 8
+        else -> 0
+    }
+
+    private fun audioCodecCode(codec: String): Long = when {
+        codec.startsWith("opus", true) -> 3
+        codec.startsWith("mp4a", true) -> 1
+        else -> 0
+    }
+
+    // MediaCapabilities. Active broadcasts validate this more strictly than ordinary VOD SABR.
+    private fun mediaCapabilities(video: Format?, audio: Format?): ByteArray {
+        val videoCapability = video?.let { format ->
+            videoCodecCode(format.codec).takeIf { it > 0 }?.let { codec ->
+                concat(
+                    vField(1, codec), vField(2, 1),
+                    vField(3, format.height.toLong()), vField(4, format.width.toLong()),
+                    vField(11, format.fps.toLong()), vField(12, format.bitrate.toLong()),
+                )
+            }
+        }
+        val audioCapability = audio?.let { format ->
+            audioCodecCode(format.codec).takeIf { it > 0 }?.let { codec ->
+                concat(vField(1, codec), vField(2, format.audioChannels.toLong()), vField(6, 0))
+            }
+        }
+        return concat(
+            videoCapability?.let { bField(1, it) } ?: ByteArray(0),
+            audioCapability?.let { bField(2, it) } ?: ByteArray(0),
+            vField(5, 3),
+        )
+    }
+
+    // ClientAbrState mirrors googlevideo's live-capable state. Zero-valued proto2 fields are
+    // deliberately emitted: the official client distinguishes an explicit initial clock from absent.
+    private fun clientAbrState(
+        playerTimeMs: Long,
+        elapsedMs: Long,
+        enabledTrackTypes: Long,
+        video: Format?,
+        audio: Format?,
+    ): ByteArray = concat(
+        video?.height?.takeIf { it > 0 }?.let { vField(21, it.toLong()) } ?: ByteArray(0),
+        vField(22, 0),
         vField(28, playerTimeMs),
-        vField(40, 1),
-        if (audioTrackId.isNotBlank()) sField(69, audioTrackId) else ByteArray(0),
+        vField(29, elapsedMs),
+        vField(34, 2),
+        vField(36, elapsedMs),
+        bField(38, mediaCapabilities(video, audio)),
+        vField(39, elapsedMs),
+        vField(40, enabledTrackTypes),
+        audio?.audioTrackId?.takeIf(String::isNotBlank)?.let { sField(69, it) } ?: ByteArray(0),
+        vField(71, 1),
     )
 
     /**
@@ -105,13 +163,15 @@ internal object SabrMessages {
         sabrContexts: List<ByteArray>,
         unsentSabrContexts: Collection<Long>,
         initialized: Boolean,
+        elapsedMs: Long = 0,
+        live: Boolean = false,
     ): ByteArray = concat(
-        bField(1, clientAbrState(playerTimeMs, format.audioTrackId)),
+        bField(1, clientAbrState(playerTimeMs, elapsedMs, 1, null, format)),
         // Formats listed here are already initialized by the client. Omit until the init segment
         // has actually arrived, otherwise WEB skips the MP4 header and starts at the media offset.
         if (initialized) bField(2, formatId(format)) else ByteArray(0),
         if (range != null && range.bufferedEndSeg > 0) bField(3, bufferedRange(range)) else ByteArray(0),
-        if (playerTimeMs > 0) vField(4, playerTimeMs) else ByteArray(0),
+        if (!live && playerTimeMs > 0) vField(4, playerTimeMs) else ByteArray(0),
         bField(5, ustreamerConfig),
         bField(16, formatId(format)),
         bField(19, streamerContext(clientInfo, poToken, cookie, sabrContexts, unsentSabrContexts)),
@@ -147,20 +207,18 @@ internal object SabrMessages {
         unsentSabrContexts: Collection<Long>,
         videoInitialized: Boolean,
         audioInitialized: Boolean,
+        elapsedMs: Long = 0,
+        live: Boolean = false,
     ): ByteArray {
         val states = listOfNotNull(video, audio)
         return concat(
-            bField(1, concat(
-                vField(28, playerTimeMs),
-                vField(40, 0), // enabledTrackTypesBitfield=0 => video+audio
-                if (audioFormat.audioTrackId.isNotBlank()) sField(69, audioFormat.audioTrackId) else ByteArray(0),
-            )),
+            bField(1, clientAbrState(playerTimeMs, elapsedMs, 0, videoFormat, audioFormat)),
             concat(
-                if (videoInitialized) bField(2, formatId(videoFormat)) else ByteArray(0),
-                if (audioInitialized) bField(2, formatId(audioFormat)) else ByteArray(0),
+                if (!live && videoInitialized) bField(2, formatId(videoFormat)) else ByteArray(0),
+                if (!live && audioInitialized) bField(2, formatId(audioFormat)) else ByteArray(0),
             ),
             concat(states.filter { it.bufferedEndSeg > 0 }.map { bField(3, bufferedRange(it)) }),
-            if (playerTimeMs > 0) vField(4, playerTimeMs) else ByteArray(0),
+            if (!live && playerTimeMs > 0) vField(4, playerTimeMs) else ByteArray(0),
             bField(5, ustreamerConfig),
             bField(16, formatId(audioFormat)), // preferredAudioFormatId
             bField(17, formatId(videoFormat)), // preferredVideoFormatId (pins the exact video itag)

@@ -2,6 +2,31 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.5] - 2026-11-13
+
+MaterialYT 6.5 is probably one of the largest releases in the project's history. It took approximately two days to complete, with development alternating between Codex (5.6 Sol) and Antigravity (Gemini 3.8 Flash).
+
+### Added
+- Native live stream playback via YouTube SABR (`SabrMediaFactory`), with full quality selection (Auto, 1080p, 720p, 480p, 360p, 240p, 144p), bitrate, frame rate, and codec details, with synchronized audio and live-edge playback.
+- Live Chat for live streams: real-time streaming chat messages, live badges for moderators, channel owner, and sponsors, Super Chat highlighting, and chat message sending.
+- "Live" tab in channel screen (`ChannelScreen`) showing past and active live streams from `/streams`.
+- Premiere support with scheduled-start countdowns and live chat before and during the premiere.
+- Premiere and upcoming live stream discovery: upcoming premieres and scheduled live streams now appear directly on channel views, with "PREMIERE" / "UPCOMING" badges and schedule times.
+
+### Fixed
+- Fixed premiere player opening stream before broadcast start: player now waits on upcoming screen without failing SABR extraction or spinning.
+- Automatic premiere start detection: background watcher continuously monitors upcoming broadcasts and automatically starts playback as soon as the premiere goes live.
+- Dismissed "Starting soon" overlay as soon as playback starts or the broadcast is live.
+- Corrected live stream status detection in `sabrPlaybackInfo` and `cachePlayerLiveDetails` to properly recognize live broadcasts and premieres.
+- Fixed bottom navigation bar (phone) and navigation rail (tablet) item selection becoming unselected when video playback is active in the miniplayer; active tab remains selected while browsing.
+- Comments composer re-appears smoothly with animation when scrolling up anywhere in the comments list, instead of only being accessible at the very top of comments.
+- Fixed live playback stopping after only a few seconds by exposing the growing SABR stream as an unbounded ExoPlayer data source and using an expandable disk-backed spool.
+- Keep both live audio and video extractors draining continuously, preventing either track from being starved when ExoPlayer merges two unbounded progressive sources.
+- Validate every live fragmented-MP4 boundary before appending it to the growing spool, retrying malformed or incomplete fragments instead of terminating playback with an oversized-atom parser error.
+- Normalize live fragment decode timelines while preserving continuous playback across YouTube sequence-window gaps.
+- Fixed live PoToken refreshes mutating the active broadcast URL; refreshed proofs now remain in the SABR streamer context.
+- Improved SABR live timeline normalization, protection recovery, and diagnostics.
+
 ## [6.4] - 2026-11-11
 
 ### Fixed

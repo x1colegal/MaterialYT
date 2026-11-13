@@ -20,6 +20,7 @@ internal class ModernSabrStream(
     private val client: OkHttpClient,
     initialStartMs: Long = 0L,
 ) {
+    val isLive: Boolean = (videoConfig?.durationMs ?: audioConfig?.durationMs ?: 0L) <= 0L
     val videoBuffer: SabrBuffer?
     val audioBuffer: SabrBuffer
     private var session: Runnable
@@ -29,6 +30,7 @@ internal class ModernSabrStream(
     private var currentMarginMs = INITIAL_SEEK_MARGIN_MS
     private var overshootRestarts = 0
     private var hintedPlaybackTimeMs: Long? = initialStartMs.takeIf { it > 0L }
+    @Volatile private var reportedPlaybackTimeMs: Long? = initialStartMs.coerceAtLeast(0L)
     private var hintCreatedAtMs = if (initialStartMs > 0L) SystemClock.elapsedRealtime() else 0L
 
     init {
@@ -36,8 +38,8 @@ internal class ModernSabrStream(
         val coldStartMs = if (requestedStartMs > 0L) (requestedStartMs - currentMarginMs).coerceAtLeast(0L) else 0L
         currentSessionStartMs = coldStartMs
         if (videoConfig != null) {
-            videoBuffer = SabrBuffer(videoConfig.videoFormat.contentLength, File(dir, "$id-video.part"))
-            audioBuffer = SabrBuffer(videoConfig.audioFormat.contentLength, File(dir, "$id-audio.part"))
+            videoBuffer = SabrBuffer(videoConfig.videoFormat.contentLength, File(dir, "$id-video.part"), growable = isLive)
+            audioBuffer = SabrBuffer(videoConfig.audioFormat.contentLength, File(dir, "$id-audio.part"), growable = isLive)
             if (coldStartMs > 0L) {
                 videoBuffer.resetDemandFrom(positionForTime(coldStartMs, videoConfig.durationMs, videoConfig.videoFormat.contentLength))
                 audioBuffer.resetDemandFrom(positionForTime(coldStartMs, videoConfig.durationMs, videoConfig.audioFormat.contentLength))
@@ -45,11 +47,12 @@ internal class ModernSabrStream(
             session = SabrVideoSession(videoConfig, client, videoBuffer, audioBuffer,
                 startTimeMs = coldStartMs,
                 paceAheadVideoBytes = 32L * 1024 * 1024,
-                paceAheadAudioBytes = 8L * 1024 * 1024)
+                paceAheadAudioBytes = 8L * 1024 * 1024,
+                playbackPositionMs = { reportedPlaybackTimeMs })
         } else {
             val cfg = requireNotNull(audioConfig)
             videoBuffer = null
-            audioBuffer = SabrBuffer(cfg.format.contentLength, File(dir, "$id-audio.part"))
+            audioBuffer = SabrBuffer(cfg.format.contentLength, File(dir, "$id-audio.part"), growable = isLive)
             if (coldStartMs > 0L) {
                 audioBuffer.resetDemandFrom(positionForTime(coldStartMs, cfg.durationMs, cfg.format.contentLength))
             }
@@ -80,6 +83,10 @@ internal class ModernSabrStream(
             val position = positionForTime(normalizedPositionMs, videoConfig.durationMs, videoConfig.videoFormat.contentLength)
             restartAt(normalizedPositionMs, video = true, position = position, source = "hint", marginMs = currentMarginMs)
         }
+    }
+
+    fun reportPlaybackTime(positionMs: Long) {
+        reportedPlaybackTimeMs = positionMs.coerceAtLeast(0L)
     }
 
     /** Re-aim SABR at a distant ExoPlayer seek instead of draining linearly from the old position. */
@@ -217,7 +224,8 @@ internal class ModernSabrStream(
         session = if (videoConfig != null) {
             SabrVideoSession(videoConfig, client, requireNotNull(videoBuffer), audioBuffer,
                 startTimeMs = startMs, paceAheadVideoBytes = 32L * 1024 * 1024,
-                paceAheadAudioBytes = 8L * 1024 * 1024, restartable = false)
+                paceAheadAudioBytes = 8L * 1024 * 1024,
+                playbackPositionMs = { reportedPlaybackTimeMs }, restartable = false)
         } else {
             SabrSession(requireNotNull(audioConfig), client, audioBuffer, startTimeMs = startMs,
                 paceAheadBytes = 8L * 1024 * 1024, restartable = false)
@@ -267,6 +275,7 @@ internal object ModernSabrRegistry {
     }
     fun get(id: String): ModernSabrStream? = streams[id]
     fun hintPlaybackTime(id: String, positionMs: Long) { streams[id]?.hintPlaybackTime(positionMs) }
+    fun reportPlaybackTime(id: String, positionMs: Long) { streams[id]?.reportPlaybackTime(positionMs) }
     fun destroyForVideo(videoId: String) {
         val prefix = "$videoId-"
         for (key in streams.keys.filter { it.startsWith(prefix) }) {
@@ -290,7 +299,11 @@ internal class ModernSabrDataSource(private val video: Boolean) : BaseDataSource
         stream = value
         position = dataSpec.position
         value.requestPosition(video, position)
-        remaining = value.length(video) - position
+        remaining = when {
+            dataSpec.length != C.LENGTH_UNSET.toLong() -> dataSpec.length
+            value.isLive -> C.LENGTH_UNSET.toLong()
+            else -> value.length(video) - position
+        }
         transferStarted(dataSpec)
         started = true
         return remaining
@@ -298,19 +311,40 @@ internal class ModernSabrDataSource(private val video: Boolean) : BaseDataSource
 
     override fun read(target: ByteArray, offset: Int, readLength: Int): Int {
         if (readLength == 0) return 0
-        if (remaining <= 0) return C.RESULT_END_OF_INPUT
-        val wanted = minOf(readLength.toLong(), remaining).toInt()
+        if (remaining == 0L) return C.RESULT_END_OF_INPUT
+        val wanted = if (remaining == C.LENGTH_UNSET.toLong()) readLength else minOf(readLength.toLong(), remaining).toInt()
         val activeStream = stream ?: return C.RESULT_END_OF_INPUT
         val buffer = activeStream.buffer(video)
+        var waitingSinceMs = 0L
+        var lastWaitLogMs = 0L
         while (true) {
             val count = buffer.readCovered(position, target, offset, wanted)
             if (count > 0) {
+                if (activeStream.isLive && waitingSinceMs > 0L) {
+                    val waitedMs = SystemClock.elapsedRealtime() - waitingSinceMs
+                    if (waitedMs >= 500L) AppLog.event(
+                        "SABR live reader resumed id=${activeStream.id} video=$video position=$position " +
+                            "count=$count available=${buffer.available()} waitedMs=$waitedMs",
+                    )
+                }
                 position += count
-                remaining -= count
+                if (remaining != C.LENGTH_UNSET.toLong()) remaining -= count
                 bytesTransferred(count)
                 return count
             }
+            if (buffer.isComplete() && !buffer.coveredAt(position)) return C.RESULT_END_OF_INPUT
             activeStream.ensureCoveragePossible(video, position)
+            if (activeStream.isLive) {
+                val now = SystemClock.elapsedRealtime()
+                if (waitingSinceMs == 0L) waitingSinceMs = now
+                if (lastWaitLogMs == 0L || now - lastWaitLogMs >= 5_000L) {
+                    lastWaitLogMs = now
+                    AppLog.event(
+                        "SABR live reader waiting id=${activeStream.id} video=$video position=$position " +
+                            "available=${buffer.available()} failed=${buffer.failed()}",
+                    )
+                }
+            }
             buffer.awaitChange(250)
         }
     }

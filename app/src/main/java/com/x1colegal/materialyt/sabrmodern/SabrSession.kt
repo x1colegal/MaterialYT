@@ -93,7 +93,8 @@ internal class SabrSession(
     // POST-count ceiling — a backstop against a pathological progressing-but-never-completing loop
     // (the dry counter below is the real stall guard). Derived from the track duration so a long
     // podcast/audiobook whose drain legitimately needs many round-trips is never cut off mid-tail.
-    private val maxIter: Int = ((config.durationMs / 1000L) * 3L + 1000L).coerceIn(1000L, 200_000L).toInt()
+    private val maxIter: Int = if (config.durationMs <= 0L) Int.MAX_VALUE
+        else ((config.durationMs / 1000L) * 3L + 1000L).coerceIn(1000L, 200_000L).toInt()
 
     /**
      * Terminal failure of THIS session. A [restartable] (playback) session leaves the buffer unmarked so
@@ -137,6 +138,7 @@ internal class SabrSession(
 
     /** Whether this session's tail — first written byte to contentLength — is fully covered. */
     private fun tailDone(): Boolean {
+        if (config.durationMs <= 0L) return false
         val first = firstWrittenOffset
         return first >= 0 && buffer.coverageEndFrom(first) >= config.format.contentLength
     }
@@ -145,8 +147,10 @@ internal class SabrSession(
         var url = prepared(config.sabrUrl)
         var ustreamerConfig = config.ustreamerConfig
         var poToken = config.poToken
-        var playerTimeMs = startTimeMs
-        var bufEndMs = startTimeMs
+        val isLive = config.durationMs <= 0L
+        var playerTimeMs = if (isLive) LIVE_EDGE_SENTINEL_MS else startTimeMs
+        var bufEndMs = if (isLive) 0L else startTimeMs
+        val sessionStartedAt = android.os.SystemClock.elapsedRealtime()
         var firstSeq = 0
         var firstMs = 0L
         var lastSeq = 0
@@ -168,8 +172,21 @@ internal class SabrSession(
         var protectionRefreshes = 0
         var protectionMaxRetries = 5
         var backoffTimeMs = 0L
+        val pendingPoToken = java.util.concurrent.atomic.AtomicReference<Pair<String, ByteArray>?>(null)
+        val poTokenRefreshRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
-        while (!cancelled && iter < maxIter && dry < 6) {
+        val maxDry = if (isLive) 40 else 6
+        while (!cancelled && (isLive || (iter < maxIter && dry < maxDry))) {
+            pendingPoToken.getAndSet(null)?.let { refreshed ->
+                poToken = refreshed.second
+                url = url.toHttpUrlOrNull()?.newBuilder()
+                    ?.setQueryParameter("pot", refreshed.first)
+                    ?.build()?.toString() ?: url
+                attestationStalls = 0
+                dry = 0
+                protectionRefreshes++
+                AppLog.event("SABR audio installed asynchronously refreshed streaming PoToken")
+            }
             if (backoffTimeMs > 0) {
                 val delay = backoffTimeMs.coerceAtMost(30_000L)
                 backoffTimeMs = 0
@@ -200,6 +217,8 @@ internal class SabrSession(
                 sabrContexts = ctxToSend.mapNotNull { ctxByType[it]?.encoded() },
                 unsentSabrContexts = ctxByType.keys.filterNot { it in ctxToSend },
                 initialized = initWritten,
+                elapsedMs = android.os.SystemClock.elapsedRealtime() - sessionStartedAt,
+                live = isLive,
             )
             val requestUrl = url.toHttpUrlOrNull()?.newBuilder()
                 ?.setQueryParameter("rn", requestNumber.toString())
@@ -208,16 +227,31 @@ internal class SabrSession(
             val req = Request.Builder()
                 .url(requestUrl)
                 .header("User-Agent", config.userAgent)
+                .header("Accept", "application/vnd.yt-ump")
+                .header("Accept-Encoding", "identity")
+                .header("Origin", "https://www.youtube.com")
+                .header("Referer", "https://www.youtube.com/")
                 .post(body.toRequestBody(protobuf))
                 .build()
             // An HTTP failure is NOT recorded as a client stall — a 403 is usually an expired URL, not
             // this client's fault; the error mark surfaces it and the refresh path re-resolves fresh.
-            val bytes = client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    AppLog.event("SABR audio HTTP ${resp.code} iter=$iter url=${req.url.host}")
-                    failStream("HTTP ${resp.code}", stall = false); return
+            val bytes = try {
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        val errBody = try { resp.body?.string() } catch (_: Exception) { null }
+                        val respHdrs = resp.headers.joinToString("; ") { "${it.first}=${it.second}" }
+                        val reqHdrs = req.headers.joinToString("; ") { "${it.first}=${it.second}" }
+                        AppLog.event("SABR audio HTTP ${resp.code} msg=${resp.message} iter=$iter bodySize=${body.size} url=$requestUrl reqHdrs=[$reqHdrs] respHdrs=[$respHdrs] body=$errBody")
+                        failStream("HTTP ${resp.code}", stall = false); return
+                    }
+                    resp.body?.bytes() ?: ByteArray(0)
                 }
-                resp.body?.bytes() ?: ByteArray(0)
+            } catch (e: java.io.IOException) {
+                if (cancelled) return
+                AppLog.event("SABR audio HTTP transient network error video=${config.mediaId} iter=$iter error=${e.message} — retrying")
+                dry++
+                Thread.sleep(1500L)
+                continue
             }
             if (cancelled) return
 
@@ -316,7 +350,7 @@ internal class SabrSession(
             }
             var refreshedProtectionDuringStartup = false
             val startupResponseWithoutMedia = headers.isEmpty() && !initWritten && lastSeq == 0
-            if (startupResponseWithoutMedia && protStatus >= SabrProtection.ATTESTATION_REQUIRED &&
+            if (startupResponseWithoutMedia && protStatus >= SabrProtection.ATTESTATION_PENDING &&
                 protStatus > lastProtectionRefreshStatus) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
@@ -406,17 +440,51 @@ internal class SabrSession(
                     newSeg = true
                 }
             }
-            playerTimeMs = maxOf(startTimeMs, bufEndMs)
+            playerTimeMs = if (isLive) {
+                if (lastSeq > 0) bufEndMs else LIVE_EDGE_SENTINEL_MS
+            } else maxOf(startTimeMs, bufEndMs)
             onProgress?.invoke(buffer.available())
 
             if (redirect != null && !newSeg) { url = prepared(redirect); continue }
             dry = if (newSeg || gotContext) 0 else dry + 1
+            if (isLive && !newSeg) {
+                val waitMs = when {
+                    backoffTimeMs > 0L -> backoffTimeMs.coerceIn(500L, 3_000L)
+                    dry in 1..2 -> 1_000L
+                    else -> 1_500L
+                }
+                Thread.sleep(waitMs)
+            }
             // Attestation cap: a session whose PoToken can't satisfy stream protection gets a
             // small free window, then the server serves ONLY STREAM_PROTECTION_STATUS>=2 with no media
             // (proven live: tests/probe-mweb-sabr.mjs). Bail FAST with a clear reason instead of grinding
             // to the dry cap — the roster/stall fallback then moves to a client that can attest.
             attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
-            val protectionEscalated = protStatus > lastProtectionRefreshStatus
+            // Status 2 is an active request for a fresh proof, even when this response still
+            // contains media. Mint on the transition instead of waiting for playback to exhaust
+            // those last segments, then re-arm once YouTube accepts the proof with status 1.
+            if (protStatus < SabrProtection.ATTESTATION_PENDING) {
+                lastProtectionRefreshStatus = 0L
+                protectionRefreshes = 0
+            }
+            val protectionEscalated = protStatus >= SabrProtection.ATTESTATION_PENDING &&
+                protStatus > lastProtectionRefreshStatus
+            if (protectionEscalated && protStatus == SabrProtection.ATTESTATION_PENDING &&
+                protectionRefreshes < protectionMaxRetries) {
+                config.refreshPoToken?.let { refresh ->
+                    lastProtectionRefreshAt = System.currentTimeMillis()
+                    lastProtectionRefreshStatus = protStatus
+                    if (poTokenRefreshRunning.compareAndSet(false, true)) {
+                        Thread({
+                            runCatching { refresh() }
+                                .onSuccess(pendingPoToken::set)
+                                .onFailure { AppLog.failure("SABR audio asynchronous streaming PoToken refresh", it) }
+                            poTokenRefreshRunning.set(false)
+                        }, "materialyt-audio-pot-${config.mediaId}").apply { isDaemon = true; start() }
+                        AppLog.event("SABR audio refreshing streaming PoToken asynchronously protection=$protStatus")
+                    }
+                }
+            }
             val protectionRefreshDue = protStatus >= SabrProtection.ATTESTATION_REQUIRED && protectionEscalated ||
                 attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
                 System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
@@ -446,15 +514,6 @@ internal class SabrSession(
             // The protection status belongs to the request made with the previous token. Send the
             // freshly minted token on this same SABR session before considering any player reload.
             if (protectionTokenRefreshed) {
-                backoffTimeMs = maxOf(backoffTimeMs, 1_000L)
-                continue
-            }
-            if (protStatus >= SabrProtection.ATTESTATION_PENDING && !newSeg &&
-                protectionRefreshes < protectionMaxRetries) {
-                // Pending protection may need a few backend round trips to accept the new proof.
-                // Do not burn the dry/stall budget or rotate the player while it propagates.
-                dry = 0
-                backoffTimeMs = maxOf(backoffTimeMs, 500L)
                 continue
             }
             val refreshPlayer = config.refreshPlayer
@@ -485,27 +544,25 @@ internal class SabrSession(
                     continue
                 }
             }
-            if (SabrProtection.capped(attestationStalls)) {
+            if (!isLive && SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR attestation cap (STREAM_PROTECTION_STATUS=$protStatus): ${buffer.available()}/${config.format.contentLength} at seq $lastSeq/$endSeg — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus): ${buffer.available()}/${config.format.contentLength}", stall = true); return
             }
             // Completion: end_segment_number when the server sent one, else BYTE coverage reaching
             // contentLength (a seeked session gets no endSeg — proven live).
             if (endSeg > 0 && lastSeq >= endSeg) break
-            if (tailDone()) break
+            if (!isLive && tailDone()) break
         }
 
         when {
             cancelled -> return
-            buffer.completeFromZero() -> buffer.markComplete()
-            tailDone() -> buffer.notifyWaiters() // the session's region is whole; the head gap (a seek) is another session's job
+            !isLive && buffer.completeFromZero() -> buffer.markComplete()
+            !isLive && tailDone() -> buffer.notifyWaiters()
+            isLive -> {
+                AppLog.event("SABR audio live loop finished iter=$iter dry=$dry cancelled=$cancelled")
+                failStream("live audio stream ended (dry=$dry)", stall = false)
+            }
             else -> {
-                // Delivered less than its tail (dry-counter expiry / the iteration cap — e.g. an
-                // identity-capped client, or a mid-stream context-challenge stall). Mark ERROR, never
-                // complete: markComplete converted the shortfall into a clean EOF, silently truncating
-                // the track. The reader still serves every reassembled byte first (SabrBuffer), so
-                // playback reaches the stall point and then surfaces a real player error — the same
-                // shortfall the download path rejects.
                 Timber.tag(TAG).w("SABR incomplete: ${buffer.available()}/${config.format.contentLength} (seq $lastSeq/$endSeg, start=$startTimeMs)")
                 AppLog.event("SABR audio incomplete drain ${buffer.available()}/${config.format.contentLength}")
                 failStream("incomplete drain: ${buffer.available()}/${config.format.contentLength}", stall = true)
@@ -515,6 +572,7 @@ internal class SabrSession(
 
     companion object {
         private const val TAG = "SabrSession"
+        private const val LIVE_EDGE_SENTINEL_MS = 9007199254740991L
         private const val STARTUP_EMPTY_LIMIT = 2
         private const val MAX_STARTUP_REFRESHES = 2
         private const val MAX_MIDSTREAM_REFRESHES = 3

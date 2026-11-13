@@ -19,7 +19,7 @@ internal object SabrProtection {
 
     /** Running count of consecutive no-progress responses under active attestation (0 = not capped). */
     fun nextStalls(protStatus: Long, madeProgress: Boolean, prev: Int): Int =
-        if (protStatus >= ATTESTATION_PENDING && !madeProgress) prev + 1 else 0
+        if (protStatus >= ATTESTATION_REQUIRED && !madeProgress) prev + 1 else 0
 
     fun capped(stalls: Int): Boolean = stalls >= STALL_LIMIT
 }

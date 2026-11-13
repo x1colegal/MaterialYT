@@ -23,12 +23,15 @@ internal class SabrBuffer private constructor(
     val expectedLength: Long,
     val file: File,
     preComplete: Boolean,
+    private val growable: Boolean,
 ) {
     /** A fresh (empty) buffer spooling to [file]; refuses an out-of-range length LOUDLY (see [lengthValid]). */
-    constructor(expectedLength: Long, file: File) : this(expectedLength, file, preComplete = false)
+    constructor(expectedLength: Long, file: File, growable: Boolean = false) :
+        this(expectedLength, file, preComplete = false, growable = growable)
 
     init {
         require(lengthValid(expectedLength)) { "SABR contentLength out of range: $expectedLength" }
+        require(!preComplete || !growable) { "A completed SABR buffer cannot be growable" }
     }
 
     private val lock = Object()
@@ -47,6 +50,10 @@ internal class SabrBuffer private constructor(
             intervals[0L] = expectedLength
             contiguous = expectedLength
             complete = true
+        } else if (growable) {
+            // A live broadcast has no final content length. Start with an empty spool and let
+            // RandomAccessFile extend it as each newly produced fragment arrives.
+            raf.setLength(0L)
         } else {
             // Preallocate (sparse where the filesystem supports it) so positional writes never extend.
             raf.setLength(expectedLength)
@@ -55,14 +62,14 @@ internal class SabrBuffer private constructor(
 
     /** Write [len] bytes from [src] at absolute [offset] in the reassembled stream. */
     fun writeAt(offset: Long, src: ByteArray, from: Int, len: Int) {
-        if (len <= 0 || offset < 0 || offset >= expectedLength) return
+        if (len <= 0 || offset < 0 || (!growable && offset >= expectedLength)) return
         synchronized(lock) {
             if (closed || error != null) return
             // Clamp to the declared contentLength instead of dropping: a final segment that overshoots
             // (padding / muxer slack / a contentLength a few bytes under the true segment sum) writes
             // its in-range prefix — the real file tail — so coverage reaches contentLength and the drain
             // completes. Dropping the whole segment left the tail permanently uncovered.
-            val writeLen = minOf(len.toLong(), expectedLength - offset).toInt()
+            val writeLen = if (growable) len else minOf(len.toLong(), expectedLength - offset).toInt()
             if (writeLen <= 0) return
             val end = offset + writeLen
             try {
@@ -80,6 +87,7 @@ internal class SabrBuffer private constructor(
     }
 
     fun markComplete() = synchronized(lock) { complete = true; lock.notifyAll() }
+    fun isComplete(): Boolean = synchronized(lock) { complete }
     fun markError(message: String) = synchronized(lock) { if (error == null) error = message; lock.notifyAll() }
 
     /** Wake waiters WITHOUT changing state — a seek-session finished its tail; readers re-evaluate. */
@@ -120,7 +128,7 @@ internal class SabrBuffer private constructor(
     fun failed(): Boolean = synchronized(lock) { error != null }
 
     /** Whether the WHOLE stream is covered from 0 (the spool replay-cache retention condition). */
-    fun completeFromZero(): Boolean = synchronized(lock) { contiguous >= expectedLength }
+    fun completeFromZero(): Boolean = synchronized(lock) { !growable && contiguous >= expectedLength }
 
     /** Whether [position] lies inside a covered interval. */
     fun coveredAt(position: Long): Boolean = synchronized(lock) { coveredAtLocked(position) }
@@ -260,6 +268,7 @@ internal class SabrBuffer private constructor(
         fun lengthValid(len: Long): Boolean = len in 1..MAX_BUFFER_BYTES
 
         /** A read-only buffer over an already-COMPLETE spool file (the replay cache) — no session. */
-        fun completeFrom(file: File, length: Long): SabrBuffer = SabrBuffer(length, file, preComplete = true)
+        fun completeFrom(file: File, length: Long): SabrBuffer =
+            SabrBuffer(length, file, preComplete = true, growable = false)
     }
 }

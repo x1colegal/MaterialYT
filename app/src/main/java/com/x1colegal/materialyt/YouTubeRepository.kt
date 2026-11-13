@@ -21,12 +21,13 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.CountDownLatch
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
+import java.time.Instant
 import android.os.SystemClock
 import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlin.math.roundToInt
 
-data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L, val short: Boolean = false, val setVideoId: String = "", val musicVideo: Boolean = false)
+data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L, val short: Boolean = false, val setVideoId: String = "", val musicVideo: Boolean = false, val upcoming: Boolean = false, val upcomingText: String = "")
 data class MusicCategory(val title: String, val browseId: String, val params: String = "")
 data class MusicHomeSection(
     val title: String,
@@ -60,21 +61,40 @@ data class PlaylistPage(
     val continuation: String? = null,
 )
 data class CanonicalVideoMetadata(val title: String, val author: String)
-data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null)
+data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null, val isLive: Boolean = false)
+data class LiveChatMessage(
+    val id: String,
+    val authorName: String,
+    val authorAvatar: String,
+    val message: String,
+    val timestampUsec: Long = 0L,
+    val isModerator: Boolean = false,
+    val isOwner: Boolean = false,
+    val isSponsor: Boolean = false,
+    val superChatAmount: String? = null,
+)
+data class LiveChatPage(
+    val messages: List<LiveChatMessage>,
+    val nextContinuation: String?,
+    val pollIntervalMs: Long = 3000L,
+)
 data class SabrFormat(
     val itag: Int,
     val mimeType: String,
     val codec: String,
+    val width: Int,
     val height: Int,
     val fps: Int,
     val bitrate: Int,
+    val audioChannels: Int,
     val contentLength: Long,
     val lastModified: Long,
     val xtags: String,
     val audio: Boolean,
     val originalAudio: Boolean = false,
     val audioTrackName: String = "",
-    val audioTrackId: String = ""
+    val audioTrackId: String = "",
+    val targetDurationMs: Long = 0L,
 )
 data class SabrPlaybackInfo(
     val videoId: String,
@@ -92,6 +112,9 @@ data class SabrPlaybackInfo(
     val attestationUrl: String,
     val poTokenVisitorData: String,
     val poTokenStreamingBinding: String,
+    val heartbeatToken: String,
+    val heartbeatServerData: String,
+    val heartbeatIntervalMs: Long,
     val durationMs: Long,
     val formats: List<SabrFormat>
 )
@@ -107,7 +130,7 @@ data class NativeChannelPage(
 )
 data class AccountSearchEntry(val text: String, val feedbackToken: String? = null)
 data class DescriptionLinkTarget(val start: Int, val end: Int, val target: String)
-data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "", val descriptionLinks: List<DescriptionLinkTarget> = emptyList())
+data class VideoDetails(val title: String, val author: String, val authorUrl: String = "", val authorAvatar: String = "", val viewCount: Long = 0L, val durationSeconds: Long = 0L, val likeText: String = "", val publishedDate: String = "", val description: String = "", val descriptionLinks: List<DescriptionLinkTarget> = emptyList(), val isLive: Boolean = false, val isUpcoming: Boolean = false, val scheduledStartTimeMs: Long = 0L, val concurrentViewers: Long = -1L)
 enum class VideoRating { NONE, LIKE, DISLIKE }
 data class VideoInteractionState(
     val rating: VideoRating = VideoRating.NONE,
@@ -206,21 +229,67 @@ object YouTubeRepository {
     private val playerJavaScriptCache = mutableMapOf<String, String>()
     private val nChallengeCache = mutableMapOf<String, String>()
     private val videoDetailsCache = mutableMapOf<String, VideoDetails>()
+    private val liveChatSendParamsCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val channelNameCache = mutableMapOf<String, String>()
     private val canonicalMetadataCache = mutableMapOf<String, CanonicalVideoMetadata>()
     fun videoDetails(videoId: String): VideoDetails? = synchronized(videoDetailsCache) { videoDetailsCache[videoId] }
-    fun canonicalVideoMetadata(videoId: String): CanonicalVideoMetadata? {
+
+    private fun cachePlayerLiveDetails(videoId: String, response: JSONObject) {
+        val details = response.optJSONObject("videoDetails") ?: return
+        val liveDetails = response.optJSONObject("microformat")
+            ?.optJSONObject("playerMicroformatRenderer")
+            ?.optJSONObject("liveBroadcastDetails")
+        val isLiveNow = if (liveDetails?.has("isLiveNow") == true) {
+            liveDetails.optBoolean("isLiveNow")
+        } else {
+            details.optBoolean("isLive") && !details.optBoolean("isPostLiveDvr")
+        }
+        val offlineSlateStartMs = response.optJSONObject("playabilityStatus")
+            ?.optJSONObject("liveStreamability")
+            ?.optJSONObject("liveStreamabilityRenderer")
+            ?.optJSONObject("offlineSlate")
+            ?.optJSONObject("liveStreamOfflineSlateRenderer")
+            ?.optString("scheduledStartTime")
+            ?.toLongOrNull()?.times(1_000L) ?: 0L
+        val scheduledStartTimeMs = liveDetails?.optString("startTimestamp")
+            ?.takeIf(String::isNotBlank)
+            ?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+            ?.takeIf { it > 0L }
+            ?: offlineSlateStartMs
+        val isOffline = response.optJSONObject("playabilityStatus")?.optString("status") == "LIVE_STREAM_OFFLINE"
+        val isUpcoming = !isLiveNow && (details.optBoolean("isUpcoming") || isOffline)
+        val concurrentViewers = liveDetails?.optString("concurrentViewers")?.toLongOrNull() ?: -1L
+        synchronized(videoDetailsCache) {
+            val current = videoDetailsCache[videoId] ?: VideoDetails(
+                title = details.optString("title").ifBlank { "Video" },
+                author = details.optString("author"),
+            )
+            videoDetailsCache[videoId] = current.copy(
+                isLive = isLiveNow,
+                isUpcoming = isUpcoming,
+                scheduledStartTimeMs = scheduledStartTimeMs,
+                concurrentViewers = concurrentViewers,
+            )
+        }
+        AppLog.event("player live state video=$videoId live=$isLiveNow upcoming=$isUpcoming startMs=$scheduledStartTimeMs")
+    }
+
+    fun canonicalVideoMetadata(videoId: String, forceRefresh: Boolean = false): CanonicalVideoMetadata? {
         if (videoId.length != 11) return null
-        synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId]?.let { return it } }
+        if (!forceRefresh) {
+            synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId]?.let { return it } }
+        }
         return runCatching {
             val origin = "https://www.youtube.com"
             val bootstrap = bootstrap(origin, "WEB")
-            val details = post(
+            val response = post(
                 "$origin/youtubei/v1/player?key=${bootstrap.key}&prettyPrint=false",
                 JSONObject().put("context", context("WEB", bootstrap.version))
                     .put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true),
                 origin,
-            ).optJSONObject("videoDetails")
+            )
+            cachePlayerLiveDetails(videoId, response)
+            val details = response.optJSONObject("videoDetails")
             details?.let {
                 CanonicalVideoMetadata(
                     title = it.optString("title").trim(),
@@ -238,14 +307,22 @@ object YouTubeRepository {
             }
         }.onFailure { AppLog.failure("canonical WEB Innertube metadata video=$videoId", it) }.getOrNull()
     }
-    fun seedVideoDetails(videoId: String, title: String, author: String, authorUrl: String = "", authorAvatar: String = "") {
+
+    fun refreshLiveStatus(videoId: String): VideoDetails? {
+        if (videoId.length != 11) return null
+        canonicalVideoMetadata(videoId, forceRefresh = true)
+        return videoDetails(videoId)
+    }
+    fun seedVideoDetails(videoId: String, title: String, author: String, authorUrl: String = "", authorAvatar: String = "", isUpcoming: Boolean = false) {
         if (videoId.isBlank()) return
         synchronized(videoDetailsCache) {
-            videoDetailsCache[videoId] = (videoDetailsCache[videoId] ?: VideoDetails(title, author)).copy(
+            val current = videoDetailsCache[videoId] ?: VideoDetails(title, author)
+            videoDetailsCache[videoId] = current.copy(
                 title = title,
                 author = author,
                 authorUrl = authorUrl,
                 authorAvatar = authorAvatar,
+                isUpcoming = if (isUpcoming) true else current.isUpcoming,
             )
         }
     }
@@ -966,8 +1043,13 @@ object YouTubeRepository {
     }
 
     fun channelPage(channelUrl: String, tab: String = "videos"): NativeChannelPage {
-        val base = channelUrl.substringBefore('?').trimEnd('/').removeSuffix("/videos").removeSuffix("/shorts")
-        val pageUrl = "$base/${if (tab == "shorts") "shorts" else "videos"}?hl=en"
+        val base = channelUrl.substringBefore('?').trimEnd('/')
+            .removeSuffix("/videos").removeSuffix("/shorts").removeSuffix("/streams").removeSuffix("/live")
+        val pageUrl = when (tab) {
+            "shorts" -> "$base/shorts?hl=en"
+            "live", "streams" -> "$base/streams?hl=en"
+            else -> "$base/videos?hl=en"
+        }
         val root = initialData(get(pageUrl))
         val metadata = findObject(root, "channelMetadataRenderer")?.optJSONObject("channelMetadataRenderer")
         val header = findObject(root, "pageHeaderRenderer")?.optJSONObject("pageHeaderRenderer")
@@ -983,7 +1065,25 @@ object YouTubeRepository {
         val description = metadata?.optString("description").orEmpty()
         val subscribers = findString(root, "subscriberCountText").orEmpty()
             .ifBlank { text(findObject(root, "subscriberCountText")) ?: "" }
-        val items = parseItems(root).filter { !it.channel && !it.playlist }.map { item ->
+        val upcomingItems = when (tab) {
+            "shorts" -> emptyList()
+            "live", "streams" -> runCatching {
+                parseItems(initialData(get("$base?hl=en"))).filter { it.upcoming }
+            }.getOrDefault(emptyList())
+            else -> {
+                val list = mutableListOf<FeedItem>()
+                runCatching {
+                    parseItems(initialData(get("$base/streams?hl=en"))).filter { it.upcoming }
+                }.getOrNull()?.let { list.addAll(it) }
+                runCatching {
+                    parseItems(initialData(get("$base?hl=en"))).filter { it.upcoming }
+                }.getOrNull()?.let { list.addAll(it) }
+                list.distinctBy { it.id }
+            }
+        }
+        val parsed = parseItems(root).filter { !it.channel && !it.playlist }
+        val allItems = (upcomingItems + parsed).filter { !it.channel && !it.playlist }
+        val items = allItems.map { item ->
             item.copy(
                 subtitle = item.subtitle.takeUnless { it == "Unknown channel" }.orEmpty().ifBlank { name },
                 channelThumbnail = item.channelThumbnail.ifBlank { avatar },
@@ -2194,6 +2294,7 @@ object YouTubeRepository {
         val firstError = response.optJSONObject("playabilityStatus")?.optString("reason")
             .takeUnless { it.isNullOrBlank() } ?: finalStatus
         AppLog.event("player client=$clientUsed status=$finalStatus video=$videoId")
+        cachePlayerLiveDetails(videoId, response)
 
         val cpn = response.optString("_materialytCpn").takeIf { it.isNotBlank() } ?: java.util.UUID.randomUUID().toString().replace("-", "").take(16)
         cachePlaybackTracking(videoId, response.optJSONObject("playbackTracking"), cpn, music)
@@ -2202,6 +2303,11 @@ object YouTubeRepository {
             error(firstError)
         }
         val detailsObj = response.optJSONObject("videoDetails")
+        val isLive = detailsObj?.optBoolean("isLive") == true && detailsObj?.optBoolean("isPostLiveDvr") != true
+        val concurrentViewers = response.optJSONObject("microformat")
+            ?.optJSONObject("playerMicroformatRenderer")
+            ?.optJSONObject("liveBroadcastDetails")
+            ?.optString("concurrentViewers")?.toLongOrNull() ?: -1L
         if (detailsObj != null) {
             val title = detailsObj.optString("title")
             val author = detailsObj.optString("author")
@@ -2209,12 +2315,17 @@ object YouTubeRepository {
             val views = detailsObj.optString("viewCount").toLongOrNull() ?: 0L
             val channelId = detailsObj.optString("channelId")
             synchronized(videoDetailsCache) {
+                val liveState = videoDetailsCache[videoId]
                 videoDetailsCache[videoId] = VideoDetails(
                     title = title,
                     author = author,
                     authorUrl = if (channelId.isNotBlank()) "https://www.youtube.com/channel/$channelId" else "",
                     viewCount = views,
-                    durationSeconds = length
+                    durationSeconds = length,
+                    isLive = isLive,
+                    isUpcoming = liveState?.isUpcoming == true,
+                    scheduledStartTimeMs = liveState?.scheduledStartTimeMs ?: 0L,
+                    concurrentViewers = concurrentViewers,
                 )
             }
         }
@@ -2222,12 +2333,18 @@ object YouTubeRepository {
         if (data == null) {
             error("YouTube returned no playable streams")
         }
-        val formats = mutableListOf<JSONObject>()
-        listOf("formats", "adaptiveFormats").forEach { key -> data.optJSONArray(key)?.let { array -> for (i in 0 until array.length()) array.optJSONObject(i)?.let(formats::add) } }
         val playerJsLazy by lazy {
             runCatching { playerJavaScript(videoId) }
                 .onFailure { AppLog.failure("player JavaScript client=$clientUsed video=$videoId", it) }
                 .getOrNull()
+        }
+
+        val formats = mutableListOf<JSONObject>()
+        val adaptiveArray = data.optJSONArray("adaptiveFormats")
+        if (adaptiveArray != null && adaptiveArray.length() > 0) {
+            for (i in 0 until adaptiveArray.length()) adaptiveArray.optJSONObject(i)?.let(formats::add)
+        } else {
+            data.optJSONArray("formats")?.let { array -> for (i in 0 until array.length()) array.optJSONObject(i)?.let(formats::add) }
         }
         val streams = formats.mapNotNull { item ->
             val rawUrl = item.optString("url").takeIf { it.startsWith("http") } ?: run {
@@ -2271,10 +2388,17 @@ object YouTubeRepository {
     /** Fetches a native WEB SABR session. Direct URLs are intentionally not required here. */
     fun sabrPlaybackInfo(videoId: String, music: Boolean = false): SabrPlaybackInfo {
         val response = webPoPlayer(videoId)
+        cachePlayerLiveDetails(videoId, response)
         val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
         check(status == "OK") { reason.ifBlank { "YouTube WEB SABR player returned $status" } }
-        AppLog.event("SABR player selected WEB video=$videoId")
+        val videoDetails = response.optJSONObject("videoDetails")
+        val liveDetails = response.optJSONObject("microformat")
+            ?.optJSONObject("playerMicroformatRenderer")
+            ?.optJSONObject("liveBroadcastDetails")
+        val isLive = (liveDetails?.optBoolean("isLiveNow") == true) ||
+            (videoDetails?.optBoolean("isLive") == true && videoDetails?.optBoolean("isPostLiveDvr") != true)
+        AppLog.event("SABR player selected WEB video=$videoId isLive=$isLive")
         PlaybackLoadStatus.showInitial(videoId, "Validating stream configuration…")
         val streaming = response.optJSONObject("streamingData")
             ?: error("YouTube SABR player returned no streamingData")
@@ -2297,13 +2421,19 @@ object YouTubeRepository {
             else solveNChallenge(videoId, unresolvedUrl, playerJavaScript(videoId), false)
         // SABR's media endpoint validates the playback session independently from /player.
         // Match the browser request by carrying the same CPN and low-latency response flag.
-        val serverUrl = solvedUrl.toHttpUrlOrNull()?.newBuilder()
+        // SabrStream keeps an active broadcast URL byte-for-byte as returned by /player and sends
+        // its GVS proof only in StreamerContext. Unlike VOD, yt_live_broadcast rejects a duplicated
+        // URL-level pot/cpn before parsing the protobuf body (zero-byte HTTP 403). rn is added later
+        // by the session for every POST.
+        val serverUrl = if (isLive) solvedUrl else solvedUrl.toHttpUrlOrNull()?.newBuilder()
             ?.setQueryParameter("alr", "yes")
             ?.setQueryParameter("cpn", cpn)
             ?.setQueryParameter("pot", poToken)
             ?.build()?.toString() ?: solvedUrl
+        AppLog.event("SABR endpoint video=$videoId isLive=$isLive serverUrl=$serverUrl")
         PlaybackLoadStatus.showInitial(videoId, "Reading available formats…")
         val formats = mutableListOf<SabrFormat>()
+        AppLog.event("SABR adaptive raw count=${streaming.optJSONArray("adaptiveFormats")?.length()}")
         streaming.optJSONArray("adaptiveFormats")?.let { array ->
             for (index in 0 until array.length()) {
                 val item = array.optJSONObject(index) ?: continue
@@ -2316,36 +2446,43 @@ object YouTubeRepository {
                 val trackName = audioTrack?.optString("displayName").orEmpty()
                     .ifBlank { audioTrack?.optString("id").orEmpty() }
                 val xtags = item.optString("xtags")
-                val contentLength = item.optString("contentLength").toLongOrNull() ?: 0L
-                // The positional SABR reassembler needs a finite target length. Do not expose
-                // live/unknown-length entries as selectable VOD qualities and crash at playback.
+                val rawContentLength = item.optString("contentLength").toLongOrNull() ?: 0L
+                // Active broadcasts have no finite length. The live session never uses this value
+                // as a completion boundary; it only keeps the growing DataSource addressable.
+                val contentLength = if (isLive) 4L * 1024 * 1024 * 1024 else if (rawContentLength > 0L) rawContentLength else 0L
                 if (contentLength <= 0L) continue
                 formats += SabrFormat(
                     itag = itag,
                     mimeType = mime.substringBefore(';'),
                     codec = codec,
+                    width = item.optInt("width"),
                     height = item.optInt("height"),
                     fps = item.optInt("fps"),
                     bitrate = item.optInt("bitrate"),
+                    audioChannels = item.optInt("audioChannels"),
                     contentLength = contentLength,
                     lastModified = item.optString("lastModified").toLongOrNull() ?: 0L,
                     xtags = xtags,
                     audio = audio,
                     originalAudio = isOriginalAudioTrack(audioTrack, trackName, xtags),
                     audioTrackName = trackName,
-                    audioTrackId = audioTrack?.optString("id").orEmpty()
+                    audioTrackId = audioTrack?.optString("id").orEmpty(),
+                    targetDurationMs = (item.optDouble("targetDurationSec", 0.0) * 1_000.0).toLong()
                 )
             }
         }
         if (formats.none { it.audio } || formats.none { !it.audio }) {
             error("YouTube SABR response did not expose separate audio and video formats")
         }
-        val durationMs = response.optJSONObject("videoDetails")?.optString("lengthSeconds")
+        val durationMs = if (isLive) 0L else response.optJSONObject("videoDetails")?.optString("lengthSeconds")
             ?.toLongOrNull()?.times(1_000L) ?: 0L
         response.optJSONObject("videoDetails")?.let { details ->
             val channelId = details.optString("channelId")
             val microformat = response.optJSONObject("microformat")?.optJSONObject("playerMicroformatRenderer")
+            val concurrentViewers = microformat?.optJSONObject("liveBroadcastDetails")
+                ?.optString("concurrentViewers")?.toLongOrNull() ?: -1L
             synchronized(videoDetailsCache) {
+                val liveState = videoDetailsCache[videoId]
                 videoDetailsCache[videoId] = VideoDetails(
                     title = details.optString("title").ifBlank { "Video" },
                     author = details.optString("author"),
@@ -2356,6 +2493,10 @@ object YouTubeRepository {
                     publishedDate = microformat?.optString("publishDate").orEmpty()
                         .ifBlank { microformat?.optString("uploadDate").orEmpty() },
                     description = details.optString("shortDescription"),
+                    isLive = isLive,
+                    isUpcoming = liveState?.isUpcoming == true,
+                    scheduledStartTimeMs = liveState?.scheduledStartTimeMs ?: 0L,
+                    concurrentViewers = concurrentViewers,
                 )
             }
         }
@@ -2372,7 +2513,167 @@ object YouTubeRepository {
             response.optString("_materialytAtrUrl"),
             response.optString("_materialytPoTokenVisitorData"),
             response.optString("_materialytPoTokenStreamingBinding"),
+            response.optJSONObject("heartbeatParams")?.optString("heartbeatToken").orEmpty(),
+            response.optJSONObject("heartbeatParams")?.optString("heartbeatServerData").orEmpty(),
+            response.optJSONObject("heartbeatParams")?.optString("intervalMilliseconds")
+                ?.toLongOrNull()?.takeIf { it > 0L } ?: 10_000L,
             durationMs, formats)
+    }
+
+    /** Keeps a WEB live/premiere SABR broadcast session alive, matching the browser heartbeat flow. */
+    fun checkSabrLiveHeartbeat(
+        info: SabrPlaybackInfo,
+        heartbeatServerData: String?,
+    ): String? {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val body = JSONObject()
+            .put("context", context("WEB", info.clientVersion.ifBlank { bootstrap.version }))
+            .put("heartbeatRequestParams", JSONObject().put(
+                "heartbeatChecks",
+                org.json.JSONArray().put("HEARTBEAT_CHECK_TYPE_LIVE_STREAM_STATUS"),
+            ))
+            .put("videoId", info.videoId)
+        info.heartbeatToken.takeIf(String::isNotBlank)?.let { body.put("heartbeatToken", it) }
+        heartbeatServerData?.takeIf(String::isNotBlank)?.let { body.put("heartbeatServerData", it) }
+        val response = postAuthenticatedClient(
+            "$origin/youtubei/v1/player/heartbeat?key=${bootstrap.key}&prettyPrint=false",
+            body,
+            origin,
+            info.clientId.toString(),
+            info.clientVersion.ifBlank { bootstrap.version },
+            info.userAgent,
+        )
+        val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        AppLog.event("SABR live heartbeat video=${info.videoId} status=${status.ifBlank { "unknown" }}")
+        return response.optString("heartbeatServerData").takeIf(String::isNotBlank)
+    }
+
+    fun liveChatContinuation(videoId: String): String? {
+        return runCatching {
+            val origin = "https://www.youtube.com"
+            val bootstrap = bootstrap(origin, "WEB")
+            val data = post(
+                "$origin/youtubei/v1/next?key=${bootstrap.key}&prettyPrint=false",
+                JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId),
+                origin
+            )
+            findObject(data, "sendLiveChatMessageEndpoint")
+                ?.optJSONObject("sendLiveChatMessageEndpoint")
+                ?.optString("params")?.takeIf(String::isNotBlank)
+                ?.let { liveChatSendParamsCache[videoId] = it }
+            val renderer = findObject(data, "liveChatRenderer")?.optJSONObject("liveChatRenderer")
+            liveChatContinuationFrom(renderer?.optJSONArray("continuations"))
+        }.getOrNull()
+    }
+
+    fun liveChatMessages(videoId: String, continuationToken: String): LiveChatPage {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val data = post(
+            "$origin/youtubei/v1/live_chat/get_live_chat?key=${bootstrap.key}&prettyPrint=false",
+            JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", continuationToken),
+            origin
+        )
+        findObject(data, "sendLiveChatMessageEndpoint")
+            ?.optJSONObject("sendLiveChatMessageEndpoint")
+            ?.optString("params")?.takeIf(String::isNotBlank)
+            ?.let { liveChatSendParamsCache[videoId] = it }
+        val lcc = data.optJSONObject("continuationContents")?.optJSONObject("liveChatContinuation")
+        val actions = lcc?.optJSONArray("actions") ?: JSONArray()
+        val messages = mutableListOf<LiveChatMessage>()
+        for (i in 0 until actions.length()) {
+            val a = actions.optJSONObject(i) ?: continue
+            val item = a.optJSONObject("addChatItemAction")?.optJSONObject("item") ?: continue
+            val r = item.optJSONObject("liveChatTextMessageRenderer")
+                ?: item.optJSONObject("liveChatPaidMessageRenderer")
+                ?: continue
+            val id = r.optString("id").ifBlank { UUID.randomUUID().toString() }
+            val author = r.optJSONObject("authorName")?.optString("simpleText").orEmpty()
+            val thumbnails = r.optJSONObject("authorPhoto")?.optJSONArray("thumbnails")
+            val avatar = thumbnails?.let { it.optJSONObject(it.length() - 1)?.optString("url") }.orEmpty()
+            val runs = r.optJSONObject("message")?.optJSONArray("runs") ?: JSONArray()
+            val msgBuilder = StringBuilder()
+            for (j in 0 until runs.length()) {
+                val runObj = runs.optJSONObject(j) ?: continue
+                msgBuilder.append(runObj.optString("text"))
+            }
+            val msg = msgBuilder.toString()
+            val timestampUsec = r.optString("timestampUsec").toLongOrNull() ?: 0L
+            val superChat = r.optJSONObject("purchaseAmountText")?.optString("simpleText")
+            val badges = r.optJSONArray("authorBadges") ?: JSONArray()
+            var isMod = false
+            var isOwner = false
+            var isSponsor = false
+            for (b in 0 until badges.length()) {
+                val badge = badges.optJSONObject(b)?.optJSONObject("liveChatAuthorBadgeRenderer") ?: continue
+                val tooltip = badge.optString("tooltip").lowercase()
+                val iconType = badge.optJSONObject("customThumbnail")?.optString("url").orEmpty()
+                if (tooltip.contains("moderator")) isMod = true
+                if (tooltip.contains("owner")) isOwner = true
+                if (tooltip.contains("member") || tooltip.contains("sponsor") || iconType.isNotBlank()) isSponsor = true
+            }
+            messages += LiveChatMessage(
+                id = id,
+                authorName = author,
+                authorAvatar = avatar,
+                message = msg,
+                timestampUsec = timestampUsec,
+                isModerator = isMod,
+                isOwner = isOwner,
+                isSponsor = isSponsor,
+                superChatAmount = superChat,
+            )
+        }
+        val conts = lcc?.optJSONArray("continuations")
+        var nextCont: String? = null
+        var timeoutMs = 3000L
+        if (conts != null) {
+            nextCont = liveChatContinuationFrom(conts)
+            for (index in 0 until conts.length()) {
+                val cObj = conts.optJSONObject(index) ?: continue
+                val inner = cObj.optJSONObject("invalidationContinuationData")
+                    ?: cObj.optJSONObject("timedContinuationData")
+                    ?: continue
+                val to = inner.optLong("timeoutMs")
+                if (to > 0L) { timeoutMs = to.coerceIn(1000L, 8000L); break }
+            }
+        }
+        return LiveChatPage(messages, nextCont, timeoutMs)
+    }
+
+    fun sendLiveChatMessage(videoId: String, text: String): Boolean {
+        if (!signedIn() || text.isBlank()) return false
+        return runCatching {
+            val origin = "https://www.youtube.com"
+            val bootstrap = bootstrap(origin, "WEB")
+            val params = liveChatSendParamsCache[videoId] ?: run {
+                // One recovery fetch only. Normal sends reuse the endpoint collected while opening
+                // chat, avoiding a multi-megabyte /next request that can starve live playback.
+                liveChatContinuation(videoId)
+                liveChatSendParamsCache[videoId]
+            } ?: return false
+            val body = JSONObject()
+                .put("context", context("WEB", bootstrap.version))
+                .put("params", params)
+                .put("clientMessageId", UUID.randomUUID().toString())
+                .put("richMessage", JSONObject().put("textSegments", JSONArray().put(JSONObject().put("text", text))))
+            val response = post("$origin/youtubei/v1/live_chat/send_message?key=${bootstrap.key}", body, origin)
+            response.optJSONObject("error") == null
+        }.getOrDefault(false)
+    }
+
+    private fun liveChatContinuationFrom(continuations: JSONArray?): String? {
+        if (continuations == null) return null
+        // Invalidation/timed continuations advance the live edge. Reload is only a fallback and may
+        // point at the initial chat page again.
+        for (key in listOf("invalidationContinuationData", "timedContinuationData", "reloadContinuationData")) {
+            for (index in 0 until continuations.length()) {
+                continuations.optJSONObject(index)?.optJSONObject(key)
+                    ?.optString("continuation")?.takeIf(String::isNotBlank)?.let { return it }
+            }
+        }
+        return null
     }
 
     private fun playerJavaScript(videoId: String): String {
@@ -2539,7 +2840,7 @@ object YouTubeRepository {
                 else -> "visitor"
             }}"
         )
-        val token = WebPoTokenProvider.get(
+        var token = WebPoTokenProvider.get(
             videoId,
             requestedVisitor,
             streamingBinding,
@@ -2625,6 +2926,13 @@ object YouTubeRepository {
                 }.onFailure { AppLog.failure("WEB playback attestation video=$videoId", it) }
                 response.put("_materialytAtrUrl", atrUrl)
             }
+        if (response.optJSONObject("videoDetails")?.optBoolean("isLive") == true) {
+            // Keep the GVS proof produced by the SAME BotGuard runtime that supplied the /player
+            // proof and was accepted by playback attestation above. Rebuilding BotGuard here made
+            // the endpoint, player response and GVS proof belong to different integrity sessions;
+            // live then started at protection=2, served only a tiny grace window and escalated to 3.
+            AppLog.event("WEB live GVS PoToken retained from attested player session video=$videoId")
+        }
         val streaming = response.optJSONObject("streamingData")
         val sabrUrl = streaming?.optString("serverAbrStreamingUrl").orEmpty()
         if (sabrUrl.isNotBlank()) {
@@ -2790,18 +3098,19 @@ object YouTubeRepository {
         return tracking
     }
 
-    fun refreshVideoDetails(videoId: String): VideoDetails {
+    fun refreshVideoDetails(videoId: String, forcePlayerRefresh: Boolean = false): VideoDetails {
         val origin = "https://www.youtube.com"
         val bootstrap = bootstrap(origin, "WEB")
         val response = post("$origin/youtubei/v1/next?key=${bootstrap.key}",
             JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId), origin)
-        val current = videoDetails(videoId) ?: VideoDetails("Video", "")
         val primary = findObject(response, "videoPrimaryInfoRenderer")?.optJSONObject("videoPrimaryInfoRenderer")
         val secondary = findObject(response, "videoSecondaryInfoRenderer")?.optJSONObject("videoSecondaryInfoRenderer")
         // NEXT is localized. A native player response keeps the uploader's primary title,
         // description and channel name in videoDetails even when the UI language differs.
         val responseDetails = response.optJSONObject("videoDetails")
-        val canonical = canonicalVideoMetadata(videoId)
+        val isCachedUpcoming = synchronized(videoDetailsCache) { videoDetailsCache[videoId]?.isUpcoming == true }
+        val canonical = canonicalVideoMetadata(videoId, forceRefresh = forcePlayerRefresh || isCachedUpcoming)
+        val current = videoDetails(videoId) ?: VideoDetails("Video", "")
         // player.videoDetails contains the primary metadata. The matching microformat/NEXT
         // text may be translated for the account locale, so never let it replace these fields.
         val responseTitle = canonical?.title?.trim().orEmpty()
@@ -3237,12 +3546,24 @@ object YouTubeRepository {
     }
 
     fun mediaHeaders(streamUrl: String? = null): Map<String, String> = buildMap {
-        val client = streamUrl?.toHttpUrlOrNull()?.queryParameter("c")?.uppercase()
+        val httpUrl = streamUrl?.toHttpUrlOrNull()
+        val queryClient = httpUrl?.queryParameter("c")?.uppercase()
+        val pathClient = when {
+            streamUrl?.contains("/c/WEB") == true -> "WEB"
+            streamUrl?.contains("/c/IOS") == true -> "IOS"
+            streamUrl?.contains("/c/ANDROID") == true -> "ANDROID"
+            else -> null
+        }
+        val client = queryClient ?: pathClient ?: "WEB"
         put("User-Agent", when (client) {
             "IOS" -> "com.google.ios.youtube/21.03.2 (iPhone16,2; U; CPU iOS 18_7_2 like Mac OS X)"
-            "WEB", "MWEB" -> UA
-            else -> "com.google.visionos.youtube/1.04(RealityDevice17,1; U; CPU visionOS 26_6_0 like Mac OS X; US)"
+            "ANDROID" -> "com.google.android.youtube/19.44.38 (Linux; U; Android 14; pt_BR; SM-S921B; Build/UP1A.231005.007; Cronet/131.0.6778.39)"
+            else -> WEB_PLAYER_UA
         })
+        put("Origin", "https://www.youtube.com")
+        put("Referer", "https://www.youtube.com/")
+        val cookie = cookies("https://www.youtube.com")
+        if (cookie.isNotBlank()) put("Cookie", cookie)
     }
 
     fun postComment(videoId: String, text: String) {
@@ -3848,9 +4169,9 @@ object YouTubeRepository {
                  rendererType == "musicCardShelfRenderer" ||
                  (renderer.optString("videoId").isBlank() && !playlistRenderer))
             val channelRenderer = rendererType.contains("channel", true) || isMusicArtistOrChannel
-            val lockupVideoId = if (rendererType == "lockupViewModel" && renderer.optString("contentType").let {
-                    it == "LOCKUP_CONTENT_TYPE_VIDEO" || it == "LOCKUP_CONTENT_TYPE_SHORT"
-                }) renderer.optString("contentId").takeIf { it.length == 11 } else null
+            val lockupVideoId = if (rendererType == "lockupViewModel" && lockupPlaylistId == null) {
+                renderer.optString("contentId").takeIf { it.length == 11 }
+            } else null
             val videoId = if (playlistRenderer || channelRenderer) "" else renderer.optString("videoId")
                 .ifBlank { lockupVideoId.orEmpty() }
                 .ifBlank { findString(renderer, "videoId").orEmpty() }
@@ -3988,16 +4309,60 @@ object YouTubeRepository {
                 authorChannelId.startsWith("UC") -> "https://www.youtube.com/channel/$authorChannelId"
                 else -> ""
             }
+            val upcomingEventData = renderer.optJSONObject("upcomingEventData")
+            val isUpcomingRenderer = upcomingEventData != null ||
+                renderer.optJSONArray("thumbnailOverlays")?.let { overlays ->
+                    (0 until overlays.length()).any {
+                        val overlay = overlays.optJSONObject(it)
+                        val timeStatus = overlay?.optJSONObject("thumbnailOverlayTimeStatusRenderer")
+                        timeStatus?.optString("style")?.equals("UPCOMING", ignoreCase = true) == true ||
+                            timeStatus?.optJSONObject("text")?.let(::text)?.contains("Upcoming", ignoreCase = true) == true ||
+                            timeStatus?.optJSONObject("text")?.let(::text)?.contains("Premiere", ignoreCase = true) == true
+                    }
+                } == true ||
+                renderer.optJSONObject("contentImage")?.optJSONObject("thumbnailViewModel")?.optJSONArray("overlays")?.let { overlays ->
+                    (0 until overlays.length()).any { oIdx ->
+                        overlays.optJSONObject(oIdx)?.optJSONObject("thumbnailBottomOverlayViewModel")
+                            ?.optJSONArray("badges")?.let { badges ->
+                                (0 until badges.length()).any { bIdx ->
+                                    val badge = badges.optJSONObject(bIdx)?.optJSONObject("thumbnailBadgeViewModel")
+                                    val badgeText = badge?.optString("text").orEmpty()
+                                    badgeText.equals("Upcoming", ignoreCase = true) || badgeText.contains("Premiere", ignoreCase = true)
+                                }
+                            } == true
+                    }
+                } == true
+            val metadataRowText = renderer.optJSONObject("metadata")?.optJSONObject("lockupMetadataViewModel")
+                ?.optJSONObject("metadata")?.optJSONObject("contentMetadataViewModel")
+                ?.optJSONArray("metadataRows")?.let { rows ->
+                    (0 until rows.length()).asSequence().mapNotNull { rIdx ->
+                        rows.optJSONObject(rIdx)?.optJSONArray("metadataParts")?.let { parts ->
+                            (0 until parts.length()).asSequence().mapNotNull { pIdx ->
+                                val partText = text(parts.optJSONObject(pIdx)?.optJSONObject("text"))
+                                partText?.takeIf { it.contains("Premiere", ignoreCase = true) || it.contains("Scheduled", ignoreCase = true) }
+                            }.firstOrNull()
+                        }
+                    }.firstOrNull()
+                }
+            val upcomingEventText = text(upcomingEventData?.opt("upcomingEventText"))
+                ?: deepText(upcomingEventData, "text")
+                ?: metadataRowText.orEmpty()
+            val isUpcoming = isUpcomingRenderer || metadataRowText != null ||
+                synchronized(videoDetailsCache) { videoDetailsCache[id]?.isUpcoming == true }
             val item = FeedItem(id, title, subtitle, thumbnail, thumbWidth, thumbHeight, channelThumbnail, url, isPlaylist, isChannel,
                 channelUrl = resolvedChannelUrl,
                 resumePositionMs = resumePositionMs,
-                musicVideo = musicVideoType.isNotBlank() && musicVideoType != "MUSIC_VIDEO_TYPE_ATV")
+                musicVideo = musicVideoType.isNotBlank() && musicVideoType != "MUSIC_VIDEO_TYPE_ATV",
+                upcoming = isUpcoming,
+                upcomingText = upcomingEventText)
             if (!isPlaylist && !isChannel) synchronized(videoDetailsCache) {
-                videoDetailsCache[id] = (videoDetailsCache[id] ?: VideoDetails(title, subtitle)).copy(
+                val current = videoDetailsCache[id] ?: VideoDetails(title, subtitle)
+                videoDetailsCache[id] = current.copy(
                     title = title,
                     author = subtitle,
                     authorUrl = resolvedChannelUrl,
                     authorAvatar = channelThumbnail,
+                    isUpcoming = if (isUpcoming) true else current.isUpcoming,
                 )
             }
             val existing = output[id]

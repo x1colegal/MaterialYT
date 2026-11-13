@@ -39,6 +39,7 @@ internal object SabrUmp {
     }.getOrElse { "undecodable size=${payload.size}" }
 
     class Part(val type: Int, val payload: ByteArray)
+    class ParseResult(val parts: List<Part>, val consumedBytes: Int)
 
     /** Read a UMP variable-length integer at [pos] -> (value, bytesConsumed). */
     fun readVarint(buf: ByteArray, pos: Int): Pair<Long, Int> {
@@ -70,8 +71,12 @@ internal object SabrUmp {
         else -> 5
     }
 
-    /** Split a response body into its UMP parts. Stops cleanly on truncation (a partial trailing frame). */
-    fun parse(buf: ByteArray): List<Part> {
+    /**
+     * Split all COMPLETE UMP parts currently available. A live HTTP response can remain open after
+     * MEDIA_END, so callers need the exact consumed prefix and must retain an incomplete trailing
+     * frame until the next network read.
+     */
+    fun parseComplete(buf: ByteArray): ParseResult {
         val parts = ArrayList<Part>()
         var p = 0
         while (p < buf.size) {
@@ -81,10 +86,14 @@ internal object SabrUmp {
             val (type, ts) = readVarint(buf, p); p += ts
             if (p >= buf.size || p + varintWidth(buf[p].toInt() and 0xff) > buf.size) break
             val (size, ss) = readVarint(buf, p); p += ss
-            val end = (p + size.toInt()).coerceAtMost(buf.size)
+            if (size > Int.MAX_VALUE || size > buf.size - p) break
+            val end = p + size.toInt()
             parts.add(Part(type.toInt(), buf.copyOfRange(p, end)))
             p = end
         }
-        return parts
+        return ParseResult(parts, p)
     }
+
+    /** Split a complete response body into UMP parts. */
+    fun parse(buf: ByteArray): List<Part> = parseComplete(buf).parts
 }

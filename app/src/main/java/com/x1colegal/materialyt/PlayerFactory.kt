@@ -41,8 +41,8 @@ object PlayerFactory {
                 .setBufferDurationsMs(
                     12_000,
                     maxBufferMs,
-                    400,
-                    800,
+                    1_500,
+                    2_500,
                 )
                 .setTargetBufferBytes(48 * 1024 * 1024)
                 .setPrioritizeTimeOverSizeThresholds(true)

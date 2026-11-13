@@ -2,6 +2,19 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.8] - 2026-11-13
+
+### Added
+- Add a dedicated scheduled-event screen for premieres and scheduled live streams, with the event thumbnail, an English countdown, exact local start date and time, and a progressive thumbnail reveal during the final 24 hours.
+- Show confirmed live-chat participation states for signed-out, subscribers-only, members-only, disabled, unavailable, and read-only chats.
+
+### Fixed
+- Replace unresolved and localized upcoming labels such as `Scheduled for DATE_PLACEHOLDER` with stable English UI.
+- Prevent ExoPlayer controls and video output from appearing behind a scheduled event that has not started.
+- Avoid transient relative publication labels such as `Started streaming 20 minutes ago` before the canonical fixed publication date is available.
+- Prevent false live-chat errors while chat access is still being resolved.
+- Detect completed live broadcasts as VODs, retain their duration and seeking behavior, and avoid exposing writable live chat after the broadcast ends.
+
 ## [6.7] - 2026-11-13
 
 ### Fixed

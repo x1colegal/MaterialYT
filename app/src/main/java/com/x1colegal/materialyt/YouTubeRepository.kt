@@ -14,6 +14,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicLong
@@ -60,7 +61,7 @@ data class PlaylistPage(
     val thumbnail: String = "",
     val continuation: String? = null,
 )
-data class CanonicalVideoMetadata(val title: String, val author: String)
+data class CanonicalVideoMetadata(val title: String, val author: String, val publishedDate: String = "")
 data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null, val isLive: Boolean = false)
 data class LiveChatMessage(
     val id: String,
@@ -77,7 +78,10 @@ data class LiveChatPage(
     val messages: List<LiveChatMessage>,
     val nextContinuation: String?,
     val pollIntervalMs: Long = 3000L,
+    val participationStatus: String? = null,
+    val canSend: Boolean = false,
 )
+data class LiveChatAccess(val status: String? = null, val canSend: Boolean = false)
 data class SabrFormat(
     val itag: Int,
     val mimeType: String,
@@ -230,6 +234,7 @@ object YouTubeRepository {
     private val nChallengeCache = mutableMapOf<String, String>()
     private val videoDetailsCache = mutableMapOf<String, VideoDetails>()
     private val liveChatSendParamsCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val liveChatAccessCache = java.util.concurrent.ConcurrentHashMap<String, LiveChatAccess>()
     private val channelNameCache = mutableMapOf<String, String>()
     private val canonicalMetadataCache = mutableMapOf<String, CanonicalVideoMetadata>()
     fun videoDetails(videoId: String): VideoDetails? = synchronized(videoDetailsCache) { videoDetailsCache[videoId] }
@@ -290,10 +295,14 @@ object YouTubeRepository {
             )
             cachePlayerLiveDetails(videoId, response)
             val details = response.optJSONObject("videoDetails")
+            val microformat = response.optJSONObject("microformat")
+                ?.optJSONObject("playerMicroformatRenderer")
             details?.let {
                 CanonicalVideoMetadata(
                     title = it.optString("title").trim(),
                     author = it.optString("author").trim(),
+                    publishedDate = microformat?.optString("publishDate").orEmpty()
+                        .ifBlank { microformat?.optString("uploadDate").orEmpty() },
                 ).takeIf { metadata -> metadata.title.isNotBlank() || metadata.author.isNotBlank() }
             }?.also { metadata ->
                 synchronized(canonicalMetadataCache) { canonicalMetadataCache[videoId] = metadata }
@@ -302,6 +311,7 @@ object YouTubeRepository {
                     videoDetailsCache[videoId] = current.copy(
                         title = metadata.title.ifBlank { current.title },
                         author = metadata.author.ifBlank { current.author },
+                        publishedDate = metadata.publishedDate.ifBlank { current.publishedDate },
                     )
                 }
             }
@@ -2474,8 +2484,28 @@ object YouTubeRepository {
         if (formats.none { it.audio } || formats.none { !it.audio }) {
             error("YouTube SABR response did not expose separate audio and video formats")
         }
-        val durationMs = if (isLive) 0L else response.optJSONObject("videoDetails")?.optString("lengthSeconds")
+        val reportedDurationMs = videoDetails?.optString("lengthSeconds")
             ?.toLongOrNull()?.times(1_000L) ?: 0L
+        val adaptiveFormats = streaming.optJSONArray("adaptiveFormats")
+        var formatDurationMs = 0L
+        if (adaptiveFormats != null) {
+            for (index in 0 until adaptiveFormats.length()) {
+                formatDurationMs = maxOf(
+                    formatDurationMs,
+                    adaptiveFormats.optJSONObject(index)?.optString("approxDurationMs")?.toLongOrNull() ?: 0L,
+                )
+            }
+        }
+        val completedBroadcastDurationMs = if (!isLive) {
+            val start = liveDetails?.optString("startTimestamp")
+                ?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+            val end = liveDetails?.optString("endTimestamp")
+                ?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+            if (start != null && end != null && end > start) end - start else 0L
+        } else 0L
+        // An ended live can temporarily omit lengthSeconds. Zero duration is reserved for an
+        // actually live session because the SABR pipeline uses it to select its endless mode.
+        val durationMs = if (isLive) 0L else maxOf(reportedDurationMs, formatDurationMs, completedBroadcastDurationMs)
         response.optJSONObject("videoDetails")?.let { details ->
             val channelId = details.optString("channelId")
             val microformat = response.optJSONObject("microformat")?.optJSONObject("playerMicroformatRenderer")
@@ -2558,14 +2588,21 @@ object YouTubeRepository {
                 JSONObject().put("context", context("WEB", bootstrap.version)).put("videoId", videoId),
                 origin
             )
-            findObject(data, "sendLiveChatMessageEndpoint")
+            val sendParams = findObject(data, "sendLiveChatMessageEndpoint")
                 ?.optJSONObject("sendLiveChatMessageEndpoint")
                 ?.optString("params")?.takeIf(String::isNotBlank)
-                ?.let { liveChatSendParamsCache[videoId] = it }
+            sendParams?.let { liveChatSendParamsCache[videoId] = it }
             val renderer = findObject(data, "liveChatRenderer")?.optJSONObject("liveChatRenderer")
+            liveChatAccessCache[videoId] = classifyLiveChatAccess(data, renderer != null, sendParams != null)
             liveChatContinuationFrom(renderer?.optJSONArray("continuations"))
         }.getOrNull()
     }
+
+    fun liveChatAccess(videoId: String): LiveChatAccess =
+        liveChatAccessCache[videoId] ?: LiveChatAccess(
+            status = if (signedIn()) null else "Sign in to chat",
+            canSend = false,
+        )
 
     fun liveChatMessages(videoId: String, continuationToken: String): LiveChatPage {
         val origin = "https://www.youtube.com"
@@ -2575,11 +2612,18 @@ object YouTubeRepository {
             JSONObject().put("context", context("WEB", bootstrap.version)).put("continuation", continuationToken),
             origin
         )
-        findObject(data, "sendLiveChatMessageEndpoint")
+        val sendParams = findObject(data, "sendLiveChatMessageEndpoint")
             ?.optJSONObject("sendLiveChatMessageEndpoint")
             ?.optString("params")?.takeIf(String::isNotBlank)
-            ?.let { liveChatSendParamsCache[videoId] = it }
+        sendParams?.let { liveChatSendParamsCache[videoId] = it }
         val lcc = data.optJSONObject("continuationContents")?.optJSONObject("liveChatContinuation")
+        val classifiedAccess = classifyLiveChatAccess(data, lcc != null, sendParams != null || liveChatSendParamsCache.containsKey(videoId))
+        val previousAccess = liveChatAccessCache[videoId]
+        val access = if (
+            classifiedAccess.status == "You cannot send messages in this chat" &&
+            previousAccess?.status != null
+        ) previousAccess else classifiedAccess
+        liveChatAccessCache[videoId] = access
         val actions = lcc?.optJSONArray("actions") ?: JSONArray()
         val messages = mutableListOf<LiveChatMessage>()
         for (i in 0 until actions.length()) {
@@ -2639,7 +2683,24 @@ object YouTubeRepository {
                 if (to > 0L) { timeoutMs = to.coerceIn(1000L, 8000L); break }
             }
         }
-        return LiveChatPage(messages, nextCont, timeoutMs)
+        return LiveChatPage(messages, nextCont, timeoutMs, access.status, access.canSend)
+    }
+
+    private fun classifyLiveChatAccess(data: JSONObject, hasChat: Boolean, hasSendEndpoint: Boolean): LiveChatAccess {
+        if (hasSendEndpoint) return LiveChatAccess(canSend = true)
+        val raw = data.toString().lowercase(Locale.ROOT)
+        val status = when {
+            !signedIn() || "signinendpoint" in raw || "sign in to chat" in raw -> "Sign in to chat"
+            "subscribers-only" in raw || "subscriber-only" in raw ||
+                "subscribe to this channel" in raw || "inscreva-se" in raw -> "You need to subscribe to chat"
+            "members-only" in raw || "member-only" in raw ||
+                "join this channel" in raw || "membros" in raw -> "Members-only chat"
+            "chat is disabled" in raw || "live chat is disabled" in raw ||
+                "chat desativado" in raw -> "Chat is disabled"
+            !hasChat -> "Chat is unavailable"
+            else -> "You cannot send messages in this chat"
+        }
+        return LiveChatAccess(status = status, canSend = false)
     }
 
     fun sendLiveChatMessage(videoId: String, text: String): Boolean {
@@ -3121,11 +3182,12 @@ object YouTubeRepository {
         val responseChannelId = responseDetails?.optString("channelId").orEmpty()
         val likeText = findLikeText(primary).orEmpty()
         val rawDateText = text(primary?.opt("dateText")).orEmpty()
-        val published = if (current.publishedDate.isNotBlank() && Regex("\\d{4}-\\d{2}-\\d{2}").containsMatchIn(current.publishedDate)) {
-            current.publishedDate
-        } else {
-            rawDateText.ifBlank { current.publishedDate }
-        }
+        // Prefer the locale-independent player microformat date. NEXT dateText is localized
+        // and relative (for example "Started streaming 20 minutes ago"), which otherwise
+        // flashes before being replaced by the fixed calendar date.
+        val published = canonical?.publishedDate?.takeIf(String::isNotBlank)
+            ?: current.publishedDate.takeIf { Regex("\\d{4}-\\d{2}-\\d{2}").containsMatchIn(it) }
+            ?: rawDateText.ifBlank { current.publishedDate }
         val attributedDescription = secondary?.optJSONObject("attributedDescription")
         val description = attributedDescription?.optString("content").orEmpty()
             .ifBlank { text(secondary?.opt("description")).orEmpty() }

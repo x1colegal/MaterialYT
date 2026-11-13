@@ -147,6 +147,9 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK, OLED }
@@ -3055,8 +3058,13 @@ private fun PlaybackLoadingStatus(message: String, modifier: Modifier = Modifier
     )
 }
 
+// Upcoming renderer text follows the account locale and may contain unresolved YouTube
+// placeholders. Keep the app UI deterministic and English instead of displaying it verbatim.
+private fun safeUpcomingLabel(): String = "UPCOMING"
+
 @Composable
 private fun PremiereCountdownOverlay(
+    videoId: String,
     details: VideoDetails?,
     hasStartedPlayback: Boolean = false,
     modifier: Modifier = Modifier,
@@ -3078,17 +3086,40 @@ private fun PremiereCountdownOverlay(
     val seconds = totalSeconds % 60L
     val remaining = when {
         totalSeconds <= 0L -> "Starting soon"
-        days > 0L -> "Premieres in ${days}d ${hours}h ${minutes}m"
-        hours > 0L -> "Premieres in ${hours}h ${minutes}m ${seconds}s"
-        else -> "Premieres in ${minutes}m ${seconds}s"
+        days > 0L -> "${days}d ${hours}h ${minutes}m"
+        hours > 0L -> "${hours}h ${minutes}m ${seconds}s"
+        else -> "${minutes}m ${seconds}s"
     }
-    Text(
-        remaining,
-        modifier = modifier.background(ComposeColor.Black.copy(alpha = .82f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        color = ComposeColor.White,
-        style = MaterialTheme.typography.titleMedium,
-    )
+    val exactTime = remember(details.scheduledStartTimeMs) {
+        SimpleDateFormat("EEE, MMM d, yyyy 'at' h:mm a", Locale.ENGLISH)
+            .format(Date(details.scheduledStartTimeMs))
+    }
+    // Gradually uncover the thumbnail over the final day before the event.
+    val revealProgress = (1f - remainingMs.toFloat() / TimeUnit.HOURS.toMillis(24).toFloat()).coerceIn(0f, 1f)
+    val overlayAlpha = .76f * (1f - revealProgress)
+    Box(modifier.background(ComposeColor.Black).pointerInput(Unit) { detectTapGestures { } }) {
+        AsyncImage(
+            model = "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg",
+            contentDescription = null,
+            modifier = Modifier.matchParentSize(),
+            contentScale = ContentScale.Crop,
+        )
+        Box(Modifier.matchParentSize().background(ComposeColor.Black.copy(alpha = overlayAlpha)))
+        Column(
+            Modifier.align(Alignment.BottomStart).fillMaxWidth()
+                .background(ComposeColor.Black.copy(alpha = .64f))
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                if (totalSeconds <= 0L) "Starting soon" else "Live in $remaining",
+                color = ComposeColor.White,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(exactTime, color = ComposeColor.White.copy(alpha = .86f), style = MaterialTheme.typography.bodyMedium)
+        }
+    }
 }
 
 @Composable
@@ -3304,6 +3335,12 @@ private val TARGET_PUBLISHED_DATE_FORMATTER =
 
 private fun displayPublishedDate(value: String?): String? {
     val clean = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    // Relative NEXT labels are transient and localized. Hide them until the canonical
+    // player microformat date arrives so the UI never changes from "20 hours ago" (or
+    // "Started streaming ... ago") to a fixed calendar date in front of the user.
+    if (Regex("(?i)\\b(?:ago|minute(?:s)?|hour(?:s)?|day(?:s)?|week(?:s)?|month(?:s)?)\\b").containsMatchIn(clean) &&
+        !Regex("\\d{4}-\\d{2}-\\d{2}").containsMatchIn(clean)) return null
+    if (Regex("(?i)(?:started\\s+streaming|transmiss[aã]o\\s+iniciada|h[aá]\\s+\\d+)").containsMatchIn(clean)) return null
     val isoDate = Regex("\\d{4}-\\d{2}-\\d{2}").find(clean)?.value
     if (isoDate != null) {
         val formatted = runCatching {
@@ -3492,7 +3529,7 @@ private fun FeedRow(item: FeedItem, onChannelClick: (() -> Unit)? = null, click:
                     modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)
                 ) {
                     Text(
-                        text = item.upcomingText.ifBlank { "PREMIERE" },
+                        text = safeUpcomingLabel(),
                         color = ComposeColor.White,
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -3509,10 +3546,7 @@ private fun FeedRow(item: FeedItem, onChannelClick: (() -> Unit)? = null, click:
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                 Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(3.dp))
-                val sub = if (item.upcoming && item.upcomingText.isNotBlank() && !item.subtitle.contains(item.upcomingText)) {
-                    "${item.subtitle} • ${item.upcomingText}"
-                } else item.subtitle
-                Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -4050,7 +4084,7 @@ private fun ChannelTabletItem(item: FeedItem, modifier: Modifier = Modifier, cli
                     modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)
                 ) {
                     Text(
-                        text = item.upcomingText.ifBlank { "PREMIERE" },
+                        text = safeUpcomingLabel(),
                         color = ComposeColor.White,
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -5374,7 +5408,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(videoId) } }.onSuccess { extracted ->
                 sabrPlayback = extracted
                 YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = stableMetadata(it) }
-                val isLiveVideo = videoMetadata?.isLive == true || extracted.durationMs <= 0L
+                // A completed live replay may temporarily have no reported duration. Only the
+                // explicit player live state may enable live UI and writable live chat.
+                val isLiveVideo = videoMetadata?.isLive == true
                 audioStreams = extracted.formats.filter { it.audio }.map {
                     PlayerChoice(extracted.serverAbrStreamingUrl, it.codec, 0, 0, it.bitrate,
                         false, it.audioTrackName, it.audioTrackId, it.originalAudio, it, isLive = isLiveVideo)
@@ -5570,7 +5606,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
 
     if (activity.pipMode) {
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
-            AndroidView(
+            if (videoMetadata?.isUpcoming != true || videoMetadata?.isLive == true || hasStartedPlayback) AndroidView(
                 factory = { context -> PlayerView(context).apply {
                     setBackgroundColor(Color.BLACK)
                     setShutterBackgroundColor(Color.BLACK)
@@ -5690,7 +5726,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message ->
                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
             }
-            PremiereCountdownOverlay(videoMetadata, hasStartedPlayback, Modifier.align(Alignment.Center))
+            PremiereCountdownOverlay(videoId, videoMetadata, hasStartedPlayback, Modifier.matchParentSize())
             if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
             AnimatedVisibility(controllerVisible, modifier = Modifier.align(Alignment.TopCenter)) { Row(
                 Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 2.dp, vertical = 8.dp),
@@ -5710,11 +5746,11 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 Row(Modifier.fillMaxSize()) {
                     Column(Modifier.weight(1.15f).verticalScroll(rememberScrollState())) {
                         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                            AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> if (visibility == View.VISIBLE) bindPlaylistControls(this) }); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
+                            if (videoMetadata?.isUpcoming != true || videoMetadata?.isLive == true || hasStartedPlayback) AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> if (visibility == View.VISIBLE) bindPlaylistControls(this) }); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
                             if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message ->
                                 PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                             }
-                            PremiereCountdownOverlay(videoMetadata, hasStartedPlayback, Modifier.align(Alignment.Center))
+                            PremiereCountdownOverlay(videoId, videoMetadata, hasStartedPlayback, Modifier.matchParentSize())
                             if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                         }
                         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -5850,9 +5886,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 }
             } else Column(Modifier.fillMaxSize()) {
                     Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(ComposeColor.Black)) {
-                        AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> if (visibility == View.VISIBLE) bindPlaylistControls(this) }); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
+                        if (videoMetadata?.isUpcoming != true || videoMetadata?.isLive == true || hasStartedPlayback) AndroidView({ PlayerView(it).apply { useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS); setControllerVisibilityListener(PlayerControlView.VisibilityListener { visibility -> if (visibility == View.VISIBLE) bindPlaylistControls(this) }); attachPlayerView(this); post { bindPlaylistControls(this) } } }, Modifier.fillMaxSize(), update = { attachPlayerView(it); bindPlaylistControls(it) })
                         if (!hasStartedPlayback || (PlaybackPreferences.showSabrBackoffDuringBuffering && playbackState == Player.STATE_BUFFERING && videoLoadMessage?.startsWith("SABR requested backoff") == true)) videoLoadMessage?.let { message -> PlaybackLoadingStatus(message, Modifier.align(Alignment.TopCenter).padding(top = 12.dp)) }
-                        PremiereCountdownOverlay(videoMetadata, hasStartedPlayback, Modifier.align(Alignment.Center))
+                        PremiereCountdownOverlay(videoId, videoMetadata, hasStartedPlayback, Modifier.matchParentSize())
                         if (autoplayPending && autoplayNext != null) AutoplayCountdownOverlay(autoplayNext, autoplaySeconds, { autoplayPending = false }, Modifier.matchParentSize())
                     }
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -6562,6 +6598,7 @@ private fun LiveChatPanel(
 ) {
     var messages by remember(videoId) { mutableStateOf<List<LiveChatMessage>>(emptyList()) }
     var continuationToken by remember(videoId) { mutableStateOf<String?>(null) }
+    var access by remember(videoId) { mutableStateOf<LiveChatAccess?>(null) }
     var loading by remember(videoId) { mutableStateOf(true) }
     var error by remember(videoId) { mutableStateOf<String?>(null) }
     var messageText by remember { mutableStateOf("") }
@@ -6572,12 +6609,15 @@ private fun LiveChatPanel(
     LaunchedEffect(videoId) {
         loading = true
         error = null
-        withContext(Dispatchers.IO) {
-            continuationToken = YouTubeRepository.liveChatContinuation(videoId)
+        val bootstrap = withContext(Dispatchers.IO) {
+            val token = YouTubeRepository.liveChatContinuation(videoId)
+            token to YouTubeRepository.liveChatAccess(videoId)
         }
+        continuationToken = bootstrap.first
         loading = false
         if (continuationToken == null) {
-            error = "Live chat is not available for this stream"
+            access = bootstrap.second
+            error = bootstrap.second.status ?: "Chat is unavailable"
         }
     }
 
@@ -6588,6 +6628,7 @@ private fun LiveChatPanel(
                 withContext(Dispatchers.IO) { YouTubeRepository.liveChatMessages(videoId, token) }
             }.getOrNull()
             if (page != null) {
+                access = LiveChatAccess(page.participationStatus, page.canSend)
                 if (page.messages.isNotEmpty()) {
                     messages = (messages + page.messages).distinctBy { it.id }
                         .sortedBy { it.timestampUsec }.takeLast(250)
@@ -6640,41 +6681,59 @@ private fun LiveChatPanel(
         }
 
         HorizontalDivider()
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            OutlinedTextField(
-                value = messageText,
-                onValueChange = { messageText = it },
-                placeholder = { Text("Chat…", style = MaterialTheme.typography.bodyMedium) },
-                modifier = Modifier.weight(1f),
-                maxLines = 2,
-                shape = RoundedCornerShape(24.dp),
-                enabled = !sending,
-            )
-            IconButton(
-                onClick = {
-                    val text = messageText.trim()
-                    if (text.isNotBlank()) {
-                        sending = true
-                        scope.launch {
-                            val success = withContext(Dispatchers.IO) {
-                                YouTubeRepository.sendLiveChatMessage(videoId, text)
-                            }
-                            if (success) {
-                                messageText = ""
-                            }
-                            sending = false
-                        }
-                    }
-                },
-                enabled = !sending && messageText.isNotBlank()
+        if (access == null) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (sending) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                else Icon(Icons.Default.Send, "Send message")
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(10.dp))
+                Text("Checking chat access…", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
             }
+        } else if (access?.canSend == true) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = messageText,
+                    onValueChange = { messageText = it },
+                    placeholder = { Text("Chat…", style = MaterialTheme.typography.bodyMedium) },
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2,
+                    shape = RoundedCornerShape(24.dp),
+                    enabled = !sending,
+                )
+                IconButton(
+                    onClick = {
+                        val text = messageText.trim()
+                        if (text.isNotBlank()) {
+                            sending = true
+                            scope.launch {
+                                val success = withContext(Dispatchers.IO) {
+                                    YouTubeRepository.sendLiveChatMessage(videoId, text)
+                                }
+                                if (success) messageText = ""
+                                sending = false
+                            }
+                        }
+                    },
+                    enabled = !sending && messageText.isNotBlank()
+                ) {
+                    if (sending) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Send, "Send message")
+                }
+            }
+        } else {
+            Text(
+                access?.status ?: "Chat is unavailable",
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }

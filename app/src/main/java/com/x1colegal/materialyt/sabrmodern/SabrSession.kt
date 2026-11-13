@@ -185,7 +185,24 @@ internal class SabrSession(
                 attestationStalls = 0
                 dry = 0
                 protectionRefreshes++
-                AppLog.event("SABR audio installed asynchronously refreshed streaming PoToken")
+                // A SABR transport exchange is bound to the proof that created its cookie and
+                // contexts. Preserve the assembled media buffer/player, but restart only the
+                // request-level state with the new URL/protobuf token pair.
+                requestNumber = 0
+                cookie = null
+                ctxByType.clear()
+                ctxToSend.clear()
+                backoffTimeMs = 0L
+                AppLog.event("SABR audio installed asynchronously refreshed streaming PoToken scope=url-and-streamer-context")
+            }
+            // Generating a streaming proof is much slower on old WebView/Android releases. Do not
+            // keep POSTing the rejected token while it runs: those empty protection=2 responses
+            // consume the dry/attestation budget and used to terminate playback before the fresh
+            // proof was ready. Keep the existing ExoPlayer buffer alive and resume this SAME
+            // session as soon as pendingPoToken is published.
+            if (poTokenRefreshRunning.get() && pendingPoToken.get() == null) {
+                Thread.sleep(100L)
+                continue
             }
             if (backoffTimeMs > 0) {
                 val delay = backoffTimeMs.coerceAtMost(30_000L)

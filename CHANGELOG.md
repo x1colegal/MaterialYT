@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.6] - 2026-11-13
+
+### Fixed
+- Preserve active YouTube Music and audio-only VOD playback when SABR reports pending stream protection (`protection=2`) on slower devices.
+- Pause stale SABR requests while Android System WebView generates a fresh streaming PoToken, preventing the dry-response budget from ending the session with `incomplete drain` before attestation completes.
+- Install refreshed URL and protobuf PoTokens atomically, reset only proof-bound transport state, and retain the current ExoPlayer instance, playback position, and already buffered media.
+
 ## [6.5] - 2026-11-13
 
 MaterialYT 6.5 is probably one of the largest releases in the project's history. It took approximately two days to complete, with development alternating between Codex (5.6 Sol) and Antigravity (Gemini 3.8 Flash).

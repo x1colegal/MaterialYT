@@ -2,6 +2,14 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.7] - 2026-11-13
+
+### Fixed
+- Continue requesting and buffering every playable media segment YouTube provides while SABR stream protection is pending (`protection=2`), keeping playback alive while a fresh PoToken is generated.
+- Exclude dry pending-protection responses from SABR stall limits and prevent duplicate synchronous attestation refreshes while the asynchronous challenge is running.
+- Preserve the active player, playback position, and accumulated audio/video buffers throughout attestation renewal on videos, live streams, and YouTube Music.
+- Reject media returned with required protection (`protection=3`) while retaining valid grace-window media delivered under `protection=2`.
+
 ## [6.6] - 2026-11-13
 
 ### Fixed

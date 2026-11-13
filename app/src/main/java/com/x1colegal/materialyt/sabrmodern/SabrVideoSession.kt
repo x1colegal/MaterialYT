@@ -224,13 +224,10 @@ internal class SabrVideoSession(
                 backoffTimeMs = 0L
                 AppLog.event("SABR video installed asynchronously refreshed streaming PoToken scope=url-and-streamer-context")
             }
-            // Do not POST the stale proof once per second while WebView is still minting its
-            // replacement. Besides wasting requests, those guaranteed status-2 responses looked
-            // like a server backoff loop. Resume immediately when the fresh pair is available.
-            if (poTokenRefreshRunning.get() && pendingPoToken.get() == null) {
-                Thread.sleep(100L)
-                continue
-            }
+            // Keep requesting while WebView mints the replacement proof. YouTube deliberately
+            // serves a short grace window of playable media with protection=2; consuming all of
+            // it keeps playback alive on slower devices. Dry protection responses are excluded
+            // from the stall budget below, and protection=3 media remains withheld.
             if (backoffTimeMs > 0) {
                 val delay = backoffTimeMs.coerceAtMost(30_000L)
                 backoffTimeMs = 0
@@ -657,7 +654,10 @@ internal class SabrVideoSession(
             )
 
             if (redirect != null && !newSeg) { url = prepared(redirect); continue }
-            dry = if (newSeg || gotContext) 0 else dry + 1
+            dry = if (newSeg || gotContext) 0
+                else if (poTokenRefreshRunning.get()) dry
+                else dry + 1
+            if (poTokenRefreshRunning.get() && !newSeg) Thread.sleep(100L)
             if (isLive && !newSeg) {
                 val waitMs = when {
                     backoffTimeMs > 0L -> backoffTimeMs.coerceIn(500L, 3_000L)
@@ -668,7 +668,8 @@ internal class SabrVideoSession(
             }
             // Attestation cap (see SabrSession): a client that can't satisfy stream protection is served a
             // free window then only STREAM_PROTECTION_STATUS>=2 — bail fast so the fallback moves on.
-            attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
+            attestationStalls = if (poTokenRefreshRunning.get()) 0 else
+                SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
             // Status 2 means YouTube is already waiting for a new proof. It can arrive together
             // with a final batch of playable media, so waiting for an empty response loses the
             // live edge once that small batch is consumed. Re-arm after status 1 so a later
@@ -695,9 +696,11 @@ internal class SabrVideoSession(
                     }
                 }
             }
-            val protectionRefreshDue = protStatus >= SabrProtection.ATTESTATION_REQUIRED && protectionEscalated ||
-                attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
-                System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
+            val protectionRefreshDue = !poTokenRefreshRunning.get() && (
+                protStatus >= SabrProtection.ATTESTATION_REQUIRED && protectionEscalated ||
+                    attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
+                    System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
+                )
             var protectionTokenRefreshed = false
             if (protectionRefreshDue && protectionRefreshes < protectionMaxRetries) {
                 config.refreshPoToken?.let { refresh ->

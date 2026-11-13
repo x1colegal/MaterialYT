@@ -195,15 +195,10 @@ internal class SabrSession(
                 backoffTimeMs = 0L
                 AppLog.event("SABR audio installed asynchronously refreshed streaming PoToken scope=url-and-streamer-context")
             }
-            // Generating a streaming proof is much slower on old WebView/Android releases. Do not
-            // keep POSTing the rejected token while it runs: those empty protection=2 responses
-            // consume the dry/attestation budget and used to terminate playback before the fresh
-            // proof was ready. Keep the existing ExoPlayer buffer alive and resume this SAME
-            // session as soon as pendingPoToken is published.
-            if (poTokenRefreshRunning.get() && pendingPoToken.get() == null) {
-                Thread.sleep(100L)
-                continue
-            }
+            // Keep requesting while WebView mints the replacement proof. YouTube deliberately
+            // serves a short grace window of playable media with protection=2; consuming all of
+            // it keeps playback alive on slower devices. Dry protection responses are excluded
+            // from the stall budget below, and protection=3 media remains withheld.
             if (backoffTimeMs > 0) {
                 val delay = backoffTimeMs.coerceAtMost(30_000L)
                 backoffTimeMs = 0
@@ -424,9 +419,17 @@ internal class SabrSession(
             if (iter == 1) AppLog.event("SABR audio first response bytes=${bytes.size} parts=${parts.size} headers=${headers.size} redirect=${redirect != null} protection=$protStatus types=${parts.joinToString { "${it.type}:${it.payload.size}" }}")
             if (iter == 1) Timber.tag(TAG).d("SABR first response: parts=${parts.size}, mediaHeaders=${headers.size}, endSeg=$endSeg, startTimeMs=$startTimeMs")
 
+            // Pending protection still carries a valid grace window. Required protection does not:
+            // never commit media returned with status 3, because it belongs to the rejected proof.
+            val mediaAllowed = protStatus < SabrProtection.ATTESTATION_REQUIRED
+            if (!mediaAllowed && headers.isNotEmpty()) AppLog.event(
+                "SABR audio withholding media while protection=$protStatus headers=${headers.size} seq=$lastSeq",
+            )
             // Which headers are NEW (not yet written): the init segment once, each sequence number once.
             // Resends of an already-written segment are skipped so a byte is never written twice.
-            val newIds = headers.values.filter { if (it.isInit) !initWritten else !seen.contains(it.seq) }.map { it.headerId }.toHashSet()
+            val newIds = if (!mediaAllowed) hashSetOf() else headers.values
+                .filter { if (it.isInit) !initWritten else !seen.contains(it.seq) }
+                .mapTo(hashSetOf()) { it.headerId }
             // Write each new segment's media bytes at its ABSOLUTE offset (startRange, then advance per part)
             // so reassembly is byte-exact regardless of arrival order - matches the proven harness.
             val writeCursor = HashMap<Int, Long>()
@@ -463,7 +466,10 @@ internal class SabrSession(
             onProgress?.invoke(buffer.available())
 
             if (redirect != null && !newSeg) { url = prepared(redirect); continue }
-            dry = if (newSeg || gotContext) 0 else dry + 1
+            dry = if (newSeg || gotContext) 0
+                else if (poTokenRefreshRunning.get()) dry
+                else dry + 1
+            if (poTokenRefreshRunning.get() && !newSeg) Thread.sleep(100L)
             if (isLive && !newSeg) {
                 val waitMs = when {
                     backoffTimeMs > 0L -> backoffTimeMs.coerceIn(500L, 3_000L)
@@ -476,7 +482,8 @@ internal class SabrSession(
             // small free window, then the server serves ONLY STREAM_PROTECTION_STATUS>=2 with no media
             // (proven live: tests/probe-mweb-sabr.mjs). Bail FAST with a clear reason instead of grinding
             // to the dry cap — the roster/stall fallback then moves to a client that can attest.
-            attestationStalls = SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
+            attestationStalls = if (poTokenRefreshRunning.get()) 0 else
+                SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
             // Status 2 is an active request for a fresh proof, even when this response still
             // contains media. Mint on the transition instead of waiting for playback to exhaust
             // those last segments, then re-arm once YouTube accepts the proof with status 1.
@@ -502,9 +509,11 @@ internal class SabrSession(
                     }
                 }
             }
-            val protectionRefreshDue = protStatus >= SabrProtection.ATTESTATION_REQUIRED && protectionEscalated ||
-                attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
-                System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
+            val protectionRefreshDue = !poTokenRefreshRunning.get() && (
+                protStatus >= SabrProtection.ATTESTATION_REQUIRED && protectionEscalated ||
+                    attestationStalls >= SabrProtection.REFRESH_AFTER_STALLS &&
+                    System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
+                )
             var protectionTokenRefreshed = false
             if (protectionRefreshDue && protectionRefreshes < protectionMaxRetries) {
                 config.refreshPoToken?.let { refresh ->

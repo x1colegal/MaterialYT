@@ -2,6 +2,15 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [6.12] - 2026-11-14
+
+### Changed
+- Preserve the native YouTube Shorts shelf boundaries and positions throughout Home and search results.
+- Allow each Shorts shelf to contain the exact number of items supplied by YouTube instead of applying a fixed client-side limit.
+
+### Fixed
+- Prevent Shorts from later shelves or continuation responses from being merged into the first Shorts shelf.
+
 ## [6.11] - 2026-11-13
 
 ### Changed

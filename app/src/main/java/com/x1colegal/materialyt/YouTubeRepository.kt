@@ -28,7 +28,7 @@ import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlin.math.roundToInt
 
-data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L, val short: Boolean = false, val setVideoId: String = "", val musicVideo: Boolean = false, val upcoming: Boolean = false, val upcomingText: String = "", val channelVerified: Boolean = false)
+data class FeedItem(val id: String, val title: String, val subtitle: String, val thumbnail: String, val thumbnailWidth: Int, val thumbnailHeight: Int, val channelThumbnail: String, val url: String, val playlist: Boolean = false, val channel: Boolean = false, val channelUrl: String = "", val resumePositionMs: Long = 0L, val short: Boolean = false, val setVideoId: String = "", val musicVideo: Boolean = false, val upcoming: Boolean = false, val upcomingText: String = "", val channelVerified: Boolean = false, val shelfKey: String = "")
 data class MusicCategory(val title: String, val browseId: String, val params: String = "")
 data class MusicHomeSection(
     val title: String,
@@ -4233,6 +4233,7 @@ object YouTubeRepository {
         val output = linkedMapOf<String, FeedItem>()
         walkFeedRenderers(root) { renderer ->
             val rendererType = renderer.optString("_materialytRendererType")
+            val shelfKey = renderer.optString("_materialytShelfKey")
             val officialCard = rendererType == "officialCardViewModel"
             val lockupPlaylistId = if (rendererType == "lockupViewModel") {
                 renderer.optString("contentId").removePrefix("VL").takeIf { contentId ->
@@ -4494,7 +4495,8 @@ object YouTubeRepository {
                 musicVideo = musicVideoType.isNotBlank() && musicVideoType != "MUSIC_VIDEO_TYPE_ATV",
                 upcoming = isUpcoming,
                 upcomingText = upcomingEventText,
-                channelVerified = channelVerified)
+                channelVerified = channelVerified,
+                shelfKey = shelfKey)
             if (!isPlaylist && !isChannel) synchronized(videoDetailsCache) {
                 val current = videoDetailsCache[id] ?: VideoDetails(title, subtitle)
                 videoDetailsCache[id] = current.copy(
@@ -4622,7 +4624,21 @@ object YouTubeRepository {
         return null
     }
 
-    private fun walkFeedRenderers(value: Any?, blockedByAd: Boolean = false, consumer: (JSONObject) -> Unit) {
+    private fun containsShortRenderer(value: Any?): Boolean = when (value) {
+        is JSONObject -> value.has("reelItemRenderer") || value.has("shortsLockupViewModel") ||
+            value.keys().asSequence().any { containsShortRenderer(value.opt(it)) }
+        is JSONArray -> (0 until value.length()).any { containsShortRenderer(value.opt(it)) }
+        else -> false
+    }
+
+    private fun walkFeedRenderers(
+        value: Any?,
+        blockedByAd: Boolean = false,
+        shortsShelfKey: String? = null,
+        shelfCounter: IntArray = intArrayOf(0),
+        shelfPrefix: String = Integer.toHexString(System.identityHashCode(value)),
+        consumer: (JSONObject) -> Unit,
+    ) {
         when (value) {
             is JSONObject -> {
                 val keys = value.keys().asSequence().toList()
@@ -4641,7 +4657,7 @@ object YouTubeRepository {
                     val supported = setOf(
                         "videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "playlistVideoRenderer", "playlistRenderer", "gridPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
                         "radioRenderer", "compactRadioRenderer", "gridRadioRenderer",
-                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "musicCardShelfRenderer", "playlistPanelVideoRenderer", "lockupViewModel", "officialCardViewModel"
+                        "videoWithContextRenderer", "videoCardRenderer", "reelItemRenderer", "shortsLockupViewModel", "musicTwoRowItemRenderer", "musicResponsiveListItemRenderer", "musicCardShelfRenderer", "playlistPanelVideoRenderer", "lockupViewModel", "officialCardViewModel"
                     )
                     keys.forEach { key ->
                         val candidate = value.optJSONObject(key) ?: return@forEach
@@ -4650,6 +4666,7 @@ object YouTubeRepository {
                         if (key in supported || videoContainer) {
                             consumedKeys += key
                             candidate.put("_materialytRendererType", key)
+                            shortsShelfKey?.let { candidate.put("_materialytShelfKey", it) }
                             // Ad containers are already propagated through `blocked`, and the
                             // parsed title/subtitle are checked before an item is emitted. A deep
                             // scan of every full renderer here was the remaining dominant cost on
@@ -4661,9 +4678,14 @@ object YouTubeRepository {
                 // A recognized renderer is one complete feed item. Its metadata subtree contains
                 // many nested endpoints/text objects but never another independent feed result.
                 // Walking it again made history parsing effectively quadratic on old devices.
-                keys.filterNot(consumedKeys::contains).forEach { walkFeedRenderers(value.opt(it), blocked, consumer) }
+                keys.filterNot(consumedKeys::contains).forEach { key ->
+                    val child = value.opt(key)
+                    val startsShortsShelf = key.contains("shelf", ignoreCase = true) && containsShortRenderer(child)
+                    val childShelfKey = if (startsShortsShelf) "$shelfPrefix-${shelfCounter[0]++}" else shortsShelfKey
+                    walkFeedRenderers(child, blocked, childShelfKey, shelfCounter, shelfPrefix, consumer)
+                }
             }
-            is JSONArray -> for (index in 0 until value.length()) walkFeedRenderers(value.opt(index), blockedByAd, consumer)
+            is JSONArray -> for (index in 0 until value.length()) walkFeedRenderers(value.opt(index), blockedByAd, shortsShelfKey, shelfCounter, shelfPrefix, consumer)
         }
     }
 

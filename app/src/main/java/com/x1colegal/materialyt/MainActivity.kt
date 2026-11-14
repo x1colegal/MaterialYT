@@ -1370,43 +1370,60 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             }
         } else {
             val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-            val shorts = feed.filter { it.short }
-            val regularFeed = feed.filterNot { it.short }
-            val firstShortPosition = feed.indexOfFirst { it.short }
-            val itemsBeforeShorts = if (firstShortPosition >= 0) {
-                feed.take(firstShortPosition).filterNot { it.short }
-            } else regularFeed
-            val itemsAfterShorts = if (firstShortPosition >= 0) {
-                feed.drop(firstShortPosition).filterNot { it.short }
-            } else emptyList()
+            val feedBlocks = buildList<List<FeedItem>> {
+                val pendingShorts = mutableListOf<FeedItem>()
+                var pendingShelfKey = ""
+                fun flushShorts() {
+                    if (pendingShorts.isNotEmpty()) add(pendingShorts.toList())
+                    pendingShorts.clear()
+                    pendingShelfKey = ""
+                }
+                feed.forEach { item ->
+                    if (item.short) {
+                        if (pendingShorts.isNotEmpty() && item.shelfKey != pendingShelfKey) flushShorts()
+                        if (pendingShorts.isEmpty()) pendingShelfKey = item.shelfKey
+                        pendingShorts += item
+                    }
+                    else {
+                        flushShorts()
+                        add(listOf(item))
+                    }
+                }
+                flushShorts()
+            }
             if (tablet) {
-                LaunchedEffect(homeGridState, feed.size, query) {
+                LaunchedEffect(homeGridState, feedBlocks.size, query) {
                     snapshotFlow { homeGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
-                        if (regularFeed.isNotEmpty() && last >= regularFeed.lastIndex - 3) loadMore()
+                        if (feedBlocks.isNotEmpty() && last >= feedBlocks.lastIndex - 3) loadMore()
                     }
                 }
                 LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(16.dp)) {
-                    gridItems(
-                        items = itemsBeforeShorts,
-                        span = { item -> if (item.channel) GridItemSpan(maxLineSpan) else GridItemSpan(1) },
-                    ) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
-                    if (shorts.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { ShortsShelf(shorts, true) { selectedShort = it } }
-                    gridItems(
-                        items = itemsAfterShorts,
-                        span = { item -> if (item.channel) GridItemSpan(maxLineSpan) else GridItemSpan(1) },
-                    ) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
+                    feedBlocks.forEachIndexed { index, block ->
+                        if (block.first().short) {
+                            item(key = "shorts-$index", span = { GridItemSpan(maxLineSpan) }) { ShortsShelf(block, true) { selectedShort = it } }
+                        } else {
+                            val item = block.first()
+                            item(key = "feed-${item.id}", span = { if (item.channel) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) {
+                                Box(Modifier.padding(8.dp)) { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
+                            }
+                        }
+                    }
                     if (loadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             } else {
-                LaunchedEffect(homeListState, feed.size, query) {
+                LaunchedEffect(homeListState, feedBlocks.size, query) {
                     snapshotFlow { homeListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
-                        if (regularFeed.isNotEmpty() && last >= regularFeed.lastIndex - 3) loadMore()
+                        if (feedBlocks.isNotEmpty() && last >= feedBlocks.lastIndex - 3) loadMore()
                     }
                 }
                 LazyColumn(state = homeListState) {
-                    items(itemsBeforeShorts) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
-                    if (shorts.isNotEmpty()) item { ShortsShelf(shorts, false) { selectedShort = it } }
-                    items(itemsAfterShorts) { item -> FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
+                    feedBlocks.forEachIndexed { index, block ->
+                        if (block.first().short) item(key = "shorts-$index") { ShortsShelf(block, false) { selectedShort = it } }
+                        else {
+                            val item = block.first()
+                            item(key = "feed-${item.id}") { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
+                        }
+                    }
                     if (loadingMore) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 }
             }

@@ -2,6 +2,22 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.0] - 2026-11-14
+
+### Added
+- Navigate vertically between Shorts from the same Home shelf, starting from the exact Short selected by the user.
+- Display verified-channel badges in the Shorts player.
+- Keep the screen awake while any Short is actively playing, including Shorts opened from Home, search, or channel pages.
+
+### Changed
+- Display `Like` while the Shorts like count is unavailable or zero, matching YouTube's native presentation.
+- Align the Shorts details header consistently with and without the external back button.
+
+### Fixed
+- Prevent renderer actions such as `Add to queue` from temporarily appearing as Short titles.
+- Keep Shorts cards visible when YouTube delays their real title metadata.
+- Exclude editorial breaking-news shelves injected into the WEB Home response without removing legitimate individual news recommendations.
+
 ## [6.12] - 2026-11-14
 
 ### Changed

@@ -499,7 +499,7 @@ object YouTubeRepository {
             ?: value.optJSONObject("continuationEndpoint")?.optJSONObject("continuationCommand")
                 ?.optString("token")?.takeIf(String::isNotBlank)
 
-    private data class ShortsMetadata(val title: String, val channel: String, val avatar: String, val channelUrl: String)
+    private data class ShortsMetadata(val title: String, val channel: String, val avatar: String, val channelUrl: String, val verified: Boolean)
 
     private fun findShortsMetadata(json: Any?): ShortsMetadata? {
         var title = ""
@@ -528,8 +528,12 @@ object YouTubeRepository {
             }
         }
         walk(json)
-        return if (title.isNotBlank() || channel.isNotBlank()) ShortsMetadata(title, channel, avatar, channelUrl) else null
+        return if (title.isNotBlank() || channel.isNotBlank()) ShortsMetadata(title, channel, avatar, channelUrl, hasVerifiedBadge(json)) else null
     }
+
+    private fun isRendererActionLabel(value: String): Boolean = value.trim().lowercase() in setOf(
+        "add to queue", "save to playlist", "watch later", "share", "more actions", "play next"
+    )
 
     private fun reelFeedItem(response: JSONObject, fallbackWatch: JSONObject? = null): FeedItem? {
         if (containsAdMarker(response) || (fallbackWatch != null && containsAdMarker(fallbackWatch))) return null
@@ -552,11 +556,11 @@ object YouTubeRepository {
             if (channelUrl.isBlank()) channelUrl = meta.channelUrl
         }
         if (isAdString(title) || isAdString(channel)) return null
-        if (title.isBlank()) title = "Short"
+        if (title.isBlank() || isRendererActionLabel(title)) title = "Short"
         if (channel.isBlank()) channel = "YouTube"
 
         val thumbnail = findThumbnail(watch.opt("thumbnail")) ?: "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
-        return FeedItem(videoId, title, channel, thumbnail, 9, 16, channelThumbnail, "https://www.youtube.com/shorts/$videoId", channelUrl = channelUrl)
+        return FeedItem(videoId, title, channel, thumbnail, 9, 16, channelThumbnail, "https://www.youtube.com/shorts/$videoId", channelUrl = channelUrl, short = true, channelVerified = meta?.verified == true || hasVerifiedBadge(header))
     }
     fun history(): List<FeedItem> = feed("history", "https://www.youtube.com/feed/history")
 
@@ -4303,13 +4307,26 @@ object YouTubeRepository {
             val isPlaylist = playlistRenderer && playlistId.isNotBlank()
             val id = when { isChannel -> channelId; isPlaylist -> playlistId.removePrefix("VL"); else -> videoId }
             if (!isChannel && !isPlaylist && id.length != 11) return@walkFeedRenderers
+            val rendererLooksShort = rendererType == "reelItemRenderer" || rendererType == "shortsLockupViewModel" ||
+                renderer.optString("contentType") == "LOCKUP_CONTENT_TYPE_SHORT" ||
+                findObject(renderer, "reelWatchEndpoint") != null ||
+                findStringNearKey(renderer, "url", "/shorts/") != null
             val columns = flexColumnTexts(renderer)
             val officialCardTitle = if (officialCard) {
                 findObject(renderer, "dynamicTextViewModel")?.optJSONObject("dynamicTextViewModel")
                     ?.opt("text")?.let(::text)
             } else null
-            val rawTitle = officialCardTitle ?: text(renderer.opt("title")) ?: text(renderer.opt("headline")) ?: columns.firstOrNull()
-                ?: deepText(renderer, "title") ?: deepText(renderer, "headline") ?: return@walkFeedRenderers
+            val rawTitle = sequenceOf(
+                officialCardTitle,
+                text(renderer.opt("title")),
+                text(renderer.opt("headline")),
+                columns.firstOrNull(),
+                deepText(renderer, "title"),
+                deepText(renderer, "headline"),
+                deepText(renderer, "primaryText"),
+                deepText(renderer, "accessibilityText"),
+            ).filterNotNull().firstOrNull { it.isNotBlank() && !isRendererActionLabel(it) }
+                ?: if (rendererLooksShort) "Short" else return@walkFeedRenderers
             // Autoplay containers can expose their UI heading ("Up Next") as `title`
             // while keeping the actual video's title in `videoTitle`. Never let that
             // heading poison the metadata cache of the video that is about to open.
@@ -4398,10 +4415,7 @@ object YouTubeRepository {
             }
             val channelVerified = hasVerifiedBadge(renderer) ||
                 (officialCard && findStringNearKey(renderer, "imageName", "AUDIO_BADGE") != null)
-            val isShort = rendererType == "reelItemRenderer" ||
-                renderer.optString("contentType") == "LOCKUP_CONTENT_TYPE_SHORT" ||
-                findObject(renderer, "reelWatchEndpoint") != null ||
-                findStringNearKey(renderer, "url", "/shorts/") != null
+            val isShort = rendererLooksShort
             val thumbSeedVideoId = Regex("/vi(?:_webp)?/([a-zA-Z0-9_-]{11})/").find(providedThumbnail)?.groupValues?.get(1)
                 ?.takeIf { candidateId -> candidateId != id && candidateId != playlistId && !candidateId.startsWith("RD") }
             val playlistSeedVideoId = if (playlistRenderer) {
@@ -4631,6 +4645,30 @@ object YouTubeRepository {
         else -> false
     }
 
+    /** YouTube can inject editorial news shelves into the WEB Home response even when the
+     * signed-in native Home feed does not show them. Keep ordinary news recommendations, but do
+     * not flatten those explicitly labelled editorial shelves into the personal feed. */
+    private fun isEditorialNewsShelf(value: Any?): Boolean {
+        val node = value as? JSONObject ?: return false
+        val nestedShelf = node.optJSONObject("content")?.optJSONObject("richShelfRenderer")
+            ?: node.optJSONObject("content")?.optJSONObject("shelfRenderer")
+        val labels = listOf(
+            text(node.opt("title")),
+            text(node.opt("headline")),
+            text(node.opt("header")),
+            text(node.optJSONObject("richShelfRenderer")?.opt("title")),
+            text(node.optJSONObject("shelfRenderer")?.opt("title")),
+            text(nestedShelf?.opt("title")),
+            text(nestedShelf?.opt("headline")),
+        ).mapNotNull { it?.trim()?.lowercase(java.util.Locale.ROOT) }
+        return labels.any { label ->
+            label == "news" || label == "notícias" || label == "noticias" ||
+                label.contains("breaking news") || label.contains("latest news") ||
+                label.contains("top news") || label.contains("últimas notícias") ||
+                label.contains("ultimas noticias")
+        }
+    }
+
     private fun walkFeedRenderers(
         value: Any?,
         blockedByAd: Boolean = false,
@@ -4680,6 +4718,8 @@ object YouTubeRepository {
                 // Walking it again made history parsing effectively quadratic on old devices.
                 keys.filterNot(consumedKeys::contains).forEach { key ->
                     val child = value.opt(key)
+                    if ((key.contains("shelf", ignoreCase = true) || key.contains("section", ignoreCase = true)) &&
+                        isEditorialNewsShelf(child)) return@forEach
                     val startsShortsShelf = key.contains("shelf", ignoreCase = true) && containsShortRenderer(child)
                     val childShelfKey = if (startsShortsShelf) "$shelfPrefix-${shelfCounter[0]++}" else shortsShelfKey
                     walkFeedRenderers(child, blocked, childShelfKey, shelfCounter, shelfPrefix, consumer)

@@ -1262,7 +1262,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
-    var selectedShort by remember { mutableStateOf<FeedItem?>(null) }
+    var selectedShortShelf by remember { mutableStateOf<Pair<List<FeedItem>, Int>?>(null) }
     var searchOpen by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
     val initialContentFocus = remember { FocusRequester() }
@@ -1277,15 +1277,15 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         homeFeed = homeFeed.filterNot { it.id.removePrefix("VL") == id }
     }) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
-    selectedShort?.let { short ->
-        BackHandler { selectedShort = null }
+    selectedShortShelf?.let { (shorts, initialIndex) ->
+        BackHandler { selectedShortShelf = null }
         Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
-            ShortPlayer(activity, short, true, codec, audioCodec, quality, onPlayer) { channelUrl ->
-                selectedShort = null
+            ShelfShortsPlayer(activity, shorts, initialIndex, codec, audioCodec, quality, onPlayer) { channelUrl ->
+                selectedShortShelf = null
                 selectedChannel = channelUrl
             }
             IconButton(
-                onClick = { selectedShort = null },
+                onClick = { selectedShortShelf = null },
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(4.dp),
@@ -1400,7 +1400,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 LazyVerticalGrid(GridCells.Adaptive(320.dp), state = homeGridState, contentPadding = PaddingValues(16.dp)) {
                     feedBlocks.forEachIndexed { index, block ->
                         if (block.first().short) {
-                            item(key = "shorts-$index", span = { GridItemSpan(maxLineSpan) }) { ShortsShelf(block, true) { selectedShort = it } }
+                            item(key = "shorts-$index", span = { GridItemSpan(maxLineSpan) }) { ShortsShelf(block, true) { selected -> selectedShortShelf = block to block.indexOfFirst { it.id == selected.id }.coerceAtLeast(0) } }
                         } else {
                             val item = block.first()
                             item(key = "feed-${item.id}", span = { if (item.channel) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) {
@@ -1418,7 +1418,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 }
                 LazyColumn(state = homeListState) {
                     feedBlocks.forEachIndexed { index, block ->
-                        if (block.first().short) item(key = "shorts-$index") { ShortsShelf(block, false) { selectedShort = it } }
+                        if (block.first().short) item(key = "shorts-$index") { ShortsShelf(block, false) { selected -> selectedShortShelf = block to block.indexOfFirst { it.id == selected.id }.coerceAtLeast(0) } }
                         else {
                             val item = block.first()
                             item(key = "feed-${item.id}") { FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { channelUrl -> { selectedChannel = channelUrl } }) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } }
@@ -3400,6 +3400,12 @@ private fun cleanChannelDisplayName(value: String?): String? {
 private fun displayChannelName(vararg candidates: String?): String =
     candidates.firstNotNullOfOrNull(::cleanChannelDisplayName) ?: "Loading channel…"
 
+private fun displayShortTitle(metadataTitle: String?, fallback: String): String {
+    val candidate = metadataTitle?.trim().orEmpty()
+    val actionLabel = candidate.lowercase() in setOf("add to queue", "save to playlist", "watch later", "share", "more actions", "play next")
+    return candidate.takeIf { it.isNotBlank() && !actionLabel } ?: fallback
+}
+
 @Composable
 private fun VerifiedChannelName(
     name: String,
@@ -4636,15 +4642,41 @@ private fun CommunityCommentActions(postId: String, comment: CommunityComment, o
 }
 
 @Composable
+private fun ShelfShortsPlayer(
+    activity: MainActivity,
+    shorts: List<FeedItem>,
+    initialIndex: Int,
+    codec: CodecChoice,
+    audioCodec: AudioCodecChoice,
+    quality: QualityChoice,
+    onPlayer: (ExoPlayer) -> Unit,
+    onOpenChannel: (String) -> Unit,
+) {
+    val pager = rememberPagerState(
+        initialPage = initialIndex.coerceIn(0, shorts.lastIndex.coerceAtLeast(0)),
+        pageCount = { shorts.size },
+    )
+    VerticalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+        ShortPlayer(
+            activity = activity,
+            item = shorts[page],
+            active = page == pager.currentPage,
+            codec = codec,
+            audioCodec = audioCodec,
+            quality = quality,
+            onPlayer = onPlayer,
+            reserveDetailsBackSpace = true,
+            onOpenChannel = onOpenChannel,
+        )
+    }
+}
+
+@Composable
 private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, openVideo: (String) -> Unit, onPlayerMode: (Boolean) -> Unit) {
     var shorts by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var channelUrl by remember { mutableStateOf<String?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
-    DisposableEffect(activity) {
-        activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose { activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
-    }
     if (channelUrl != null) {
         ChannelScreen(activity, channelUrl!!, codec, audioCodec, quality, onPlayer, { url, _, _ -> openVideo(url) }) { channelUrl = null }
         return
@@ -4695,9 +4727,15 @@ private fun ShortsScreen(activity: MainActivity, codec: CodecChoice, audioCodec:
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, waitingForNext: Boolean = false, onOpenChannel: (String) -> Unit) {
+private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, waitingForNext: Boolean = false, reserveDetailsBackSpace: Boolean = false, onOpenChannel: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    DisposableEffect(activity, active) {
+        if (active) activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            if (active) activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
     val player = remember(item.id) { PlayerFactory.bufferedPlayer(context).apply { repeatMode = Player.REPEAT_MODE_ONE }.also(onPlayer) }
     var streams by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var selected by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
@@ -4953,16 +4991,24 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                         val shortAvatar = shortMetadata?.authorAvatar.orEmpty().ifBlank { item.channelThumbnail }
                         if (shortAvatar.isNotBlank()) AsyncImage(shortAvatar, null, Modifier.size(38.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                         Spacer(Modifier.width(10.dp))
-                        Text(displayChannelName(shortMetadata?.author, item.subtitle), color = ComposeColor.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        VerifiedChannelName(
+                            name = displayChannelName(shortMetadata?.author, item.subtitle),
+                            verified = shortMetadata?.authorVerified == true || item.channelVerified,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = ComposeColor.White,
+                        )
                     }
                     Spacer(Modifier.height(10.dp))
-                    Text(shortMetadata?.title?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
+                    Text(displayShortTitle(shortMetadata?.title, item.title), color = ComposeColor.White, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { expandedTitle = true })
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     IconButton(onClick = { toggleLike() }, enabled = !interactionBusy) {
                         Icon(Icons.Default.ThumbUp, "Like", tint = if (interactions.rating == VideoRating.LIKE) MaterialTheme.colorScheme.primary else ComposeColor.White)
                     }
-                    Text(interactions.likeText, color = ComposeColor.White, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    val shortLikeText = interactions.likeText.trim().takeUnless { value ->
+                        value.isBlank() || value.matches(Regex("^0(?:[.,]0+)?(?:\\s+likes?)?$", RegexOption.IGNORE_CASE))
+                    } ?: "Like"
+                    Text(shortLikeText, color = ComposeColor.White, style = MaterialTheme.typography.labelSmall, maxLines = 1)
                     IconButton(onClick = {
                         showComments = true
                     }) { Icon(Icons.Default.Comment, "Comments", tint = ComposeColor.White) }
@@ -4975,12 +5021,24 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 val likes = interactions.likeText.ifBlank { shortMetadata?.likeText.orEmpty().ifBlank { "—" } }
                 val published = displayPublishedDate(shortMetadata?.publishedDate)
                 val description = descriptionText(shortMetadata?.description.orEmpty())
-                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)) {
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(
+                        start = 24.dp,
+                        end = 24.dp,
+                        top = 4.dp,
+                        bottom = 24.dp,
+                    )
+                ) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Details", Modifier.weight(1f), color = ComposeColor.White, style = MaterialTheme.typography.headlineSmall)
+                        Text(
+                            "Details",
+                            Modifier.padding(start = if (reserveDetailsBackSpace) 28.dp else 0.dp).weight(1f),
+                            color = ComposeColor.White,
+                            style = MaterialTheme.typography.headlineSmall,
+                        )
                         IconButton(onClick = { expandedTitle = false }) { Icon(Icons.Default.Close, "Close details", tint = ComposeColor.White) }
                     }
-                    Text(shortMetadata?.title?.takeIf { it.isNotBlank() } ?: item.title, color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
+                    Text(displayShortTitle(shortMetadata?.title, item.title), color = ComposeColor.White, style = MaterialTheme.typography.titleLarge)
                     Row(Modifier.padding(vertical = 18.dp), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                         Column { Text(if (views >= 0) formatCount(views) else "—", color = ComposeColor.White, style = MaterialTheme.typography.titleLarge); Text("Views", color = ComposeColor.LightGray) }
                         Column { Text(likes, color = ComposeColor.White, style = MaterialTheme.typography.titleLarge); Text("Likes", color = ComposeColor.LightGray) }

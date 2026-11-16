@@ -2441,14 +2441,17 @@ object YouTubeRepository {
             else solveNChallenge(videoId, unresolvedUrl, playerJavaScript(videoId), false)
         // SABR's media endpoint validates the playback session independently from /player.
         // Match the browser request by carrying the same CPN and low-latency response flag.
-        // SabrStream keeps an active broadcast URL byte-for-byte as returned by /player and sends
-        // its GVS proof only in StreamerContext. Unlike VOD, yt_live_broadcast rejects a duplicated
-        // URL-level pot/cpn before parsing the protobuf body (zero-byte HTTP 403). rn is added later
-        // by the session for every POST.
-        val serverUrl = if (isLive) solvedUrl else solvedUrl.toHttpUrlOrNull()?.newBuilder()
-            ?.setQueryParameter("alr", "yes")
-            ?.setQueryParameter("cpn", cpn)
-            ?.setQueryParameter("pot", poToken)
+        // The SABR proof has one source of truth: StreamerContext.poToken. A URL-level pot can
+        // remain stuck on the cold-start proof after the protobuf proof is upgraded, leaving the
+        // server pending until it escalates to status 3. Strip it even if /player supplied one.
+        val serverUrl = solvedUrl.toHttpUrlOrNull()?.newBuilder()
+            ?.removeAllQueryParameters("pot")
+            ?.apply {
+                if (!isLive) {
+                    setQueryParameter("alr", "yes")
+                    setQueryParameter("cpn", cpn)
+                }
+            }
             ?.build()?.toString() ?: solvedUrl
         AppLog.event("SABR endpoint video=$videoId isLive=$isLive serverUrl=$serverUrl")
         PlaybackLoadStatus.showInitial(videoId, "Reading available formats…")
@@ -2895,7 +2898,7 @@ object YouTubeRepository {
             !PlaybackLoadStatus.hasPlaybackStarted(videoId)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Preparing WEB session…")
         val bootstrap = bootstrap(origin, clientName)
-        if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Generating PoToken…")
+        if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Preparing playback proof…")
         val requestedVisitor = standaloneWebVisitorData()
         val authenticated = cookies(origin).let { "SAPISID=" in it || "__Secure-3PAPISID=" in it }
         val streamingBinding = when {
@@ -2911,19 +2914,30 @@ object YouTubeRepository {
                 else -> "visitor"
             }}"
         )
-        var token = WebPoTokenProvider.get(
-            videoId,
-            requestedVisitor,
-            streamingBinding,
-            origin,
-            WEB_PLAYER_UA,
-            forceFreshChallenge = forceFreshPoToken,
-        )
-        // Android 5-7 cannot initialize two WebViews reliably at the same time. Starting the
-        // watch-page attestation runtime before BotGuard caused both to contend for the old
-        // WebView/JS engine, making BotGuard hit its full 30-second timeout before succeeding
-        // on retry. Start attestation only after the PoToken runtime is ready; it still overlaps
-        // player-JS loading and the /player request below.
+        var token = if (reloadToken == null && !adPlayback && !forceFreshPoToken) {
+            // YouTube WEB starts with a lightweight content-bound cold proof while BotGuard and
+            // GenerateIT prepare the definitive minter in parallel. UMP status 2 then triggers the
+            // normal refresh callback, which replaces only StreamerContext.poToken.
+            WebPoTokenProvider.getOrColdStart(
+                videoId,
+                requestedVisitor,
+                streamingBinding,
+                origin,
+                WEB_PLAYER_UA,
+            )
+        } else {
+            WebPoTokenProvider.get(
+                videoId,
+                requestedVisitor,
+                streamingBinding,
+                origin,
+                WEB_PLAYER_UA,
+                forceFreshChallenge = forceFreshPoToken,
+            )
+        }
+        // The official watch page initializes playback attestation separately from the GVS
+        // content-bound PoToken. The live server still escalates valid PoTokens to status 3 when
+        // this ATR proof is omitted, so prepare it while the remaining player work runs.
         WebStreamAttestationProvider.prepareAsync(videoId, origin, WEB_PLAYER_UA)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Loading player JavaScript…")
         val cpn = cpnOverride?.takeIf(String::isNotBlank)
@@ -2989,14 +3003,24 @@ object YouTubeRepository {
         }
         response.optJSONObject("playbackTracking")?.optJSONObject("atrUrl")
             ?.optString("baseUrl")?.takeIf(String::isNotBlank)?.let { atrUrl ->
-                // Preparation overlaps the other player work, but the first SABR
-                // request must not race ahead of YouTube accepting this proof.
                 if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Submitting playback attestation…")
                 runCatching {
                     WebStreamAttestationProvider.attest(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
                 }.onFailure { AppLog.failure("WEB playback attestation video=$videoId", it) }
                 response.put("_materialytAtrUrl", atrUrl)
             }
+        if (reloadToken == null && !adPlayback && !forceFreshPoToken) {
+            WebPoTokenProvider.getIfReady(
+                videoId,
+                requestedVisitor,
+                streamingBinding,
+                origin,
+                WEB_PLAYER_UA,
+            )?.let { definitive ->
+                token = definitive
+                AppLog.event("WEB PoToken definitive proof installed before first SABR request video=$videoId")
+            }
+        }
         if (response.optJSONObject("videoDetails")?.optBoolean("isLive") == true) {
             // Keep the GVS proof produced by the SAME BotGuard runtime that supplied the /player
             // proof and was accepted by playback attestation above. Rebuilding BotGuard here made
@@ -3066,11 +3090,10 @@ object YouTubeRepository {
         val solved = if (response.optBoolean("_materialytNResolved")) rawUrl
             else solveNChallenge(info.videoId, rawUrl, playerJavaScript(info.videoId), false)
         val cpn = response.optString("_materialytCpn").ifBlank { originalCpn.orEmpty() }
-        val pot = response.optString("_materialytStreamingPot")
         val url = solved.toHttpUrlOrNull()?.newBuilder()
+            ?.removeAllQueryParameters("pot")
             ?.setQueryParameter("alr", "yes")
             ?.apply { if (cpn.isNotBlank()) setQueryParameter("cpn", cpn) }
-            ?.apply { if (pot.isNotBlank()) setQueryParameter("pot", pot) }
             ?.build()?.toString() ?: solved
         val config = findString(response, "videoPlaybackUstreamerConfig")
             ?.takeIf(String::isNotBlank) ?: info.videoPlaybackUstreamerConfig
@@ -3094,11 +3117,10 @@ object YouTubeRepository {
         val solved = if (response.optBoolean("_materialytNResolved")) rawUrl
             else solveNChallenge(info.videoId, rawUrl, playerJavaScript(info.videoId), false)
         val cpn = response.optString("_materialytCpn")
-        val pot = info.streamingPoToken
         val url = solved.toHttpUrlOrNull()?.newBuilder()
+            ?.removeAllQueryParameters("pot")
             ?.setQueryParameter("alr", "yes")
             ?.setQueryParameter("cpn", cpn)
-            ?.setQueryParameter("pot", pot)
             ?.build()?.toString() ?: solved
         AppLog.event(
             "SABR player reload ready video=${info.videoId} client=WEB " +

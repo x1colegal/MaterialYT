@@ -2,6 +2,17 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.4] - 2026-11-16
+
+### Changed
+- Start WEB playback with YouTube's cold-start PoToken while preparing the definitive content-bound proof in parallel.
+- Reuse the active BotGuard minter across transient YouTube cookie updates while still detecting authenticated account changes.
+- Keep YouTube's watch-page playback attestation coordinated with the content-bound SABR PoToken; live testing confirmed that omitting ATR can still escalate a valid PoToken session to required protection.
+
+### Fixed
+- Remove stale URL-level `pot` parameters from SABR endpoints so the cold-start proof cannot conflict with a newer `StreamerContext.poToken`.
+- Install an already-prepared definitive proof before the first SABR request and avoid duplicate minting caused by responses still in flight for an older proof.
+
 ## [7.3] - 2026-11-16
 
 ### Changed

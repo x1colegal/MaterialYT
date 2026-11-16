@@ -24,8 +24,6 @@ internal class SabrConfig(
     val clientInfo: SabrMessages.ClientInfo,
     val userAgent: String,
     val nTransform: (String) -> String,
-    /** For web clients: the videoId-bound pot appended to the (n-transformed) SABR url as `&pot=`. */
-    val urlPot: String? = null,
     // Display metadata surfaced in the song-details sheet (persisted as a FormatEntity by MusicService).
     val streamClientLabel: String = "SABR",
     val mimeType: String = "",
@@ -119,7 +117,6 @@ internal class SabrSession(
 
     private fun prepared(rawUrl: String): String {
         var u = config.nTransform(rawUrl)
-        config.urlPot?.let { u += (if (u.contains("?")) "&" else "?") + "pot=" + java.net.URLEncoder.encode(it, "UTF-8") }
         // Stamp the watch-time cpn on every media POST (DIRECT's stampCpn parity) — CDN-safe (harness).
         config.cpn()?.let { u += (if (u.contains("?")) "&" else "?") + "cpn=" + it }
         return u
@@ -488,7 +485,10 @@ internal class SabrSession(
             // response once the previous mint has completed; status 2 is not a one-shot event.
             // Gating this on a 1 -> 2 transition leaves the session stuck forever after one
             // rejected renewal, which is exactly what drained playback at ~70 seconds.
-            if (protStatus == SabrProtection.ATTESTATION_PENDING) {
+            // A completed mint may land while the request made with the previous token is still
+            // in flight. Its status=2 still describes that previous token. Let the next loop
+            // install the already-pending proof before deciding whether another mint is needed.
+            if (protStatus == SabrProtection.ATTESTATION_PENDING && pendingPoToken.get() == null) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
                     if (poTokenRefreshRunning.compareAndSet(false, true)) {

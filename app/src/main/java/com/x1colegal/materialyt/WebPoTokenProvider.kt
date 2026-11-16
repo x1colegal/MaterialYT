@@ -12,6 +12,7 @@ import org.json.JSONObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.time.Instant
+import java.security.SecureRandom
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
@@ -27,12 +28,134 @@ object WebPoTokenProvider {
     private var runtime: BotGuardRuntime? = null
     private var visitorData: String? = null
     private var sessionKey: String? = null
+    private var preparingSessionKey: String? = null
+    private val coldStartRandom = SecureRandom()
+
+    private fun sessionKey(origin: String, userAgent: String, visitor: String, cookies: String): String {
+        val stableAuthNames = setOf(
+            "SID", "HSID", "SSID", "APISID", "SAPISID",
+            "__Secure-1PSID", "__Secure-3PSID",
+            "__Secure-1PAPISID", "__Secure-3PAPISID",
+        )
+        val authIdentity = cookies.split(';').map { it.trim() }
+            .mapNotNull { entry ->
+                val separator = entry.indexOf('=')
+                if (separator <= 0) null else entry.substring(0, separator) to entry.substring(separator + 1)
+            }
+            .filter { it.first in stableAuthNames }
+            .sortedBy { it.first }
+            .joinToString(";") { "${it.first}=${it.second}" }
+        return "$origin\u0000$userAgent\u0000$visitor\u0000$authIdentity"
+    }
 
     fun reset() = synchronized(lock) {
         runtime?.close()
         runtime = null
         visitorData = null
         sessionKey = null
+        preparingSessionKey = null
+    }
+
+    /**
+     * Returns a real content-bound proof when the page minter is already ready. Otherwise returns
+     * the same cold-start token format used by YouTube WEB and prepares BotGuard in parallel.
+     */
+    fun getOrColdStart(
+        videoId: String,
+        requestedVisitorData: String,
+        streamingContentBinding: String,
+        origin: String = "https://www.youtube.com",
+        userAgent: String = YouTubeRepository.WEB_PLAYER_UA,
+    ): WebPoTokenSession {
+        require(requestedVisitorData.isNotBlank()) { "YouTube returned empty visitorData" }
+        val cookies = YouTubeRepository.cookies(origin)
+        val requestedSessionKey = sessionKey(origin, userAgent, requestedVisitorData, cookies)
+        val readyRuntime = synchronized(lock) {
+            runtime?.takeIf {
+                sessionKey == requestedSessionKey && !it.expired() && it.readyNow()
+            }
+        }
+        if (readyRuntime != null) {
+            return get(videoId, requestedVisitorData, streamingContentBinding, origin, userAgent)
+        }
+
+        val shouldPrepare = synchronized(lock) {
+            if (preparingSessionKey == requestedSessionKey) false
+            else {
+                preparingSessionKey = requestedSessionKey
+                true
+            }
+        }
+        if (shouldPrepare) {
+            Thread({
+                runCatching {
+                    get(videoId, requestedVisitorData, streamingContentBinding, origin, userAgent)
+                }.onSuccess {
+                    AppLog.event("WEB PoToken definitive minter prepared after cold start video=$videoId")
+                }.onFailure {
+                    AppLog.failure("WEB PoToken cold-start background preparation video=$videoId", it)
+                }
+                synchronized(lock) {
+                    if (preparingSessionKey == requestedSessionKey) preparingSessionKey = null
+                }
+            }, "materialyt-web-pot-cold-$videoId").apply { isDaemon = true; start() }
+        }
+
+        val playerToken = createColdStartToken(videoId)
+        val streamingToken = if (streamingContentBinding == videoId) playerToken
+            else createColdStartToken(streamingContentBinding)
+        AppLog.event(
+            "WEB PoToken cold start video=$videoId player=${playerToken.length} " +
+                "streaming=${streamingToken.length} sameBinding=${streamingContentBinding == videoId}"
+        )
+        return WebPoTokenSession(requestedVisitorData, playerToken, streamingToken)
+    }
+
+    /** Returns a definitive proof only when this exact browser/minter session is already ready. */
+    fun getIfReady(
+        videoId: String,
+        requestedVisitorData: String,
+        streamingContentBinding: String,
+        origin: String = "https://www.youtube.com",
+        userAgent: String = YouTubeRepository.WEB_PLAYER_UA,
+    ): WebPoTokenSession? {
+        val cookies = YouTubeRepository.cookies(origin)
+        val requestedSessionKey = sessionKey(origin, userAgent, requestedVisitorData, cookies)
+        val available = synchronized(lock) {
+            runtime != null && sessionKey == requestedSessionKey && runtime?.expired() == false &&
+                runtime?.readyNow() == true
+        }
+        return if (available) get(
+            videoId,
+            requestedVisitorData,
+            streamingContentBinding,
+            origin,
+            userAgent,
+        ) else null
+    }
+
+    /** Port of BgUtils createColdStartToken(). */
+    private fun createColdStartToken(contentBinding: String, clientState: Int = 1): String {
+        val binding = contentBinding.toByteArray(Charsets.UTF_8)
+        val timestamp = System.currentTimeMillis() / 1_000L
+        val key0 = coldStartRandom.nextInt(256)
+        val key1 = coldStartRandom.nextInt(256)
+        val header = byteArrayOf(
+            key0.toByte(), key1.toByte(), 0, clientState.toByte(),
+            (timestamp ushr 24).toByte(), (timestamp ushr 16).toByte(),
+            (timestamp ushr 8).toByte(), timestamp.toByte(),
+        )
+        require(header.size + binding.size <= 255) { "Cold-start PoToken binding is too long" }
+        val packet = ByteArray(2 + header.size + binding.size)
+        packet[0] = 34
+        packet[1] = (header.size + binding.size).toByte()
+        header.copyInto(packet, 2)
+        binding.copyInto(packet, 2 + header.size)
+        for (index in 2 until header.size + binding.size) {
+            val packetIndex = 2 + index
+            packet[packetIndex] = (packet[packetIndex].toInt() xor packet[2 + index % 2].toInt()).toByte()
+        }
+        return Base64.encodeToString(packet, Base64.URL_SAFE or Base64.NO_WRAP)
     }
 
     fun get(
@@ -45,7 +168,7 @@ object WebPoTokenProvider {
     ): WebPoTokenSession = synchronized(lock) {
         require(requestedVisitorData.isNotBlank()) { "YouTube returned empty visitorData" }
         val cookies = YouTubeRepository.cookies(origin)
-        val requestedSessionKey = "$origin\u0000$userAgent\u0000$requestedVisitorData\u0000$cookies"
+        val requestedSessionKey = sessionKey(origin, userAgent, requestedVisitorData, cookies)
         if (forceFreshChallenge) {
             // STREAM_PROTECTION_STATUS=ATTESTATION_REQUIRED means the server rejected the proof
             // minted by this BotGuard challenge. Minting the same binding with the same minter is
@@ -146,6 +269,8 @@ private class BotGuardRuntime(
     }
 
     fun expired(): Boolean = Instant.now().isAfter(expiresAt)
+
+    fun readyNow(): Boolean = ready.isDone && !ready.isCompletedExceptionally
 
     fun close() = main.post {
         webView?.apply { loadUrl("about:blank"); removeAllViews(); destroy() }

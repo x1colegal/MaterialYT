@@ -14,8 +14,7 @@ import java.util.concurrent.TimeUnit
 /**
  * Everything one DUAL-TRACK (video + audio) SABR session needs. The video counterpart of [SabrConfig].
  * The server serves the EXACT [videoFormat] itag we pin via preferredVideoFormatId (see
- * [SabrMessages.abrRequestVideo]); [nTransform] n-transforms the ciphered web-client SABR url and
- * [urlPot] is the videoId-bound pot appended as `&pot=` (both null/identity for a direct client).
+ * [SabrMessages.abrRequestVideo]); [nTransform] n-transforms the ciphered web-client SABR URL.
  */
 internal class SabrVideoConfig(
     val mediaId: String,
@@ -27,7 +26,6 @@ internal class SabrVideoConfig(
     val clientInfo: SabrMessages.ClientInfo,
     val userAgent: String,
     val nTransform: (String) -> String,
-    val urlPot: String? = null,
     // Display metadata surfaced in the song-details sheet (persisted as a FormatEntity by MusicService).
     val streamClientLabel: String = "SABR",
     val videoMimeType: String = "",
@@ -142,7 +140,6 @@ internal class SabrVideoSession(
 
     private fun prepared(rawUrl: String): String {
         var u = config.nTransform(rawUrl)
-        config.urlPot?.let { u += (if (u.contains("?")) "&" else "?") + "pot=" + java.net.URLEncoder.encode(it, "UTF-8") }
         config.cpn()?.let { u += (if (u.contains("?")) "&" else "?") + "cpn=" + it }
         return u
     }
@@ -666,7 +663,10 @@ internal class SabrVideoSession(
                 protStatus > lastProtectionRefreshStatus
             // Match the reference SABR generation flow: each pending response may request a new
             // proof. Only suppress concurrent minting, not later status-2 responses.
-            if (protStatus == SabrProtection.ATTESTATION_PENDING) {
+            // A completed mint may land while the request made with the previous token is still
+            // in flight. Its status=2 still describes that previous token. Let the next loop
+            // install the already-pending proof before deciding whether another mint is needed.
+            if (protStatus == SabrProtection.ATTESTATION_PENDING && pendingPoToken.get() == null) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
                     if (poTokenRefreshRunning.compareAndSet(false, true)) {

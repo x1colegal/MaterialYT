@@ -196,8 +196,8 @@ Release builds currently use the configured debug signing key. Fork maintainers 
 ## Known limitations
 
 - YouTube's player clients, internal APIs, continuations, BotGuard challenges, and SABR messages are undocumented and can change at any time.
-- Playback intentionally reports the original WEB, PoToken, attestation, or SABR failure instead of hiding it behind a different YouTube client.
-- YouTube may temporarily report WEB stream protection as pending while playback attestation propagates. MaterialYT keeps the SABR session and its buffered media alive while requesting replacement proofs from the active BotGuard runtime.
+- Playback intentionally reports the original WEB, PoToken, playback-attestation, BotGuard, or SABR failure instead of hiding it behind a different YouTube client.
+- YouTube may temporarily report WEB stream protection as pending while playback attestation and a definitive content-bound PoToken replace the cold-start state. MaterialYT keeps the SABR session and its buffered media alive during that transition.
 - Comments, lyrics, likes, audio tracks, playlists, and account metadata are shown only when YouTube exposes them to the current session.
 - PiP requires Android 8.0 or newer.
 - Codec and hardware-decoder availability depends on the device.

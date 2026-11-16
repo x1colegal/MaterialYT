@@ -183,20 +183,11 @@ internal class SabrSession(
             )) {
             pendingPoToken.getAndSet(null)?.let { refreshed ->
                 poToken = refreshed.second
-                url = url.toHttpUrlOrNull()?.newBuilder()
-                    ?.setQueryParameter("pot", refreshed.first)
-                    ?.build()?.toString() ?: url
                 attestationStalls = 0
                 dry = 0
-                // A SABR transport exchange is bound to the proof that created its cookie and
-                // contexts. Preserve the assembled media buffer/player, but restart only the
-                // request-level state with the new URL/protobuf token pair.
-                requestNumber = 0
-                cookie = null
-                ctxByType.clear()
-                ctxToSend.clear()
-                backoffTimeMs = 0L
-                AppLog.event("SABR audio installed asynchronously refreshed streaming PoToken scope=url-and-streamer-context")
+                // Match googlevideo's reference flow: replace only StreamerContext.poToken. The
+                // signed URL, rn, playback cookie and SABR contexts belong to the active exchange.
+                AppLog.event("SABR audio installed asynchronously refreshed streamer-context PoToken")
             }
             // Keep requesting while WebView mints the replacement proof. YouTube deliberately
             // serves a short grace window of playable media with protection=2; consuming all of
@@ -373,12 +364,9 @@ internal class SabrSession(
                     runCatching { refresh() }
                         .onSuccess { refreshed ->
                             poToken = refreshed.second
-                            url = url.toHttpUrlOrNull()?.newBuilder()
-                                ?.setQueryParameter("pot", refreshed.first)
-                                ?.build()?.toString() ?: url
                             attestationStalls = 0
                             refreshedProtectionDuringStartup = true
-                            AppLog.event("SABR audio installed fresh streaming PoToken during startup protection=$protStatus")
+                            AppLog.event("SABR audio installed streamer-context PoToken during startup protection=$protStatus")
                         }
                         .onFailure { AppLog.failure("SABR audio startup streaming PoToken refresh", it) }
                 }
@@ -495,10 +483,14 @@ internal class SabrSession(
             }
             val protectionEscalated = protStatus >= SabrProtection.ATTESTATION_PENDING &&
                 protStatus > lastProtectionRefreshStatus
-            if (protectionEscalated && protStatus == SabrProtection.ATTESTATION_PENDING) {
+            // A pending response describes the token used to build this request. YouTube's
+            // reference SABR client asks the active minter for another proof after every pending
+            // response once the previous mint has completed; status 2 is not a one-shot event.
+            // Gating this on a 1 -> 2 transition leaves the session stuck forever after one
+            // rejected renewal, which is exactly what drained playback at ~70 seconds.
+            if (protStatus == SabrProtection.ATTESTATION_PENDING) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
-                    lastProtectionRefreshStatus = protStatus
                     if (poTokenRefreshRunning.compareAndSet(false, true)) {
                         Thread({
                             runCatching { refresh() }
@@ -522,17 +514,11 @@ internal class SabrSession(
                     lastProtectionRefreshStatus = protStatus
                     runCatching { refresh() }
                         .onSuccess { refreshed ->
-                            // The WEB streamer validates both copies. Updating only the protobuf
-                            // while leaving the rejected `pot=` in the endpoint makes the request
-                            // internally inconsistent and escalates pending protection to required.
                             poToken = refreshed.second
-                            url = url.toHttpUrlOrNull()?.newBuilder()
-                                ?.setQueryParameter("pot", refreshed.first)
-                                ?.build()?.toString() ?: url
                             attestationStalls = 0
                             dry = 0
                             protectionTokenRefreshed = true
-                            AppLog.event("SABR audio installed fresh streaming PoToken in URL and request protection=$protStatus")
+                            AppLog.event("SABR audio installed streamer-context PoToken protection=$protStatus")
                         }
                         .onFailure { AppLog.failure("SABR audio streaming PoToken refresh", it) }
                 }

@@ -3033,10 +3033,13 @@ object YouTubeRepository {
             binding,
             "https://www.youtube.com",
             WEB_PLAYER_UA,
-            forceFreshChallenge = true,
+            // Stream protection asks the already-attested minter for a new proof. Recreating the
+            // BotGuard runtime here changes the visitor/minter epoch underneath the active SABR
+            // session and leaves it permanently pending.
+            forceFreshChallenge = false,
         )
             .streamingDataPoToken
-        AppLog.event("SABR WEB streaming PoToken refreshed from a fresh challenge video=${info.videoId}")
+        AppLog.event("SABR WEB streaming PoToken minted from active attested runtime video=${info.videoId}")
         return refreshed
     }
 

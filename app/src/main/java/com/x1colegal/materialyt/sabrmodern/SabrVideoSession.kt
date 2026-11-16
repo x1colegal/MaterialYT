@@ -208,24 +208,10 @@ internal class SabrVideoSession(
             )) {
             pendingPoToken.getAndSet(null)?.let { refreshed ->
                 poToken = refreshed.second
-                // The URL token and the protobuf token are one binding. Keeping the original URL
-                // `pot` while replacing only the streamer-context proof makes live requests carry
-                // two different attestations, so the server remains at protection=2 forever.
-                url = url.toHttpUrlOrNull()?.newBuilder()
-                    ?.setQueryParameter("pot", refreshed.first)
-                    ?.build()?.toString() ?: url
                 attestationStalls = 0
                 dry = 0
-                // Cookies and SABR contexts are scoped to the proof that produced them. Sending
-                // those values alongside a newly minted URL/streamer token intermittently keeps
-                // the server at protection=2 until it escalates to 3. Start a fresh transport
-                // exchange while retaining the already assembled media buffers and their readers.
-                requestNumber = 0
-                cookie = null
-                ctxByType.clear()
-                ctxToSend.clear()
-                backoffTimeMs = 0L
-                AppLog.event("SABR video installed asynchronously refreshed streaming PoToken scope=url-and-streamer-context")
+                // Keep URL, rn, cookie and contexts; only the streamer-context proof rotates.
+                AppLog.event("SABR video installed asynchronously refreshed streamer-context PoToken")
             }
             // Keep requesting while WebView mints the replacement proof. YouTube deliberately
             // serves a short grace window of playable media with protection=2; consuming all of
@@ -465,12 +451,9 @@ internal class SabrVideoSession(
                     runCatching { refresh() }
                         .onSuccess { refreshed ->
                             poToken = refreshed.second
-                            url = url.toHttpUrlOrNull()?.newBuilder()
-                                ?.setQueryParameter("pot", refreshed.first)
-                                ?.build()?.toString() ?: url
                             attestationStalls = 0
                             refreshedProtectionDuringStartup = true
-                            AppLog.event("SABR video installed fresh streaming PoToken during startup protection=$protStatus scope=url-and-streamer-context")
+                            AppLog.event("SABR video installed streamer-context PoToken during startup protection=$protStatus")
                         }
                         .onFailure { AppLog.failure("SABR video startup streaming PoToken refresh", it) }
                 }
@@ -675,17 +658,17 @@ internal class SabrVideoSession(
                 SabrProtection.nextStalls(protStatus, madeProgress = newSeg, prev = attestationStalls)
             // Status 2 means YouTube is already waiting for a new proof. It can arrive together
             // with a final batch of playable media, so waiting for an empty response loses the
-            // live edge once that small batch is consumed. Re-arm after status 1 so a later
-            // 1 -> 2 transition mints again without repeatedly minting for every status-2 reply.
+            // live edge once that small batch is consumed.
             if (protStatus < SabrProtection.ATTESTATION_PENDING) {
                 lastProtectionRefreshStatus = 0L
             }
             val protectionEscalated = protStatus >= SabrProtection.ATTESTATION_PENDING &&
                 protStatus > lastProtectionRefreshStatus
-            if (protectionEscalated && protStatus == SabrProtection.ATTESTATION_PENDING) {
+            // Match the reference SABR generation flow: each pending response may request a new
+            // proof. Only suppress concurrent minting, not later status-2 responses.
+            if (protStatus == SabrProtection.ATTESTATION_PENDING) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
-                    lastProtectionRefreshStatus = protStatus
                     if (poTokenRefreshRunning.compareAndSet(false, true)) {
                         Thread({
                             runCatching { refresh() }
@@ -710,18 +693,10 @@ internal class SabrVideoSession(
                     runCatching { refresh() }
                         .onSuccess { refreshed ->
                             poToken = refreshed.second
-                            url = url.toHttpUrlOrNull()?.newBuilder()
-                                ?.setQueryParameter("pot", refreshed.first)
-                                ?.build()?.toString() ?: url
                             attestationStalls = 0
                             dry = 0
-                            requestNumber = 0
-                            cookie = null
-                            ctxByType.clear()
-                            ctxToSend.clear()
-                            backoffTimeMs = 0L
                             protectionTokenRefreshed = true
-                            AppLog.event("SABR video installed fresh streaming PoToken protection=$protStatus scope=url-and-streamer-context")
+                            AppLog.event("SABR video installed streamer-context PoToken protection=$protStatus")
                         }
                         .onFailure { AppLog.failure("SABR video streaming PoToken refresh", it) }
                 }

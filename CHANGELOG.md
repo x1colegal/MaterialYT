@@ -2,6 +2,21 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.3] - 2026-11-16
+
+### Changed
+- Renew WEB SABR streaming PoTokens from the active BotGuard runtime whenever YouTube continues reporting pending stream protection, matching the current reference SABR lifecycle.
+- Preserve the active SABR endpoint, request numbering, playback cookie, contexts, player position, and accumulated media while replacement proofs are minted.
+- Accept both legacy array and current object responses from BotGuard's GenerateIT endpoint.
+- Remove the misleading HTTP/1.0 compatibility mode; networking settings now expose HTTP/2 with HTTP/1.1 fallback or forced HTTP/1.1.
+
+### Fixed
+- Prevent audio and video sessions from remaining permanently stuck at `protection=2` after only one PoToken renewal attempt.
+- Keep playback running from its existing buffer while serialized PoToken renewals continue.
+
+### Documentation
+- Update the README networking and playback-attestation descriptions for the current WEB + PoToken + SABR implementation.
+
 ## [7.2] - 2026-11-16
 
 ### Fixed

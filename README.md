@@ -89,7 +89,8 @@ Shorts relies on frequently changing internal Reel endpoints. Temporary feed or 
 
 - Native WEB + PoToken + SABR/UMP playback for regular videos, YouTube Music, and Shorts
 - One consistent WEB playback identity with no TV, MWEB, VISIONOS, IOS, ANDROID, or WEB_REMIX playback fallback
-- Official WEB playback-attestation submission with shared in-flight protection renewal
+- Official WEB playback-attestation submission with serialized in-flight protection renewal
+- In-session PoToken renewal while stream protection is pending, preserving SABR state and already buffered media
 - One clean BotGuard runtime retry after a WebView initialization timeout
 - Separate adaptive audio and video selection
 - AVC, HEVC, VP9, and AV1 video preferences
@@ -133,11 +134,10 @@ MaterialYT does not request or store the Google password in its native UI. Clear
 
 ## Networking
 
-MaterialYT uses OkHttp for backend and media traffic. The Settings screen provides three protocol modes:
+MaterialYT uses OkHttp for backend and media traffic. The Settings screen provides two protocol modes:
 
 - **HTTP/2** with HTTP/1.1 fallback
 - **HTTP/1.1** only
-- **HTTP/1.0 compatibility**, using HTTP/1.1 connection-close behavior because OkHttp does not emit HTTP/1.0 request lines
 
 Network protocol selection applies to backend and media requests.
 
@@ -197,7 +197,7 @@ Release builds currently use the configured debug signing key. Fork maintainers 
 
 - YouTube's player clients, internal APIs, continuations, BotGuard challenges, and SABR messages are undocumented and can change at any time.
 - Playback intentionally reports the original WEB, PoToken, attestation, or SABR failure instead of hiding it behind a different YouTube client.
-- YouTube may temporarily report WEB stream protection as pending while a submitted playback attestation propagates through its backend.
+- YouTube may temporarily report WEB stream protection as pending while playback attestation propagates. MaterialYT keeps the SABR session and its buffered media alive while requesting replacement proofs from the active BotGuard runtime.
 - Comments, lyrics, likes, audio tracks, playlists, and account metadata are shown only when YouTube exposes them to the current session.
 - PiP requires Android 8.0 or newer.
 - Codec and hardware-decoder availability depends on the device.

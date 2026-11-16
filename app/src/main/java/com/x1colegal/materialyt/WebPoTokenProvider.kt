@@ -169,9 +169,16 @@ private class BotGuardRuntime(
 
         @JavascriptInterface fun botguard(response: String) = Thread {
             runCatching {
-                val generated = JSONArray(request(GENERATE_URL, JSONArray().put(REQUEST_KEY).put(response).toString()))
-                val token = decodeBase64(generated.getString(0)).joinToString(",") { (it.toInt() and 0xff).toString() }
-                expiresAt = Instant.now().plusSeconds((generated.optLong(1, 3600) - 600).coerceAtLeast(60))
+                val rawGenerated = request(GENERATE_URL, JSONArray().put(REQUEST_KEY).put(response).toString()).trim()
+                val (encodedToken, ttlSeconds) = if (rawGenerated.startsWith("{")) {
+                    val generated = JSONObject(rawGenerated)
+                    generated.getString("integrityToken") to generated.optLong("estimatedTtlSecs", 3600)
+                } else {
+                    val generated = JSONArray(rawGenerated)
+                    generated.getString(0) to generated.optLong(1, 3600)
+                }
+                val token = decodeBase64(encodedToken).joinToString(",") { (it.toInt() and 0xff).toString() }
+                expiresAt = Instant.now().plusSeconds((ttlSeconds - 600).coerceAtLeast(60))
                 main.post { webView?.evaluateJavascript("""
                     try {
                       getMinter=webPoSignalOutput[0];

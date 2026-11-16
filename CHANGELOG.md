@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.1] - 2026-11-16
+
+### Fixed
+- Keep audio and video SABR drains alive indefinitely while YouTube reports pending stream protection (`protection=2`).
+- Prevent pending attestation responses from exhausting the normal iteration and dry-response limits and ending playback with `incomplete drain`.
+- Preserve accumulated playback buffers while PoToken renewal continues; fatal attestation limits now apply only after YouTube escalates protection to required (`protection=3`).
+
 ## [7.0] - 2026-11-14
 
 ### Added

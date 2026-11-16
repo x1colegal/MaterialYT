@@ -172,11 +172,17 @@ internal class SabrSession(
         var protectionRefreshes = 0
         var protectionMaxRetries = 5
         var backoffTimeMs = 0L
+        var activeProtectionStatus = 0L
         val pendingPoToken = java.util.concurrent.atomic.AtomicReference<Pair<String, ByteArray>?>(null)
         val poTokenRefreshRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
         val maxDry = if (isLive) 40 else 6
-        while (!cancelled && (isLive || (iter < maxIter && dry < maxDry))) {
+        while (!cancelled && (
+            isLive ||
+                (iter < maxIter && dry < maxDry) ||
+                activeProtectionStatus == SabrProtection.ATTESTATION_PENDING ||
+                poTokenRefreshRunning.get()
+            )) {
             pendingPoToken.getAndSet(null)?.let { refreshed ->
                 poToken = refreshed.second
                 url = url.toHttpUrlOrNull()?.newBuilder()
@@ -314,6 +320,7 @@ internal class SabrSession(
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
                     val status = SabrProto.read(p.payload)
                     protStatus = status.longAt(1)
+                    activeProtectionStatus = protStatus
                     status.longAt(2).takeIf { it > 0 }?.let { protectionMaxRetries = it.toInt() }
                     if (protStatus != 1L || iter <= 3) AppLog.event("SABR audio protection=$protStatus iter=$iter")
                     Timber.tag(TAG).d("STREAM_PROTECTION_STATUS=$protStatus (1=OK,2=pending,3=attestation-required)")
@@ -570,7 +577,8 @@ internal class SabrSession(
                     continue
                 }
             }
-            if (!isLive && SabrProtection.capped(attestationStalls)) {
+            if (!isLive && protStatus >= SabrProtection.ATTESTATION_REQUIRED &&
+                SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR attestation cap (STREAM_PROTECTION_STATUS=$protStatus): ${buffer.available()}/${config.format.contentLength} at seq $lastSeq/$endSeg — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus): ${buffer.available()}/${config.format.contentLength}", stall = true); return
             }

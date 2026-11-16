@@ -194,6 +194,7 @@ internal class SabrVideoSession(
         var protectionRefreshes = 0
         var protectionMaxRetries = 5
         var backoffTimeMs = 0L
+        var activeProtectionStatus = 0L
         var consecutiveNetworkErrors = 0
         var lastHeartbeatAt = 0L
         var heartbeatServerData = config.heartbeatServerData.takeIf(String::isNotBlank)
@@ -201,7 +202,12 @@ internal class SabrVideoSession(
         val poTokenRefreshRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
         val maxDry = if (isLive) 40 else 6
-        while (!cancelled && (isLive || (iter < maxIter && dry < maxDry))) {
+        while (!cancelled && (
+            isLive ||
+                (iter < maxIter && dry < maxDry) ||
+                activeProtectionStatus == SabrProtection.ATTESTATION_PENDING ||
+                poTokenRefreshRunning.get()
+            )) {
             pendingPoToken.getAndSet(null)?.let { refreshed ->
                 poToken = refreshed.second
                 // The URL token and the protobuf token are one binding. Keeping the original URL
@@ -405,6 +411,7 @@ internal class SabrVideoSession(
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
                     val status = SabrProto.read(p.payload)
                     protStatus = status.longAt(1)
+                    activeProtectionStatus = protStatus
                     status.longAt(2).takeIf { it > 0 }?.let { protectionMaxRetries = it.toInt() }
                     if (protStatus != 1L || iter <= 3) AppLog.event("SABR video protection=$protStatus iter=$iter")
                     Timber.tag(TAG).d("STREAM_PROTECTION_STATUS=$protStatus (1=OK,2=pending,3=attestation-required)")
@@ -759,7 +766,8 @@ internal class SabrVideoSession(
                     continue
                 }
             }
-            if (!isLive && SabrProtection.capped(attestationStalls)) {
+            if (!isLive && protStatus >= SabrProtection.ATTESTATION_REQUIRED &&
+                SabrProtection.capped(attestationStalls)) {
                 Timber.tag(TAG).w("SABR video attestation cap (STREAM_PROTECTION_STATUS=$protStatus) — this client cannot satisfy attestation")
                 failStream("attestation-capped (protection=$protStatus)", stall = true); return
             }

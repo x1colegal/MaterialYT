@@ -2,6 +2,14 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.2] - 2026-11-16
+
+### Fixed
+- Treat both pending and required SABR stream protection (`protection=2` and `protection=3`) as recoverable states.
+- Preserve the active player and accumulated audio/video buffers while attestation renewal continues.
+- Retry PoToken attestation with cooldown until YouTube accepts the proof instead of terminating playback with `attestation-capped` or `incomplete drain`.
+- Ignore server-provided attestation retry limits that previously stopped recovery before protection returned to normal.
+
 ## [7.1] - 2026-11-16
 
 ### Fixed

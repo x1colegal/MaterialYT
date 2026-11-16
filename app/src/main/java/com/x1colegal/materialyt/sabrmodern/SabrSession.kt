@@ -169,8 +169,6 @@ internal class SabrSession(
         var startupEmptyResponses = 0
         var lastProtectionRefreshAt = 0L
         var lastProtectionRefreshStatus = 0L
-        var protectionRefreshes = 0
-        var protectionMaxRetries = 5
         var backoffTimeMs = 0L
         var activeProtectionStatus = 0L
         val pendingPoToken = java.util.concurrent.atomic.AtomicReference<Pair<String, ByteArray>?>(null)
@@ -180,7 +178,7 @@ internal class SabrSession(
         while (!cancelled && (
             isLive ||
                 (iter < maxIter && dry < maxDry) ||
-                activeProtectionStatus == SabrProtection.ATTESTATION_PENDING ||
+                activeProtectionStatus >= SabrProtection.ATTESTATION_PENDING ||
                 poTokenRefreshRunning.get()
             )) {
             pendingPoToken.getAndSet(null)?.let { refreshed ->
@@ -190,7 +188,6 @@ internal class SabrSession(
                     ?.build()?.toString() ?: url
                 attestationStalls = 0
                 dry = 0
-                protectionRefreshes++
                 // A SABR transport exchange is bound to the proof that created its cookie and
                 // contexts. Preserve the assembled media buffer/player, but restart only the
                 // request-level state with the new URL/protobuf token pair.
@@ -321,7 +318,6 @@ internal class SabrSession(
                     val status = SabrProto.read(p.payload)
                     protStatus = status.longAt(1)
                     activeProtectionStatus = protStatus
-                    status.longAt(2).takeIf { it > 0 }?.let { protectionMaxRetries = it.toInt() }
                     if (protStatus != 1L || iter <= 3) AppLog.event("SABR audio protection=$protStatus iter=$iter")
                     Timber.tag(TAG).d("STREAM_PROTECTION_STATUS=$protStatus (1=OK,2=pending,3=attestation-required)")
                 }
@@ -496,12 +492,10 @@ internal class SabrSession(
             // those last segments, then re-arm once YouTube accepts the proof with status 1.
             if (protStatus < SabrProtection.ATTESTATION_PENDING) {
                 lastProtectionRefreshStatus = 0L
-                protectionRefreshes = 0
             }
             val protectionEscalated = protStatus >= SabrProtection.ATTESTATION_PENDING &&
                 protStatus > lastProtectionRefreshStatus
-            if (protectionEscalated && protStatus == SabrProtection.ATTESTATION_PENDING &&
-                protectionRefreshes < protectionMaxRetries) {
+            if (protectionEscalated && protStatus == SabrProtection.ATTESTATION_PENDING) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
                     lastProtectionRefreshStatus = protStatus
@@ -522,7 +516,7 @@ internal class SabrSession(
                     System.currentTimeMillis() - lastProtectionRefreshAt >= SabrProtection.REFRESH_COOLDOWN_MS
                 )
             var protectionTokenRefreshed = false
-            if (protectionRefreshDue && protectionRefreshes < protectionMaxRetries) {
+            if (protectionRefreshDue) {
                 config.refreshPoToken?.let { refresh ->
                     lastProtectionRefreshAt = System.currentTimeMillis()
                     lastProtectionRefreshStatus = protStatus
@@ -537,7 +531,6 @@ internal class SabrSession(
                                 ?.build()?.toString() ?: url
                             attestationStalls = 0
                             dry = 0
-                            protectionRefreshes++
                             protectionTokenRefreshed = true
                             AppLog.event("SABR audio installed fresh streaming PoToken in URL and request protection=$protStatus")
                         }
@@ -576,11 +569,6 @@ internal class SabrSession(
                     lastProtectionRefreshStatus = 0
                     continue
                 }
-            }
-            if (!isLive && protStatus >= SabrProtection.ATTESTATION_REQUIRED &&
-                SabrProtection.capped(attestationStalls)) {
-                Timber.tag(TAG).w("SABR attestation cap (STREAM_PROTECTION_STATUS=$protStatus): ${buffer.available()}/${config.format.contentLength} at seq $lastSeq/$endSeg — this client cannot satisfy attestation")
-                failStream("attestation-capped (protection=$protStatus): ${buffer.available()}/${config.format.contentLength}", stall = true); return
             }
             // Completion: end_segment_number when the server sent one, else BYTE coverage reaching
             // contentLength (a seeked session gets no endSeg — proven live).

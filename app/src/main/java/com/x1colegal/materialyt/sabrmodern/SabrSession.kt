@@ -170,6 +170,8 @@ internal class SabrSession(
         var activeProtectionStatus = 0L
         val pendingPoToken = java.util.concurrent.atomic.AtomicReference<Pair<String, ByteArray>?>(null)
         val poTokenRefreshRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+        val poTokenGeneration = java.util.concurrent.atomic.AtomicLong(0L)
+        var protectionRejectCount = 0L
 
         val maxDry = if (isLive) 40 else 6
         while (!cancelled && (
@@ -184,7 +186,7 @@ internal class SabrSession(
                 dry = 0
                 // Match googlevideo's reference flow: replace only StreamerContext.poToken. The
                 // signed URL, rn, playback cookie and SABR contexts belong to the active exchange.
-                AppLog.event("SABR audio installed asynchronously refreshed streamer-context PoToken")
+                AppLog.event("SABR audio installed asynchronously refreshed streamer-context PoToken generation=${poTokenGeneration.get()}")
             }
             // Keep requesting while WebView mints the replacement proof. YouTube deliberately
             // serves a short grace window of playable media with protection=2; consuming all of
@@ -209,6 +211,10 @@ internal class SabrSession(
             iter++
             if (paceAheadBytes > 0) buffer.awaitDemand(paceAheadBytes) { cancelled }
             if (cancelled) return
+            // Bind every response to the exact proof generation serialized in its request. A
+            // delayed status for an older proof must not trigger another mint after a newer proof
+            // has already become active (googlevideo parity).
+            val requestPoTokenGeneration = poTokenGeneration.get()
             val body = SabrMessages.abrRequest(
                 ustreamerConfig = ustreamerConfig,
                 format = config.format,
@@ -264,6 +270,7 @@ internal class SabrSession(
             val sabrErrors = ArrayList<String>()
             var gotContext = false
             var protStatus = 0L
+            var protMaxRetries = 0L
             var reloadToken: String? = null
             var snackbarPayload: String? = null
             for (p in parts) when (p.type) {
@@ -305,9 +312,32 @@ internal class SabrSession(
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
                     val status = SabrProto.read(p.payload)
                     protStatus = status.longAt(1)
-                    activeProtectionStatus = protStatus
-                    if (protStatus != 1L || iter <= 3) AppLog.event("SABR audio protection=$protStatus iter=$iter")
+                    protMaxRetries = status.longAt(2)
+                    if (protStatus != 1L || iter <= 3) AppLog.event(
+                        "SABR audio protection=$protStatus iter=$iter requestGeneration=$requestPoTokenGeneration " +
+                            "currentGeneration=${poTokenGeneration.get()} maxRetries=$protMaxRetries"
+                    )
                     Timber.tag(TAG).d("STREAM_PROTECTION_STATUS=$protStatus (1=OK,2=pending,3=attestation-required)")
+                }
+            }
+            val staleProtectionResponse = protStatus >= SabrProtection.ATTESTATION_PENDING &&
+                requestPoTokenGeneration != poTokenGeneration.get()
+            if (staleProtectionResponse) {
+                AppLog.event(
+                    "SABR audio ignored stale protection=$protStatus requestGeneration=$requestPoTokenGeneration " +
+                        "currentGeneration=${poTokenGeneration.get()}"
+                )
+                protStatus = 0L
+            } else if (protStatus > 0L) {
+                activeProtectionStatus = protStatus
+                if (protStatus == 1L) protectionRejectCount = 0L
+                if (protStatus == SabrProtection.ATTESTATION_REQUIRED) {
+                    val allowedRetries = protMaxRetries.takeIf { it > 0L } ?: 5L
+                    if (protectionRejectCount >= allowedRetries) {
+                        failStream("stream protection rejected after $protectionRejectCount attempts", stall = true)
+                        return
+                    }
+                    protectionRejectCount++
                 }
             }
             if (sabrErrors.isNotEmpty()) {
@@ -361,6 +391,7 @@ internal class SabrSession(
                     runCatching { refresh() }
                         .onSuccess { refreshed ->
                             poToken = refreshed.second
+                            poTokenGeneration.incrementAndGet()
                             attestationStalls = 0
                             refreshedProtectionDuringStartup = true
                             AppLog.event("SABR audio installed streamer-context PoToken during startup protection=$protStatus")
@@ -494,7 +525,10 @@ internal class SabrSession(
                     if (poTokenRefreshRunning.compareAndSet(false, true)) {
                         Thread({
                             runCatching { refresh() }
-                                .onSuccess(pendingPoToken::set)
+                                .onSuccess { refreshed ->
+                                    pendingPoToken.set(refreshed)
+                                    poTokenGeneration.incrementAndGet()
+                                }
                                 .onFailure { AppLog.failure("SABR audio asynchronous streaming PoToken refresh", it) }
                             poTokenRefreshRunning.set(false)
                         }, "materialyt-audio-pot-${config.mediaId}").apply { isDaemon = true; start() }
@@ -515,6 +549,7 @@ internal class SabrSession(
                     runCatching { refresh() }
                         .onSuccess { refreshed ->
                             poToken = refreshed.second
+                            poTokenGeneration.incrementAndGet()
                             attestationStalls = 0
                             dry = 0
                             protectionTokenRefreshed = true

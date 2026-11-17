@@ -195,6 +195,8 @@ internal class SabrVideoSession(
         var heartbeatServerData = config.heartbeatServerData.takeIf(String::isNotBlank)
         val pendingPoToken = java.util.concurrent.atomic.AtomicReference<Pair<String, ByteArray>?>(null)
         val poTokenRefreshRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+        val poTokenGeneration = java.util.concurrent.atomic.AtomicLong(0L)
+        var protectionRejectCount = 0L
 
         val maxDry = if (isLive) 40 else 6
         while (!cancelled && (
@@ -208,7 +210,7 @@ internal class SabrVideoSession(
                 attestationStalls = 0
                 dry = 0
                 // Keep URL, rn, cookie and contexts; only the streamer-context proof rotates.
-                AppLog.event("SABR video installed asynchronously refreshed streamer-context PoToken")
+                AppLog.event("SABR video installed asynchronously refreshed streamer-context PoToken generation=${poTokenGeneration.get()}")
             }
             // Keep requesting while WebView mints the replacement proof. YouTube deliberately
             // serves a short grace window of playable media with protection=2; consuming all of
@@ -245,6 +247,10 @@ internal class SabrVideoSession(
                 playerTimeMs = if (anchor == null || anchoredAt == null) LIVE_EDGE_SENTINEL_MS else
                     anchor + (android.os.SystemClock.elapsedRealtime() - anchoredAt).coerceAtLeast(0L)
             }
+            // The protection status in the response describes the proof serialized below. A new
+            // proof may finish minting while this HTTP request is in flight, so retain its exact
+            // generation and ignore a delayed status for the superseded proof (googlevideo parity).
+            val requestPoTokenGeneration = poTokenGeneration.get()
             val body = SabrMessages.abrRequestVideo(
                 ustreamerConfig = ustreamerConfig,
                 videoFormat = config.videoFormat,
@@ -351,6 +357,7 @@ internal class SabrVideoSession(
             val sabrErrors = ArrayList<String>()
             var gotContext = false
             var protStatus = 0L
+            var protMaxRetries = 0L
             var reloadToken: String? = null
             var snackbarPayload: String? = null
             for (p in parts) when (p.type) {
@@ -391,9 +398,34 @@ internal class SabrVideoSession(
                 SabrUmp.STREAM_PROTECTION_STATUS -> {
                     val status = SabrProto.read(p.payload)
                     protStatus = status.longAt(1)
-                    activeProtectionStatus = protStatus
-                    if (protStatus != 1L || iter <= 3) AppLog.event("SABR video protection=$protStatus iter=$iter")
+                    protMaxRetries = status.longAt(2)
+                    if (protStatus != 1L || iter <= 3) AppLog.event(
+                        "SABR video protection=$protStatus iter=$iter requestGeneration=$requestPoTokenGeneration " +
+                            "currentGeneration=${poTokenGeneration.get()} maxRetries=$protMaxRetries"
+                    )
                     Timber.tag(TAG).d("STREAM_PROTECTION_STATUS=$protStatus (1=OK,2=pending,3=attestation-required)")
+                }
+            }
+            val staleProtectionResponse = protStatus >= SabrProtection.ATTESTATION_PENDING &&
+                requestPoTokenGeneration != poTokenGeneration.get()
+            if (staleProtectionResponse) {
+                AppLog.event(
+                    "SABR video ignored stale protection=$protStatus requestGeneration=$requestPoTokenGeneration " +
+                        "currentGeneration=${poTokenGeneration.get()}"
+                )
+                // Match googlevideo: process the rest of this UMP response, but do not let an old
+                // request mint another token or overwrite the active protection state.
+                protStatus = 0L
+            } else if (protStatus > 0L) {
+                activeProtectionStatus = protStatus
+                if (protStatus == 1L) protectionRejectCount = 0L
+                if (protStatus == SabrProtection.ATTESTATION_REQUIRED) {
+                    val allowedRetries = protMaxRetries.takeIf { it > 0L } ?: 5L
+                    if (protectionRejectCount >= allowedRetries) {
+                        failStream("stream protection rejected after $protectionRejectCount attempts", stall = true)
+                        return
+                    }
+                    protectionRejectCount++
                 }
             }
             if (sabrErrors.isNotEmpty()) {
@@ -448,6 +480,7 @@ internal class SabrVideoSession(
                     runCatching { refresh() }
                         .onSuccess { refreshed ->
                             poToken = refreshed.second
+                            poTokenGeneration.incrementAndGet()
                             attestationStalls = 0
                             refreshedProtectionDuringStartup = true
                             AppLog.event("SABR video installed streamer-context PoToken during startup protection=$protStatus")
@@ -672,7 +705,10 @@ internal class SabrVideoSession(
                     if (poTokenRefreshRunning.compareAndSet(false, true)) {
                         Thread({
                             runCatching { refresh() }
-                                .onSuccess(pendingPoToken::set)
+                                .onSuccess { refreshed ->
+                                    pendingPoToken.set(refreshed)
+                                    poTokenGeneration.incrementAndGet()
+                                }
                                 .onFailure { AppLog.failure("SABR video asynchronous streaming PoToken refresh", it) }
                             poTokenRefreshRunning.set(false)
                         }, "materialyt-live-pot-${config.mediaId}").apply { isDaemon = true; start() }
@@ -693,6 +729,7 @@ internal class SabrVideoSession(
                     runCatching { refresh() }
                         .onSuccess { refreshed ->
                             poToken = refreshed.second
+                            poTokenGeneration.incrementAndGet()
                             attestationStalls = 0
                             dry = 0
                             protectionTokenRefreshed = true

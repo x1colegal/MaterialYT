@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.5] - 2026-11-17
+
+### Fixed
+- Track the PoToken generation used by every SABR request and ignore delayed protection responses produced for an older proof, matching the current `googlevideo` client behavior.
+- Respect YouTube's stream-protection retry limit and expose pending/rejected proof state in playback diagnostics.
+
 ## [7.4] - 2026-11-16
 
 ### Changed

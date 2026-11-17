@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.7] - 2026-11-17
+
+### Fixed
+- Keep three-button navigation icons visible in dark and OLED themes across the home screen and video player while preserving the YouTube Music player's dedicated system-bar styling.
+
 ## [7.6] - 2026-11-17
 
 ### Fixed

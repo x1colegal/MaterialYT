@@ -457,6 +457,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var appUsesDarkSystemBars = true
+
+    fun appThemeDark(dark: Boolean) {
+        appUsesDarkSystemBars = dark
+        // The music player owns both system bars and intentionally keeps its existing treatment.
+        if (!musicSystemBarsActive && !isFullscreen && !pipMode) {
+            WindowCompat.getInsetsController(window, window.decorView)
+                .isAppearanceLightNavigationBars = !dark
+        }
+    }
+
     private fun restoreNormalSystemBars() {
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
@@ -464,7 +475,10 @@ class MainActivity : ComponentActivity() {
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         // Edge-to-edge is established once in onCreate. Toggling decor fitting back to true and
         // then false when a player opens leaves the Android 5-7 decor surface inset permanently.
-        WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightNavigationBars = !appUsesDarkSystemBars
+            show(WindowInsetsCompat.Type.systemBars())
+        }
         window.decorView.requestApplyInsets()
     }
 
@@ -734,6 +748,7 @@ class MainActivity : ComponentActivity() {
     private fun applyVideoPlayerSystemBars() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        insetsController.isAppearanceLightNavigationBars = !appUsesDarkSystemBars
         insetsController.show(WindowInsetsCompat.Type.systemBars())
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -807,6 +822,7 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
     val scheme = colorScheme(base, dark, theme == ThemeMode.OLED)
     val musicBarsActive = activity.isMusicPlayerActive
     SideEffect {
+        activity.appThemeDark(dark)
         // Player-owned system bars must not be overwritten by a theme recomposition after the
         // player has made them transparent.
         if (!musicBarsActive && !activity.isFullscreen) {

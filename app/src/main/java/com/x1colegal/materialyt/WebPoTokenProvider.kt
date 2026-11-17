@@ -235,7 +235,6 @@ private class BotGuardRuntime(
     private val main = Handler(Looper.getMainLooper())
     private val ready = CompletableFuture<Unit>()
     private val mintResults = mutableMapOf<String, CompletableFuture<String>>()
-    private val mintedTokens = mutableMapOf<String, String>()
     private var webView: WebView? = null
     private var expiresAt = Instant.EPOCH
 
@@ -256,14 +255,8 @@ private class BotGuardRuntime(
     }
 
     fun mint(identifier: String): String {
-        val (result, shouldStart) = synchronized(mintResults) {
-            mintedTokens[identifier]?.let { return it }
-            mintResults[identifier]?.let { it to false } ?: CompletableFuture<String>().let {
-                mintResults[identifier] = it
-                it to true
-            }
-        }
-        if (!shouldStart) return result.get(20, TimeUnit.SECONDS)
+        val result = CompletableFuture<String>()
+        synchronized(mintResults) { mintResults[identifier] = result }
         val quoted = JSONObject.quote(identifier)
         val bytes = identifier.toByteArray().joinToString(",") { (it.toInt() and 0xff).toString() }
         main.post { webView?.evaluateJavascript("""
@@ -336,10 +329,7 @@ private class BotGuardRuntime(
                 bytes.split(',').filter { it.isNotBlank() }.map { it.toInt().toByte() }.toByteArray(),
                 Base64.URL_SAFE or Base64.NO_WRAP
             )
-            synchronized(mintResults) {
-                mintedTokens[identifier] = encoded
-                mintResults.remove(identifier)
-            }?.complete(encoded)
+            synchronized(mintResults) { mintResults.remove(identifier) }?.complete(encoded)
         }
 
         @JavascriptInterface fun error(identifier: String, message: String) =

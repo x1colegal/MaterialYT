@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.9] - 2026-11-17
+
+### Changed
+- Mint a fresh content-bound PoToken for every SABR protection refresh instead of caching proofs by content binding.
+
 ## [7.8] - 2026-11-17
 
 ### Fixed

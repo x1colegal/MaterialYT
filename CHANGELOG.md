@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.6] - 2026-11-17
+
+### Fixed
+- Start minting the definitive SABR PoToken as soon as playback begins, matching the current `googlevideo` flow instead of waiting for the cold-start proof to reach protection status 2.
+- Keep consuming cold-start media while the definitive proof is generated, then replace only the active streamer-context proof without discarding buffered media.
+
 ## [7.5] - 2026-11-17
 
 ### Fixed

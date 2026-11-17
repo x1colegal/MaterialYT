@@ -198,6 +198,24 @@ internal class SabrVideoSession(
         val poTokenGeneration = java.util.concurrent.atomic.AtomicLong(0L)
         var protectionRejectCount = 0L
 
+        // Match googlevideo's setupStreaming(): mint the definitive proof before the first SABR
+        // request. Cold-start media can keep flowing while this runs; the next loop replaces only
+        // StreamerContext.poToken, preserving endpoint, cookie, contexts and buffered media.
+        config.refreshPoToken?.let { refresh ->
+            if (poTokenRefreshRunning.compareAndSet(false, true)) {
+                Thread({
+                    runCatching { refresh() }
+                        .onSuccess { refreshed ->
+                            pendingPoToken.set(refreshed)
+                            poTokenGeneration.incrementAndGet()
+                            AppLog.event("SABR video definitive PoToken minted during cold start")
+                        }
+                        .onFailure { AppLog.failure("SABR video cold-start definitive PoToken", it) }
+                    poTokenRefreshRunning.set(false)
+                }, "materialyt-video-pot-start-${config.mediaId}").apply { isDaemon = true; start() }
+            }
+        }
+
         val maxDry = if (isLive) 40 else 6
         while (!cancelled && (
             isLive ||

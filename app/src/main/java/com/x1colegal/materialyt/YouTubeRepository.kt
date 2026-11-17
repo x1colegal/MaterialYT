@@ -2439,19 +2439,13 @@ object YouTubeRepository {
         }
         val solvedUrl = if (response.optBoolean("_materialytNResolved")) unresolvedUrl
             else solveNChallenge(videoId, unresolvedUrl, playerJavaScript(videoId), false)
-        // SABR's media endpoint validates the playback session independently from /player.
-        // Match the browser request by carrying the same CPN and low-latency response flag.
-        // The SABR proof has one source of truth: StreamerContext.poToken. A URL-level pot can
-        // remain stuck on the cold-start proof after the protobuf proof is upgraded, leaving the
-        // server pending until it escalates to status 3. Strip it even if /player supplied one.
+        // The SABR proof has one source of truth: StreamerContext.poToken. Keep YouTube's signed
+        // endpoint intact, but strip playback parameters that older MaterialYT versions injected.
+        // Current WEB SABR clients add only the per-request rn parameter at request time.
         val serverUrl = solvedUrl.toHttpUrlOrNull()?.newBuilder()
             ?.removeAllQueryParameters("pot")
-            ?.apply {
-                if (!isLive) {
-                    setQueryParameter("alr", "yes")
-                    setQueryParameter("cpn", cpn)
-                }
-            }
+            ?.removeAllQueryParameters("alr")
+            ?.removeAllQueryParameters("cpn")
             ?.build()?.toString() ?: solvedUrl
         AppLog.event("SABR endpoint video=$videoId isLive=$isLive serverUrl=$serverUrl")
         PlaybackLoadStatus.showInitial(videoId, "Reading available formats…")
@@ -3089,11 +3083,10 @@ object YouTubeRepository {
             ?: error("WEB ad playback refresh returned no endpoint")
         val solved = if (response.optBoolean("_materialytNResolved")) rawUrl
             else solveNChallenge(info.videoId, rawUrl, playerJavaScript(info.videoId), false)
-        val cpn = response.optString("_materialytCpn").ifBlank { originalCpn.orEmpty() }
         val url = solved.toHttpUrlOrNull()?.newBuilder()
             ?.removeAllQueryParameters("pot")
-            ?.setQueryParameter("alr", "yes")
-            ?.apply { if (cpn.isNotBlank()) setQueryParameter("cpn", cpn) }
+            ?.removeAllQueryParameters("alr")
+            ?.removeAllQueryParameters("cpn")
             ?.build()?.toString() ?: solved
         val config = findString(response, "videoPlaybackUstreamerConfig")
             ?.takeIf(String::isNotBlank) ?: info.videoPlaybackUstreamerConfig
@@ -3116,11 +3109,10 @@ object YouTubeRepository {
             ?: error("SABR player reload returned no endpoint")
         val solved = if (response.optBoolean("_materialytNResolved")) rawUrl
             else solveNChallenge(info.videoId, rawUrl, playerJavaScript(info.videoId), false)
-        val cpn = response.optString("_materialytCpn")
         val url = solved.toHttpUrlOrNull()?.newBuilder()
             ?.removeAllQueryParameters("pot")
-            ?.setQueryParameter("alr", "yes")
-            ?.setQueryParameter("cpn", cpn)
+            ?.removeAllQueryParameters("alr")
+            ?.removeAllQueryParameters("cpn")
             ?.build()?.toString() ?: solved
         AppLog.event(
             "SABR player reload ready video=${info.videoId} client=WEB " +

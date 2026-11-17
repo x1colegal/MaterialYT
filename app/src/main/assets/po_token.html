@@ -201,11 +201,11 @@ function runBotGuard(challengeData) {
   })
 }
 
-function obtainPoToken(identifier) {
+async function obtainPoToken(identifier) {
   if (!(mintCallback instanceof Function))
     throw new Error('APF:Failed');
 
-  const result = mintCallback(identifier);
+  const result = await mintCallback(identifier);
 
   if (!result)
     throw new Error('YNJ:Undefined');

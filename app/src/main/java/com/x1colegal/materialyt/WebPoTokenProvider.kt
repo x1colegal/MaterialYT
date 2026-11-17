@@ -235,6 +235,7 @@ private class BotGuardRuntime(
     private val main = Handler(Looper.getMainLooper())
     private val ready = CompletableFuture<Unit>()
     private val mintResults = mutableMapOf<String, CompletableFuture<String>>()
+    private val mintedTokens = mutableMapOf<String, String>()
     private var webView: WebView? = null
     private var expiresAt = Instant.EPOCH
 
@@ -255,14 +256,22 @@ private class BotGuardRuntime(
     }
 
     fun mint(identifier: String): String {
-        val result = CompletableFuture<String>()
-        synchronized(mintResults) { mintResults[identifier] = result }
+        val (result, shouldStart) = synchronized(mintResults) {
+            mintedTokens[identifier]?.let { return it }
+            mintResults[identifier]?.let { it to false } ?: CompletableFuture<String>().let {
+                mintResults[identifier] = it
+                it to true
+            }
+        }
+        if (!shouldStart) return result.get(20, TimeUnit.SECONDS)
         val quoted = JSONObject.quote(identifier)
         val bytes = identifier.toByteArray().joinToString(",") { (it.toInt() and 0xff).toString() }
         main.post { webView?.evaluateJavascript("""
             try {
-              const id=$quoted, out=obtainPoToken(new Uint8Array([$bytes]));
-              MaterialYtPoToken.token(id,Array.from(out).join(','));
+              const id=$quoted;
+              Promise.resolve(obtainPoToken(new Uint8Array([$bytes])))
+                .then(out=>MaterialYtPoToken.token(id,Array.from(out).join(',')))
+                .catch(e=>MaterialYtPoToken.error(id,String(e)));
             } catch(e) { MaterialYtPoToken.error($quoted,String(e)); }
         """.trimIndent(), null) }
         return result.get(20, TimeUnit.SECONDS)
@@ -307,10 +316,12 @@ private class BotGuardRuntime(
                 main.post { webView?.evaluateJavascript("""
                     try {
                       getMinter=webPoSignalOutput[0];
-                      mintCallback=getMinter(new Uint8Array([$token]));
-                      if (typeof mintCallback === 'undefined') throw Error('PoToken mintCallback is undefined');
-                      webPoSignalOutput=null; getMinter=null;
-                      MaterialYtPoToken.initialized();
+                      Promise.resolve(getMinter(new Uint8Array([$token]))).then(callback=>{
+                        if (typeof callback !== 'function') throw Error('PoToken mintCallback is invalid');
+                        mintCallback=callback;
+                        webPoSignalOutput=null; getMinter=null;
+                        MaterialYtPoToken.initialized();
+                      }).catch(e=>MaterialYtPoToken.initError(String(e)));
                     } catch(e) { MaterialYtPoToken.initError(String(e)); }
                 """.trimIndent(), null) }
             }.onFailure(ready::completeExceptionally)
@@ -325,7 +336,10 @@ private class BotGuardRuntime(
                 bytes.split(',').filter { it.isNotBlank() }.map { it.toInt().toByte() }.toByteArray(),
                 Base64.URL_SAFE or Base64.NO_WRAP
             )
-            synchronized(mintResults) { mintResults.remove(identifier) }?.complete(encoded)
+            synchronized(mintResults) {
+                mintedTokens[identifier] = encoded
+                mintResults.remove(identifier)
+            }?.complete(encoded)
         }
 
         @JavascriptInterface fun error(identifier: String, message: String) =

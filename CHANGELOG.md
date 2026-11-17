@@ -2,6 +2,13 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.8] - 2026-11-17
+
+### Fixed
+- Reuse one definitive content-bound PoToken per video and BotGuard runtime instead of minting a new proof for every pending stream-protection response.
+- Support asynchronous BgUtils minter creation and PoToken mint callbacks.
+- Stop injecting unused `alr`, `cpn`, and URL-level `pot` parameters into SABR media endpoints while preserving YouTube-signed parameters, `n`, and per-request `rn`.
+
 ## [7.7] - 2026-11-17
 
 ### Fixed

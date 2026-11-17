@@ -1311,17 +1311,38 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
         }
         return
     }
+    var homeGeneration by remember { mutableIntStateOf(0) }
+    fun enrichHomeFeed(rawItems: List<FeedItem>, expectedQuery: String, generation: Int) {
+        scope.launch {
+            enrichItemsProgressively(rawItems) { updated ->
+                if (homeGeneration != generation) return@enrichItemsProgressively
+                if (expectedQuery.isBlank()) {
+                    homeFeed = updated
+                    if (query.isBlank()) feed = updated
+                } else if (query == expectedQuery) {
+                    feed = updated
+                }
+            }
+        }
+    }
     if (searchOpen) {
         DedicatedSearchScreen("Search YouTube", query, false, { searchOpen = false }) { requested ->
             query = requested
             searchOpen = false
             scrollHomeToTop()
+            val gen = ++homeGeneration
             scope.launch {
                 loading = true; error = null
-                runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.search(requested) }) }
-                    .onSuccess { feed = it }
-                    .onFailure { if (!it.isExpectedCancellation()) error = it.message ?: "Search failed" }
-                loading = false
+                runCatching { withContext(Dispatchers.IO) { YouTubeRepository.search(requested) } }
+                    .onSuccess { raw ->
+                        feed = raw
+                        loading = false
+                        enrichHomeFeed(raw, requested, gen)
+                    }
+                    .onFailure {
+                        if (!it.isExpectedCancellation()) error = it.message ?: "Search failed"
+                        loading = false
+                    }
             }
         }
         return
@@ -1329,20 +1350,42 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     LaunchedEffect(Unit) {
         if (YouTubeRepository.signedIn() && homeFeed.isEmpty()) {
             loading = true
-            runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.home() }) }.onSuccess { homeFeed = it; if (query.isBlank()) feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }
-            loading = false
+            val gen = ++homeGeneration
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
+                .onSuccess { raw ->
+                    homeFeed = raw
+                    if (query.isBlank()) feed = raw
+                    loading = false
+                    enrichHomeFeed(raw, "", gen)
+                }
+                .onFailure {
+                    if (!it.isExpectedCancellation()) error = it.message
+                    loading = false
+                }
         }
     }
     fun loadMore() {
         if (loadingMore || feed.isEmpty()) return
         loadingMore = true
+        val activeQuery = query
+        val gen = homeGeneration
         scope.launch {
-            val more = runCatching { originalMetadataItems(withContext(Dispatchers.IO) {
-                if (query.isBlank()) YouTubeRepository.homeContinuation() else YouTubeRepository.searchContinuation(query)
-            }) }.getOrDefault(emptyList())
-            if (more.isNotEmpty()) {
-                feed = (feed + more).distinctBy { it.id }
-                if (query.isBlank()) homeFeed = feed
+            val more = runCatching { withContext(Dispatchers.IO) {
+                if (activeQuery.isBlank()) YouTubeRepository.homeContinuation() else YouTubeRepository.searchContinuation(activeQuery)
+            } }.getOrDefault(emptyList())
+            if (more.isNotEmpty() && homeGeneration == gen && query == activeQuery) {
+                val combined = (feed + more).distinctBy { it.id }
+                feed = combined
+                if (activeQuery.isBlank()) homeFeed = combined
+                scope.launch {
+                    enrichItemsProgressively(more) { resolvedMore ->
+                        if (homeGeneration != gen || query != activeQuery) return@enrichItemsProgressively
+                        val byId = resolvedMore.associateBy { it.id }
+                        val updated = feed.map { byId[it.id] ?: it }
+                        feed = updated
+                        if (activeQuery.isBlank()) homeFeed = updated
+                    }
+                }
             }
             loadingMore = false
         }
@@ -1371,9 +1414,18 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
                 keyboardController?.hide()
                 scope.launch {
                     loading = true; error = null
-                    runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.home() }) }
-                        .onSuccess { homeFeed = it; feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }
-                    loading = false
+                    val gen = ++homeGeneration
+                    runCatching { withContext(Dispatchers.IO) { YouTubeRepository.home() } }
+                        .onSuccess { raw ->
+                            homeFeed = raw
+                            feed = raw
+                            loading = false
+                            enrichHomeFeed(raw, "", gen)
+                        }
+                        .onFailure {
+                            if (!it.isExpectedCancellation()) error = it.message
+                            loading = false
+                        }
                 }
             }) { Icon(Icons.Default.Refresh, "Refresh") }
         }
@@ -1386,27 +1438,7 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
             }
         } else {
             val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-            val feedBlocks = buildList<List<FeedItem>> {
-                val pendingShorts = mutableListOf<FeedItem>()
-                var pendingShelfKey = ""
-                fun flushShorts() {
-                    if (pendingShorts.isNotEmpty()) add(pendingShorts.toList())
-                    pendingShorts.clear()
-                    pendingShelfKey = ""
-                }
-                feed.forEach { item ->
-                    if (item.short) {
-                        if (pendingShorts.isNotEmpty() && item.shelfKey != pendingShelfKey) flushShorts()
-                        if (pendingShorts.isEmpty()) pendingShelfKey = item.shelfKey
-                        pendingShorts += item
-                    }
-                    else {
-                        flushShorts()
-                        add(listOf(item))
-                    }
-                }
-                flushShorts()
-            }
+            val feedBlocks = groupFeedBlocks(feed)
             if (tablet) {
                 LaunchedEffect(homeGridState, feedBlocks.size, query) {
                     snapshotFlow { homeGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
@@ -1448,11 +1480,33 @@ private fun HomeScreen(activity: MainActivity, codec: CodecChoice, audioCodec: A
     }
 }
 
+private fun groupFeedBlocks(feed: List<FeedItem>): List<List<FeedItem>> = buildList {
+    val pendingShorts = mutableListOf<FeedItem>()
+    var pendingShelfKey = ""
+    fun flushShorts() {
+        if (pendingShorts.isNotEmpty()) add(pendingShorts.toList())
+        pendingShorts.clear()
+        pendingShelfKey = ""
+    }
+    feed.forEach { item ->
+        if (item.short) {
+            if (pendingShorts.isNotEmpty() && item.shelfKey != pendingShelfKey) flushShorts()
+            if (pendingShorts.isEmpty()) pendingShelfKey = item.shelfKey
+            pendingShorts += item
+        } else {
+            flushShorts()
+            add(listOf(item))
+        }
+    }
+    flushShorts()
+}
+
 @Composable
 private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, codec: CodecChoice, audioCodec: AudioCodecChoice = AudioCodecChoice.MP4A, quality: QualityChoice, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, onBack: (() -> Unit)? = null, allowCreatePlaylist: Boolean = false, loader: () -> List<FeedItem>) {
     var feed by remember { mutableStateOf<List<FeedItem>>(emptyList()) }
     var selectedPlaylist by remember { mutableStateOf<String?>(null) }
     var selectedChannel by remember { mutableStateOf<String?>(null) }
+    var selectedShortShelf by remember { mutableStateOf<Pair<List<FeedItem>, Int>?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
@@ -1461,7 +1515,33 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         feed = feed.filterNot { it.id.removePrefix("VL") == id }
     }) { selectedPlaylist = null }; return }
     if (selectedChannel != null) { ChannelScreen(activity, selectedChannel!!, codec, audioCodec, quality, onPlayer, openVideo) { selectedChannel = null }; return }
-    LaunchedEffect(refreshKey) { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { loader() }) }.onSuccess { feed = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false }
+    selectedShortShelf?.let { (shorts, initialIndex) ->
+        BackHandler { selectedShortShelf = null }
+        Box(Modifier.fillMaxSize().background(ComposeColor.Black)) {
+            ShelfShortsPlayer(activity, shorts, initialIndex, codec, audioCodec, quality, onPlayer) { channelUrl ->
+                selectedShortShelf = null
+                selectedChannel = channelUrl
+            }
+            IconButton(
+                onClick = { selectedShortShelf = null },
+                modifier = Modifier.align(Alignment.TopStart).padding(4.dp),
+            ) { Icon(Icons.Default.ArrowBack, "Back", tint = ComposeColor.White) }
+        }
+        return
+    }
+    LaunchedEffect(refreshKey) {
+        loading = true; error = null
+        val raw = runCatching { withContext(Dispatchers.IO) { loader() } }
+            .onFailure { if (!it.isExpectedCancellation()) error = it.message }
+            .getOrNull()
+        if (raw != null) {
+            feed = raw
+            loading = false
+            enrichItemsProgressively(raw) { updated -> feed = updated }
+        } else {
+            loading = false
+        }
+    }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } else Icon(icon, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(8.dp)); Text(title, Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium); if (allowCreatePlaylist) IconButton(onClick = { showCreatePlaylist = true }) { Icon(Icons.Default.PlaylistAdd, "Create playlist") }; IconButton(onClick = { refreshKey++ }) { Icon(Icons.Default.Refresh, "Refresh") } }
@@ -1469,12 +1549,43 @@ private fun NativeFeedScreen(activity: MainActivity, title: String, icon: androi
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         if (!loading && !YouTubeRepository.signedIn()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Sign in from Account to load your $title recommendations.") }
         val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+        val feedBlocks = remember(feed) { groupFeedBlocks(feed) }
         if (tablet) {
             LazyVerticalGrid(GridCells.Adaptive(320.dp), contentPadding = PaddingValues(8.dp)) {
-                gridItems(feed) { item -> Box(Modifier.padding(8.dp)) { FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
+                feedBlocks.forEachIndexed { index, block ->
+                    if (block.first().short) {
+                        item(key = "shorts-$index", span = { GridItemSpan(maxLineSpan) }) {
+                            ShortsShelf(block, true) { selected -> selectedShortShelf = block to block.indexOfFirst { it.id == selected.id }.coerceAtLeast(0) }
+                        }
+                    } else {
+                        val item = block.first()
+                        item(key = "feed-${item.id}", span = { if (item.channel) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) {
+                            Box(Modifier.padding(8.dp)) {
+                                FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { chUrl -> { selectedChannel = chUrl } }) {
+                                    when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         } else {
-            LazyColumn { items(feed) { item -> FeedRow(item) { when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) } } } }
+            LazyColumn {
+                feedBlocks.forEachIndexed { index, block ->
+                    if (block.first().short) {
+                        item(key = "shorts-$index") {
+                            ShortsShelf(block, false) { selected -> selectedShortShelf = block to block.indexOfFirst { it.id == selected.id }.coerceAtLeast(0) }
+                        }
+                    } else {
+                        val item = block.first()
+                        item(key = "feed-${item.id}") {
+                            FeedRow(item, onChannelClick = item.channelUrl.takeIf(String::isNotBlank)?.let { chUrl -> { selectedChannel = chUrl } }) {
+                                when { item.channel -> selectedChannel = item.url; item.playlist -> selectedPlaylist = item.url; else -> openVideo(item.url, emptyList(), -1) }
+                            }
+                        }
+                    }
+                }
+            }
         }
         }
     }
@@ -1559,29 +1670,63 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
         if (reopenPlayerRequest > 0) selected = AutoMusicService.nowPlaying.value
     }
     LaunchedEffect(selected, selectedArtist) { onPlayerMode(selected != null && selectedArtist == null) }
-    fun load(block: () -> List<FeedItem>) { scope.launch { loading = true; error = null; runCatching { originalMetadataItems(withContext(Dispatchers.IO) { block() }) }.onSuccess { tracks = it }.onFailure { if (!it.isExpectedCancellation()) error = it.message }; loading = false } }
+    fun load(block: () -> List<FeedItem>) {
+        scope.launch {
+            loading = true; error = null
+            runCatching { withContext(Dispatchers.IO) { block() } }
+                .onSuccess { raw ->
+                    tracks = raw
+                    loading = false
+                    enrichItemsProgressively(raw) { updated -> tracks = updated }
+                }
+                .onFailure {
+                    if (!it.isExpectedCancellation()) error = it.message
+                    loading = false
+                }
+        }
+    }
     suspend fun loadHome() {
         loading = true; error = null
         runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicHome() } }
             .onSuccess { page ->
-                val normalized = page.copy(sections = page.sections.map { it.copy(items = originalMetadataItems(it.items)) })
-                musicHome = normalized
-                homeTracks = normalized.sections.flatMap { it.items }.distinctBy { it.id }
+                musicHome = page
+                homeTracks = page.sections.flatMap { it.items }.distinctBy { it.id }
                 tracks = homeTracks
-            }.onFailure { if (!it.isExpectedCancellation()) error = it.message }
-        loading = false
+                loading = false
+                scope.launch {
+                    val normalizedSections = page.sections.toMutableList()
+                    for (i in normalizedSections.indices) {
+                        val sec = normalizedSections[i]
+                        val resolved = originalMetadataItems(sec.items)
+                        normalizedSections[i] = sec.copy(items = resolved)
+                        musicHome = musicHome.copy(sections = normalizedSections.toList())
+                        homeTracks = normalizedSections.flatMap { it.items }.distinctBy { it.id }
+                        if (query.isBlank()) tracks = homeTracks
+                    }
+                }
+            }.onFailure {
+                if (!it.isExpectedCancellation()) error = it.message
+                loading = false
+            }
     }
     LaunchedEffect(Unit) { if (YouTubeRepository.signedIn()) loadHome() else loading = false }
     fun loadMore() {
         if (query.isBlank() || loadingMore || tracks.isEmpty()) return
         loadingMore = true
         scope.launch {
-            val more = runCatching { originalMetadataItems(withContext(Dispatchers.IO) { YouTubeRepository.musicContinuation(query) }) }.getOrDefault(emptyList())
+            val more = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicContinuation(query) } }.getOrDefault(emptyList())
             if (more.isNotEmpty()) {
                 tracks = (tracks + more).distinctBy { it.id }
                 if (query.isBlank()) homeTracks = tracks
+                loadingMore = false
+                enrichItemsProgressively(more) { resolvedMore ->
+                    val byId = resolvedMore.associateBy { it.id }
+                    tracks = tracks.map { byId[it.id] ?: it }
+                    if (query.isBlank()) homeTracks = tracks
+                }
+            } else {
+                loadingMore = false
             }
-            loadingMore = false
         }
     }
     fun loadMoreHome() {
@@ -1591,13 +1736,24 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicHomeContinuation() } }
                 .onSuccess { next ->
-                    val normalized = next.sections.map { it.copy(items = originalMetadataItems(it.items)) }
+                    val startIdx = musicHome.sections.size
                     musicHome = musicHome.copy(
-                        sections = (musicHome.sections + normalized).distinctBy { section -> section.title to section.items.firstOrNull()?.id },
+                        sections = (musicHome.sections + next.sections).distinctBy { section -> section.title to section.items.firstOrNull()?.id },
                         hasMore = next.hasMore,
                     )
-                }.onFailure { if (!it.isExpectedCancellation()) homeContinuationError = it.message ?: "Could not load more music" }
-            loadingHomeMore = false
+                    loadingHomeMore = false
+                    scope.launch {
+                        val current = musicHome.sections.toMutableList()
+                        for (i in startIdx until current.size) {
+                            val sec = current[i]
+                            current[i] = sec.copy(items = originalMetadataItems(sec.items))
+                            musicHome = musicHome.copy(sections = current.toList())
+                        }
+                    }
+                }.onFailure {
+                    if (!it.isExpectedCancellation()) homeContinuationError = it.message ?: "Could not load more music"
+                    loadingHomeMore = false
+                }
         }
     }
     selectedPlaylist?.let { playlist ->
@@ -1746,11 +1902,24 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
                 error = null
                 runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicSearchPage(requested) } }
                     .onSuccess { page ->
-                        musicSearchSections = page.sections.map { it.copy(items = originalMetadataItems(it.items)) }
-                        tracks = musicSearchSections.flatMap { it.items }.distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+                        musicSearchSections = page.sections
+                        tracks = page.sections.flatMap { it.items }.distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+                        loading = false
+                        scope.launch {
+                            val current = page.sections.toMutableList()
+                            for (i in current.indices) {
+                                if (query != requested) return@launch
+                                val sec = current[i]
+                                current[i] = sec.copy(items = originalMetadataItems(sec.items))
+                                musicSearchSections = current.toList()
+                                tracks = current.flatMap { it.items }.distinctBy { "${it.playlist}:${it.channel}:${it.id}" }
+                            }
+                        }
                     }
-                    .onFailure { if (!it.isExpectedCancellation()) error = it.message ?: "Search failed" }
-                loading = false
+                    .onFailure {
+                        if (!it.isExpectedCancellation()) error = it.message ?: "Search failed"
+                        loading = false
+                    }
             }
         }
         return
@@ -1826,7 +1995,14 @@ private fun MusicScreen(activity: MainActivity, audioCodec: AudioCodecChoice, re
                             if (!section.browseId.isNullOrBlank() || section.endpointQuery.isNotBlank()) {
                                 scope.launch {
                                     runCatching { withContext(Dispatchers.IO) { YouTubeRepository.musicSearchSection(section) } }
-                                        .onSuccess { expanded -> viewingSection = expanded.copy(items = originalMetadataItems(expanded.items)) }
+                                        .onSuccess { expanded ->
+                                            viewingSection = expanded
+                                            enrichItemsProgressively(expanded.items) { resolved ->
+                                                if (viewingSection?.title == expanded.title) {
+                                                    viewingSection = expanded.copy(items = resolved)
+                                                }
+                                            }
+                                        }
                                         .onFailure { if (!it.isExpectedCancellation()) error = it.message ?: "Could not load section" }
                                 }
                             }
@@ -3197,11 +3373,16 @@ private fun PremiereCountdownOverlay(
             .format(Date(details.scheduledStartTimeMs))
     }
     Box(modifier.background(ComposeColor.Black).pointerInput(Unit) { detectTapGestures { } }) {
+        var thumbUrl by remember(videoId) { mutableStateOf("https://i.ytimg.com/vi/$videoId/maxresdefault.jpg") }
         AsyncImage(
-            model = "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg",
+            model = thumbUrl,
             contentDescription = null,
             modifier = Modifier.matchParentSize(),
             contentScale = ContentScale.Crop,
+            onError = {
+                val fallback = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                if (thumbUrl != fallback) thumbUrl = fallback
+            },
         )
         Column(
             Modifier.align(Alignment.BottomStart).fillMaxWidth()
@@ -3615,8 +3796,25 @@ private fun ChannelRow(item: FeedItem, click: () -> Unit) {
     }
 }
 
+internal suspend fun enrichItemsProgressively(
+    items: List<FeedItem>,
+    chunkSize: Int = 16,
+    onUpdate: (List<FeedItem>) -> Unit,
+) {
+    if (items.isEmpty()) return
+    val current = items.toMutableList()
+    var start = 0
+    while (start < current.size) {
+        val end = minOf(start + chunkSize, current.size)
+        val resolved = originalMetadataItems(current.subList(start, end).toList())
+        for (i in resolved.indices) current[start + i] = resolved[i]
+        onUpdate(current.toList())
+        start = end
+    }
+}
+
 internal suspend fun originalMetadataItems(items: List<FeedItem>): List<FeedItem> = coroutineScope {
-    val requests = Semaphore(4)
+    val requests = Semaphore(8)
     items.map { item ->
         async(Dispatchers.IO) {
             if (item.channel) return@async item
@@ -3650,6 +3848,35 @@ internal suspend fun originalMetadataItems(items: List<FeedItem>): List<FeedItem
 }
 
 @Composable
+private fun VideoThumbImage(
+    item: FeedItem,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Crop,
+) {
+    val hdUrl = remember(item.id, item.channel, item.playlist, item.musicVideo) {
+        if (!item.channel && !item.playlist && !item.musicVideo && item.id.length == 11) {
+            "https://i.ytimg.com/vi/${item.id}/maxresdefault.jpg"
+        } else item.thumbnail
+    }
+    var modelUrl by remember(item.id, item.thumbnail) { mutableStateOf(hdUrl) }
+    AsyncImage(
+        model = modelUrl,
+        contentDescription = null,
+        modifier = modifier,
+        contentScale = contentScale,
+        onError = {
+            val hq720 = "https://i.ytimg.com/vi/${item.id}/hq720.jpg"
+            val hqDefault = "https://i.ytimg.com/vi/${item.id}/hqdefault.jpg"
+            when {
+                modelUrl != item.thumbnail && item.thumbnail.isNotBlank() -> modelUrl = item.thumbnail
+                !item.channel && !item.playlist && item.id.length == 11 && modelUrl != hq720 && modelUrl != hqDefault -> modelUrl = hq720
+                !item.channel && !item.playlist && item.id.length == 11 && modelUrl != hqDefault -> modelUrl = hqDefault
+            }
+        },
+    )
+}
+
+@Composable
 private fun FeedRow(item: FeedItem, onChannelClick: (() -> Unit)? = null, click: () -> Unit) {
     if (item.channel) {
         ChannelRow(item, click)
@@ -3657,7 +3884,7 @@ private fun FeedRow(item: FeedItem, onChannelClick: (() -> Unit)? = null, click:
     }
     Column(Modifier.fillMaxWidth().padding(bottom = 18.dp).clickable(onClick = click)) {
         Box {
-            AsyncImage(item.thumbnail, null, Modifier.fillMaxWidth().aspectRatio(item.thumbnailWidth.toFloat() / item.thumbnailHeight.coerceAtLeast(1)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
+            VideoThumbImage(item, Modifier.fillMaxWidth().aspectRatio(item.thumbnailWidth.toFloat() / item.thumbnailHeight.coerceAtLeast(1)).background(MaterialTheme.colorScheme.surfaceVariant))
             if (item.upcoming) {
                 Surface(
                     color = ComposeColor(0xCC000000),
@@ -4219,11 +4446,9 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
 private fun ChannelTabletItem(item: FeedItem, modifier: Modifier = Modifier, click: () -> Unit) {
     Column(modifier.clickable(onClick = click)) {
         Box {
-            AsyncImage(
-                item.thumbnail,
-                null,
+            VideoThumbImage(
+                item,
                 Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(MaterialTheme.colorScheme.surfaceVariant),
-                contentScale = ContentScale.Crop,
             )
             if (item.upcoming) {
                 Surface(

@@ -163,6 +163,7 @@ internal class SabrSession(
         var attestationStalls = 0
         var emptySessionRefreshes = 0
         var midStreamRefreshes = 0
+        var protectionSessionRefreshes = 0
         var startupEmptyResponses = 0
         var lastProtectionRefreshAt = 0L
         var lastProtectionRefreshStatus = 0L
@@ -349,19 +350,55 @@ internal class SabrSession(
             } else if (protStatus > 0L) {
                 activeProtectionStatus = protStatus
                 if (protStatus == 1L) protectionRejectCount = 0L
-                if (protStatus == SabrProtection.ATTESTATION_REQUIRED) {
-                    val allowedRetries = protMaxRetries.takeIf { it > 0L } ?: 5L
-                    if (protectionRejectCount >= allowedRetries) {
-                        failStream("stream protection rejected after $protectionRejectCount attempts", stall = true)
-                        return
-                    }
-                    protectionRejectCount++
-                }
+                if (protStatus == SabrProtection.ATTESTATION_REQUIRED) protectionRejectCount++
             }
             if (sabrErrors.isNotEmpty()) {
                 AppLog.event("SABR audio error frame iter=$iter parts=${parts.size} headers=${headers.size} ${sabrErrors.joinToString()}")
                 Timber.tag(TAG).w("SABR_ERROR at iter=$iter (segs so far: $lastSeq/$endSeg) — server rejected the request")
                 failStream("SABR_ERROR", stall = true); return
+            }
+            // A required-attestation response rejects this complete player epoch. Rotate the WEB
+            // player/CPN/BotGuard session instead of repeatedly minting from the rejected minter.
+            // The existing disk spool remains intact, so playback can consume its grace buffer
+            // while the replacement endpoint and proof are prepared.
+            if (protStatus == SabrProtection.ATTESTATION_REQUIRED &&
+                config.refreshPlayer != null && protectionSessionRefreshes < MAX_PROTECTION_SESSION_REFRESHES) {
+                protectionSessionRefreshes++
+                AppLog.event(
+                    "SABR audio rebuilding rejected protection session " +
+                        "attempt=$protectionSessionRefreshes serverMaxRetries=$protMaxRetries",
+                )
+                val refreshed = runCatching { config.refreshPlayer?.invoke() }
+                    .onFailure { AppLog.failure("SABR audio protection session refresh", it) }
+                    .getOrNull()
+                if (refreshed != null) {
+                    url = refreshed.first
+                    ustreamerConfig = refreshed.second
+                    config.refreshPoToken?.let { refresh ->
+                        runCatching { refresh() }.onSuccess { proof ->
+                            poToken = proof.second
+                            poTokenGeneration.incrementAndGet()
+                        }.onFailure { AppLog.failure("SABR audio proof after session refresh", it) }
+                    }
+                    requestNumber = 0
+                    cookie = null
+                    ctxByType.clear()
+                    ctxToSend.clear()
+                    dry = 0
+                    attestationStalls = 0
+                    backoffTimeMs = 0L
+                    activeProtectionStatus = 0L
+                    lastProtectionRefreshStatus = 0L
+                    protectionRejectCount = 0L
+                    continue
+                }
+            }
+            if (protStatus == SabrProtection.ATTESTATION_REQUIRED) {
+                val allowedRetries = protMaxRetries.takeIf { it > 0L } ?: 5L
+                if (protectionRejectCount >= allowedRetries) {
+                    failStream("stream protection rejected after $protectionRejectCount attempts", stall = true)
+                    return
+                }
             }
             if (!reloadToken.isNullOrBlank() && config.reloadPlayer != null) {
                 AppLog.event("SABR audio reloading player iter=$iter token=${reloadToken.length}")
@@ -637,5 +674,6 @@ internal class SabrSession(
         private const val STARTUP_EMPTY_LIMIT = 2
         private const val MAX_STARTUP_REFRESHES = 2
         private const val MAX_MIDSTREAM_REFRESHES = 3
+        private const val MAX_PROTECTION_SESSION_REFRESHES = 3
     }
 }

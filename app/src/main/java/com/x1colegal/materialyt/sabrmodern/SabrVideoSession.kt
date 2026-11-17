@@ -185,6 +185,7 @@ internal class SabrVideoSession(
         var attestationStalls = 0
         var emptySessionRefreshes = 0
         var midStreamRefreshes = 0
+        var protectionSessionRefreshes = 0
         var startupEmptyResponses = 0
         var lastProtectionRefreshAt = 0L
         var lastProtectionRefreshStatus = 0L
@@ -437,19 +438,55 @@ internal class SabrVideoSession(
             } else if (protStatus > 0L) {
                 activeProtectionStatus = protStatus
                 if (protStatus == 1L) protectionRejectCount = 0L
-                if (protStatus == SabrProtection.ATTESTATION_REQUIRED) {
-                    val allowedRetries = protMaxRetries.takeIf { it > 0L } ?: 5L
-                    if (protectionRejectCount >= allowedRetries) {
-                        failStream("stream protection rejected after $protectionRejectCount attempts", stall = true)
-                        return
-                    }
-                    protectionRejectCount++
-                }
+                if (protStatus == SabrProtection.ATTESTATION_REQUIRED) protectionRejectCount++
             }
             if (sabrErrors.isNotEmpty()) {
                 AppLog.event("SABR video error frame iter=$iter parts=${parts.size} headers=${headers.size} ${sabrErrors.joinToString()}")
                 Timber.tag(TAG).w("SABR_ERROR at iter=$iter (video ${video.lastSeq}, audio ${audio.lastSeq}) — server rejected the request")
                 failStream("SABR_ERROR", stall = true); return
+            }
+            // Status 3 rejects the attested player epoch, not merely the last content-bound proof.
+            // Minting again from that same minter can only loop until maxRetries. Recreate WEB's
+            // player/CPN/BotGuard epoch, then install a proof from the new runtime while retaining
+            // the disk-backed media already delivered to ExoPlayer.
+            if (protStatus == SabrProtection.ATTESTATION_REQUIRED &&
+                config.refreshPlayer != null && protectionSessionRefreshes < MAX_PROTECTION_SESSION_REFRESHES) {
+                protectionSessionRefreshes++
+                AppLog.event(
+                    "SABR video rebuilding rejected protection session " +
+                        "attempt=$protectionSessionRefreshes serverMaxRetries=$protMaxRetries",
+                )
+                val refreshed = runCatching { config.refreshPlayer?.invoke() }
+                    .onFailure { AppLog.failure("SABR video protection session refresh", it) }
+                    .getOrNull()
+                if (refreshed != null) {
+                    url = refreshed.first
+                    ustreamerConfig = refreshed.second
+                    config.refreshPoToken?.let { refresh ->
+                        runCatching { refresh() }.onSuccess { proof ->
+                            poToken = proof.second
+                            poTokenGeneration.incrementAndGet()
+                        }.onFailure { AppLog.failure("SABR video proof after session refresh", it) }
+                    }
+                    requestNumber = 0
+                    cookie = null
+                    ctxByType.clear()
+                    ctxToSend.clear()
+                    dry = 0
+                    attestationStalls = 0
+                    backoffTimeMs = 0L
+                    activeProtectionStatus = 0L
+                    lastProtectionRefreshStatus = 0L
+                    protectionRejectCount = 0L
+                    continue
+                }
+            }
+            if (protStatus == SabrProtection.ATTESTATION_REQUIRED) {
+                val allowedRetries = protMaxRetries.takeIf { it > 0L } ?: 5L
+                if (protectionRejectCount >= allowedRetries) {
+                    failStream("stream protection rejected after $protectionRejectCount attempts", stall = true)
+                    return
+                }
             }
             if (!reloadToken.isNullOrBlank() && config.reloadPlayer != null) {
                 AppLog.event("SABR video reloading player iter=$iter token=${reloadToken.length}")
@@ -1108,5 +1145,6 @@ internal class SabrVideoSession(
         private const val LIVE_NETWORK_ERRORS_BEFORE_PLAYER_REFRESH = 3
         private const val MAX_STARTUP_REFRESHES = 2
         private const val MAX_MIDSTREAM_REFRESHES = 3
+        private const val MAX_PROTECTION_SESSION_REFRESHES = 3
     }
 }

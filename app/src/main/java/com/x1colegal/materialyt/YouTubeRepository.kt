@@ -14,7 +14,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
-import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicLong
@@ -559,7 +558,7 @@ object YouTubeRepository {
         if (title.isBlank() || isRendererActionLabel(title)) title = "Short"
         if (channel.isBlank()) channel = "YouTube"
 
-        val thumbnail = findThumbnail(watch.opt("thumbnail")) ?: "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
+        val thumbnail = findThumbnail(watch.opt("thumbnail")) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
         return FeedItem(videoId, title, channel, thumbnail, 9, 16, channelThumbnail, "https://www.youtube.com/shorts/$videoId", channelUrl = channelUrl, short = true, channelVerified = meta?.verified == true || hasVerifiedBadge(header))
     }
     fun history(): List<FeedItem> = feed("history", "https://www.youtube.com/feed/history")
@@ -2695,7 +2694,7 @@ object YouTubeRepository {
 
     private fun classifyLiveChatAccess(data: JSONObject, hasChat: Boolean, hasSendEndpoint: Boolean): LiveChatAccess {
         if (hasSendEndpoint) return LiveChatAccess(canSend = true)
-        val raw = data.toString().lowercase(Locale.ROOT)
+        val raw = data.toString().lowercase(java.util.Locale.ROOT)
         val status = when {
             !signedIn() || "signinendpoint" in raw || "sign in to chat" in raw -> "Sign in to chat"
             "subscribers-only" in raw || "subscriber-only" in raw ||
@@ -4267,10 +4266,12 @@ object YouTubeRepository {
             } else null
             val lockupChannelId = if (rendererType == "lockupViewModel") {
                 val contentId = renderer.optString("contentId")
+                val contentType = renderer.optString("contentType")
                 val browseId = findString(renderer, "browseId").orEmpty()
                 when {
-                    contentId.startsWith("UC") -> contentId
-                    browseId.startsWith("UC") && renderer.optString("contentType").contains("CHANNEL", true) -> browseId
+                    contentType.contains("VIDEO", true) || contentType.contains("SHORT", true) -> null
+                    contentId.startsWith("UC") && contentId.length >= 20 -> contentId
+                    browseId.startsWith("UC") && contentType.contains("CHANNEL", true) -> browseId
                     else -> null
                 }
             } else null
@@ -4296,7 +4297,11 @@ object YouTubeRepository {
                 (musicPageType in setOf("MUSIC_PAGE_TYPE_ARTIST", "MUSIC_PAGE_TYPE_USER_CHANNEL") ||
                  rendererType == "musicCardShelfRenderer" ||
                  (renderer.optString("videoId").isBlank() && !playlistRenderer))
-            val channelRenderer = rendererType.contains("channel", true) || isMusicArtistOrChannel || lockupChannelId != null || officialCard
+            val hasDirectVideoId = renderer.optString("videoId").length == 11 ||
+                (rendererType == "lockupViewModel" && renderer.optString("contentId").length == 11 &&
+                    !renderer.optString("contentType").contains("CHANNEL", true) &&
+                    !renderer.optString("contentType").contains("PLAYLIST", true))
+            val channelRenderer = !hasDirectVideoId && (rendererType.contains("channel", true) || isMusicArtistOrChannel || lockupChannelId != null || officialCard)
             val lockupVideoId = if (rendererType == "lockupViewModel" && lockupPlaylistId == null) {
                 renderer.optString("contentId").takeIf { it.length == 11 }
             } else null
@@ -4406,7 +4411,14 @@ object YouTubeRepository {
                     ?.optJSONObject("image")?.optJSONObject("contentPreviewImageViewModel")
                     ?.optJSONObject("image")?.optJSONArray("sources")
             } else null
+            val lockupThumbnails = if (rendererType == "lockupViewModel") {
+                renderer.optJSONObject("contentImage")?.optJSONObject("thumbnailViewModel")
+                    ?.optJSONObject("image")?.optJSONArray("sources")
+                    ?: renderer.optJSONObject("contentImage")?.optJSONObject("collectionThumbnailViewModel")
+                        ?.optJSONObject("primaryThumbnail")?.optJSONObject("image")?.optJSONArray("sources")
+            } else null
             val thumbnails = officialCardThumbnails
+                ?: lockupThumbnails
                 ?: renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 ?: renderer.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
             val selectedThumb = thumbnails?.let { candidates ->
@@ -4420,7 +4432,7 @@ object YouTubeRepository {
             val isMusicItem = renderer.has("flexColumns") || renderer.has("thumbnailRenderer") || renderer.has("subtitle")
             val thumbWidth = if (isMusicItem || isChannel) selectedThumb?.optInt("width")?.takeIf { it > 0 } ?: 1 else 16
             val thumbHeight = if (isMusicItem || isChannel) selectedThumb?.optInt("height")?.takeIf { it > 0 } ?: 1 else 9
-            val rawThumbnail = if ((isMusicItem || isPlaylist || isChannel) && providedThumbnail.isNotBlank()) providedThumbnail else "https://i.ytimg.com/vi/$id/maxresdefault.jpg"
+            val rawThumbnail = providedThumbnail.ifBlank { "https://i.ytimg.com/vi/$id/hqdefault.jpg" }
             val thumbnail = if (isMusicItem || isPlaylist || isChannel) {
                 (if (isPlaylist) highResolutionPlaylistArtwork(rawThumbnail)
                 else highResolutionArtworkUrl(rawThumbnail, thumbWidth, thumbHeight))
@@ -4978,8 +4990,20 @@ object YouTubeRepository {
 
     private fun findThumbnail(value: Any?): String? = when (value) {
         is JSONObject -> value.optString("url").takeIf(::isYouTubeImageUrl)?.let(::normalizeImageUrl)
-            ?: value.keys().asSequence().mapNotNull { findThumbnail(value.opt(it)) }.firstOrNull()
-        is JSONArray -> (0 until value.length()).asSequence().mapNotNull { findThumbnail(value.opt(it)) }.firstOrNull()
+            ?: value.keys().asSequence()
+                .filterNot { it.contains("avatar", true) || it.contains("channelThumbnail", true) }
+                .mapNotNull { findThumbnail(value.opt(it)) }.firstOrNull()
+        is JSONArray -> (0 until value.length()).asSequence()
+            .mapNotNull { entry ->
+                val obj = value.optJSONObject(entry)
+                val url = if (obj != null) obj.optString("url").takeIf(::isYouTubeImageUrl)?.let(::normalizeImageUrl) else findThumbnail(value.opt(entry))
+                if (url != null) {
+                    val area = obj?.let { it.optLong("width").coerceAtLeast(1L) * it.optLong("height").coerceAtLeast(1L) } ?: 1L
+                    area to url
+                } else null
+            }
+            .maxByOrNull { it.first }
+            ?.second
         else -> null
     }
 

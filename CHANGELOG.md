@@ -2,6 +2,17 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.10] - 2026-11-17
+
+### Added
+- Render inline `ShortsShelf` carousels in History (and other `NativeFeedScreen` feeds) matching the Home screen.
+
+### Fixed
+- Rebuild the full WEB player/CPN/BotGuard session when SABR returns `STREAM_PROTECTION_STATUS = 3` (`ATTESTATION_REQUIRED`) while keeping the already-buffered media spool intact.
+- Stop misclassifying 11-character `lockupViewModel` video IDs starting with `UC` (or renderers with a direct `videoId`) as channels in History and feeds.
+- Render Home, Search, History, Playlists, and YT Music feeds immediately without blocking on per-item `canonicalVideoMetadata` calls, enriching original metadata progressively in the background.
+- Select the highest-resolution YouTube thumbnail (`sources` max area / `hq720.jpg` / `maxresdefault.jpg`) with automatic fallback so videos without `maxresdefault.jpg` never render blank or low-res.
+
 ## [7.9] - 2026-11-17
 
 ### Changed

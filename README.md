@@ -26,7 +26,7 @@ The app renders its own native interface. Only Google sign-in is displayed throu
 - YouTube Home, History, search, channels, playlists, comments, and Community Posts
 - YouTube Music Home, search, foreground playback, synchronized lyrics, comments, and Android Auto
 - Vertical Shorts player with continuation-based recommendations
-- Native SABR/UMP playback with independently selectable audio and video formats
+- Selectable **SABR**, **DASH**, and **HLS** transports for regular videos, Live streams, Shorts, and YouTube Music (with optional separate Live and YT Music transport overrides)
 - Signed-in feeds, account actions, and YouTube History reporting without a Data API key
 - Fullscreen, picture-in-picture, persistent miniplayers, and large buffering
 - Responsive phone and tablet layouts, Android Auto, and legacy Android support
@@ -81,14 +81,15 @@ Availability of sideloaded media apps depends on the Android Auto version, phone
 - Comments, channel navigation, playback settings, and video details
 - Authenticated Like actions
 - Audio-track selection and account History reporting
-- The same SABR playback infrastructure used by regular playback
+- Follows the configured transport (`SABR`, `DASH`, or `HLS`), matching regular playback
 
 Shorts relies on frequently changing internal Reel endpoints. Temporary feed or continuation breakage is possible when YouTube changes those responses.
 
 ## Playback
 
-- Native WEB + PoToken + SABR/UMP playback for regular videos, YouTube Music, and Shorts
-- One consistent WEB playback identity with no TV, MWEB, VISIONOS, IOS, ANDROID, or WEB_REMIX playback fallback
+- Native `WEB` + PoToken + `SABR/UMP` playback (recommended) alongside selectable `DASH` and `HLS` transports for regular videos, Live streams, YouTube Music, and Shorts
+- `DASH` and `HLS` VOD playback use the `VISIONOS` client (authenticated with session cookies when signed in), Live `HLS` uses `VISIONOS`, and Live `DASH` uses `ANDROID_VR` with no silent fallback to `SABR`
+- Optional **Separate Live transport** and **Separate YT Music transport** toggles in Settings with dynamic section labels
 - Official WEB playback-attestation submission with serialized in-flight protection renewal
 - In-session PoToken renewal while stream protection is pending, preserving SABR state and already buffered media
 - One clean BotGuard runtime retry after a WebView initialization timeout
@@ -148,7 +149,7 @@ Network protocol selection applies to backend and media requests.
 | Language | Kotlin and Java |
 | Interface | Jetpack Compose and Material 3 |
 | Playback | ExoPlayer 2.19.1 |
-| Primary transport | Native SABR/UMP with disk-backed reassembly |
+| Playback transports | Native SABR/UMP (recommended), DASH, and HLS |
 | Networking | OkHttp 5 |
 | Images | Coil |
 | JavaScript challenges | yt-dlp EJS solver assets executed through J2V8 |
@@ -196,7 +197,7 @@ Release builds currently use the configured debug signing key. Fork maintainers 
 ## Known limitations
 
 - YouTube's player clients, internal APIs, continuations, BotGuard challenges, and SABR messages are undocumented and can change at any time.
-- Playback intentionally reports the original WEB, PoToken, playback-attestation, BotGuard, or SABR failure instead of hiding it behind a different YouTube client.
+- Playback intentionally reports the original `WEB`/PoToken/`SABR` or `VISIONOS`/`ANDROID_VR` failure instead of silently falling back across transports; `DASH` and `HLS` may return `LOGIN_REQUIRED` in some situations, so `SABR` remains recommended.
 - YouTube may temporarily report WEB stream protection as pending while playback attestation and a definitive content-bound PoToken replace the cold-start state. MaterialYT keeps the SABR session and its buffered media alive during that transition.
 - Comments, lyrics, likes, audio tracks, playlists, and account metadata are shown only when YouTube exposes them to the current session.
 - PiP requires Android 8.0 or newer.

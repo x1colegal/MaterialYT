@@ -2,6 +2,18 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.11] - 2026-11-17
+
+### Added
+- Selectable **Stream / VOD / Live / YT Music transport** (`SABR`, `DASH`, `HLS`) in Account settings with dedicated **Separate Live transport** and **Separate YT Music transport** toggles and dynamic section titles (`Stream transport`, `VOD & Live transport`, `YT Music & VOD transport`, or separate sections).
+- `VISIONOS` Innertube client playback for VOD `DASH` (local MPD `SegmentBase` synthesis) and `HLS` across `VideoScreen`, `ShortPlayer`, and `AutoMusicService` (without fallback to SABR), with authenticated `Cookie` + `SAPISIDHASH` support.
+- Live `HLS` (`VISIONOS`) and Live `DASH` (`ANDROID_VR` `dashManifestUrl` + `YouTubeLiveDashManifestParser` / `LiveTimelineMediaSource`) support.
+
+### Fixed
+- Expose **Audio track** choices for multiplexed `HLS` streams and deduplicate `DASH` audio track entries across `VideoScreen`, `ShortPlayer`, and `AutoMusicService`.
+- Anchor Live `HLS` and `DASH` player UI timers to `00:00` / `00:00` (matching `SABR`) and prevent `exo_prev`/`exo_next` buttons from lighting up or blinking when there is no previous/next playlist item.
+- Fix `DashMediaSource` premature `STATE_ENDED` and `00:12` stall on YouTube live `SegmentList` MPDs by aligning `availabilityStartTime`, fixing `basePto`, injecting `t="$currentPto"` on `SegmentTimeline`, and overriding `period.durationUs` / `window.durationUs` to `C.TIME_UNSET`.
+
 ## [7.10] - 2026-11-17
 
 ### Added

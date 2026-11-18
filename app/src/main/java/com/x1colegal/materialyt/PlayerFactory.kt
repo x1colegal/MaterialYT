@@ -10,12 +10,21 @@ import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.mediacodec.MediaCodecSelector
 
 enum class DecoderMode(val label: String) { AUTO("Auto"), HARDWARE("Force HW"), SOFTWARE("Force SW") }
+enum class VodTransport(val label: String) { SABR("SABR"), DASH("DASH"), HLS("HLS") }
 
 object PlaybackPreferences {
     @Volatile var videoDecoderMode = DecoderMode.AUTO
     @Volatile var audioDecoderMode = DecoderMode.AUTO
+    var vodTransport by mutableStateOf(VodTransport.SABR)
+    var separateLiveTransport by mutableStateOf(false)
+    var liveTransport by mutableStateOf(VodTransport.SABR)
+    var separateMusicTransport by mutableStateOf(false)
+    var musicVodTransport by mutableStateOf(VodTransport.SABR)
     var prioritizeQualityOverCodec by mutableStateOf(false)
     var showSabrBackoffDuringBuffering by mutableStateOf(false)
+
+    fun effectiveLiveTransport(): VodTransport = if (separateLiveTransport) liveTransport else vodTransport
+    fun effectiveMusicTransport(): VodTransport = if (separateMusicTransport) musicVodTransport else vodTransport
 }
 
 object PlayerFactory {

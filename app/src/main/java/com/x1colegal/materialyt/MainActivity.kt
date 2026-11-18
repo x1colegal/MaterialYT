@@ -119,18 +119,31 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.DefaultRenderersFactory
+import com.google.android.exoplayer2.ForwardingPlayer
 import com.google.android.exoplayer2.mediacodec.MediaCodecSelector
 import com.google.android.exoplayer2.DefaultLoadControl
 import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.Player
+import com.google.android.exoplayer2.Timeline
+import com.google.android.exoplayer2.source.ForwardingTimeline
+import com.google.android.exoplayer2.source.MediaSource
 import com.google.android.exoplayer2.source.ProgressiveMediaSource
 import com.google.android.exoplayer2.source.MergingMediaSource
+import com.google.android.exoplayer2.source.WrappingMediaSource
+import com.google.android.exoplayer2.source.dash.DashMediaSource
+import com.google.android.exoplayer2.source.dash.manifest.DashManifest
+import com.google.android.exoplayer2.source.dash.manifest.DashManifestParser
+import com.google.android.exoplayer2.source.hls.HlsMediaSource
+import com.google.android.exoplayer2.util.Util
+import com.google.android.exoplayer2.upstream.ByteArrayDataSource
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
 import com.google.android.exoplayer2.upstream.HttpDataSource
 import com.google.android.exoplayer2.upstream.DataSource
+import com.google.android.exoplayer2.upstream.DataSpec
 import com.google.android.exoplayer2.ext.okhttp.OkHttpDataSource
 import com.google.android.exoplayer2.ui.AspectRatioFrameLayout
 import com.google.android.exoplayer2.ui.PlayerControlView
@@ -164,7 +177,7 @@ enum class QualityChoice(val label: String, val height: Int) {
     AUTO("Auto", 0), UHD2160("2160p", 2160), QHD1440("1440p", 1440), FHD1080("1080p", 1080), HD720("720p", 720), SD480("480p", 480), SD360("360p", 360)
 }
 
-private data class PlayerChoice(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val videoOnly: Boolean, val audioTrackName: String = "", val audioTrackId: String = "", val originalAudio: Boolean = false, val sabrFormat: SabrFormat? = null, val isLive: Boolean = false)
+private data class PlayerChoice(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val videoOnly: Boolean, val audioTrackName: String = "", val audioTrackId: String = "", val originalAudio: Boolean = false, val sabrFormat: SabrFormat? = null, val isLive: Boolean = false, val visionOsFormat: VisionOsFormat? = null)
 private enum class VideoPhonePanel { MAIN, DETAILS, COMMENTS, LIVE_CHAT }
 
 private fun shareVideoLink(context: Context, url: String) {
@@ -198,6 +211,129 @@ internal fun videoDataSourceFactory(streamUrl: String): DataSource.Factory = Chu
 internal fun sabrDataSourceFactory(streamUrl: String): DataSource.Factory =
     OkHttpDataSource.Factory(videoHttpClient)
         .setDefaultRequestProperties(YouTubeRepository.mediaHeaders(streamUrl))
+
+internal fun visionOsDataSourceFactory(): DataSource.Factory =
+    OkHttpDataSource.Factory(videoHttpClient)
+        .setUserAgent(YouTubeRepository.VISIONOS_UA)
+
+internal fun dashMpdDataSourceFactory(mpdBytes: ByteArray): DataSource.Factory {
+    val upstream = visionOsDataSourceFactory()
+    return DataSource.Factory {
+        val http = upstream.createDataSource()
+        val mem = ByteArrayDataSource(mpdBytes)
+        var current: DataSource = http
+        object : DataSource {
+            override fun addTransferListener(transferListener: com.google.android.exoplayer2.upstream.TransferListener) {
+                http.addTransferListener(transferListener)
+                mem.addTransferListener(transferListener)
+            }
+            override fun open(dataSpec: DataSpec): Long {
+                current = if (dataSpec.uri.scheme == "dash") mem else http
+                return current.open(dataSpec)
+            }
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int = current.read(buffer, offset, length)
+            override fun getUri(): android.net.Uri? = current.uri
+            override fun close() = current.close()
+        }
+    }
+}
+
+internal class YouTubeLiveDashManifestParser : DashManifestParser() {
+    private var baseAvailMs = -1L
+    private var basePto: String? = null
+
+    override fun parse(uri: android.net.Uri, inputStream: java.io.InputStream): DashManifest {
+        val xml = inputStream.bufferedReader().readText()
+        val rawManifest = super.parse(uri, xml.byteInputStream())
+        if (!rawManifest.dynamic || rawManifest.periodCount <= 0) return rawManifest
+        val period = rawManifest.getPeriod(0)
+        val index = period.adaptationSets.asSequence()
+            .flatMap { it.representations.asSequence() }
+            .mapNotNull { it.index }
+            .firstOrNull() ?: return rawManifest
+        val firstSeg = index.getFirstSegmentNum()
+        val segCount = index.getSegmentCount(C.TIME_UNSET)
+        if (segCount <= 0L) return rawManifest
+        val segDurMs = Util.usToMs(index.getDurationUs(firstSeg, C.TIME_UNSET)).coerceAtLeast(1_000L)
+        val liveEdgeMs = segCount * segDurMs
+        val currentPto = Regex("""presentationTimeOffset="(\d+)"""").find(xml)?.groupValues?.get(1)
+        if (baseAvailMs < 0L) {
+            baseAvailMs = System.currentTimeMillis() - liveEdgeMs
+            basePto = currentPto
+        }
+        val utcFmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }
+        val alignedUtc = utcFmt.format(java.util.Date(baseAvailMs))
+        var patchedXml = xml
+            .replace(Regex("""availabilityStartTime="[^"]*""""), """availabilityStartTime="$alignedUtc"""")
+            .replace(Regex("""(<Period\b[^>]*?\s)start="[^"]*""""), """$1start="PT0S"""")
+        val fixedPto = basePto
+        if (fixedPto != null && currentPto != null) {
+            patchedXml = patchedXml
+                .replace(Regex("""presentationTimeOffset="[^"]*""""), """presentationTimeOffset="$fixedPto"""")
+                .replace(Regex("""<SegmentTimeline>\s*<S(?![^>]*\bt=)\b"""), """<SegmentTimeline><S t="$currentPto"""")
+        }
+        val manifest = super.parse(uri, patchedXml.byteInputStream())
+        AppLog.event("DASH MPD patched firstSeg=$firstSeg segCount=$segCount pto=$currentPto basePto=$fixedPto availUtc=$alignedUtc")
+        return DashManifest(
+            manifest.availabilityStartTimeMs,
+            manifest.durationMs,
+            manifest.minBufferTimeMs,
+            manifest.dynamic,
+            manifest.minUpdatePeriodMs,
+            manifest.timeShiftBufferDepthMs,
+            12_000L,
+            manifest.publishTimeMs,
+            manifest.programInformation,
+            manifest.utcTiming,
+            manifest.serviceDescription,
+            manifest.location,
+            List(manifest.periodCount) { manifest.getPeriod(it) },
+        )
+    }
+}
+
+internal fun liveDashMediaItem(url: String): MediaItem =
+    MediaItem.Builder()
+        .setUri(url)
+        .setLiveConfiguration(
+            MediaItem.LiveConfiguration.Builder()
+                .setTargetOffsetMs(12_000L)
+                .setMinOffsetMs(6_000L)
+                .setMaxOffsetMs(30_000L)
+                .build()
+        )
+        .build()
+
+internal fun liveDashMediaSourceFactory(): DashMediaSource.Factory =
+    DashMediaSource.Factory(visionOsDataSourceFactory())
+        .setFallbackTargetLiveOffsetMs(12_000L)
+        .setManifestParser(YouTubeLiveDashManifestParser())
+
+internal class LiveTimelineMediaSource(child: MediaSource) : WrappingMediaSource(child) {
+    override fun onChildSourceInfoRefreshed(newTimeline: Timeline) {
+        super.onChildSourceInfoRefreshed(object : ForwardingTimeline(newTimeline) {
+            override fun getWindow(windowIndex: Int, window: Window, defaultPositionProjectionUs: Long): Window {
+                super.getWindow(windowIndex, window, defaultPositionProjectionUs)
+                if (window.isDynamic || window.durationUs < 0L) {
+                    window.durationUs = C.TIME_UNSET
+                }
+                return window
+            }
+
+            override fun getPeriod(periodIndex: Int, period: Period, setIds: Boolean): Period {
+                super.getPeriod(periodIndex, period, setIds)
+                val win = Window()
+                val dynamic = runCatching { super.getWindow(period.windowIndex, win, 0L).isDynamic }.getOrDefault(false)
+                if (dynamic || period.durationUs < 0L) {
+                    period.durationUs = C.TIME_UNSET
+                }
+                return period
+            }
+        })
+    }
+}
 
 private fun selectVideoStream(
     streams: List<PlayerChoice>,
@@ -239,10 +375,19 @@ private fun selectAudioStream(streams: List<PlayerChoice>, preferredCodec: Audio
     return matching.maxByOrNull { it.bitrate } ?: originals.maxByOrNull { it.bitrate } ?: valid.maxByOrNull { it.bitrate }
 }
 
+private fun dedupeAudioChoices(streams: List<PlayerChoice>): List<PlayerChoice> =
+    streams.sortedByDescending { it.bitrate }
+        .distinctBy { stream ->
+            val trackKey = stream.audioTrackName.ifBlank { stream.audioTrackId }.lowercase()
+            val codecFamily = stream.codec.substringBefore('.').lowercase()
+            "$trackKey|$codecFamily"
+        }
+
 private fun audioChoiceKey(stream: PlayerChoice): String = when {
-    stream.audioTrackId.isNotBlank() -> "id:${stream.audioTrackId}|${stream.codec.lowercase()}"
-    stream.audioTrackName.isNotBlank() -> "name:${stream.audioTrackName.lowercase()}|${stream.codec.lowercase()}"
+    stream.audioTrackName.isNotBlank() -> "name:${stream.audioTrackName.lowercase()}|${stream.codec.substringBefore('.').lowercase()}"
+    stream.audioTrackId.isNotBlank() -> "id:${stream.audioTrackId}|${stream.codec.substringBefore('.').lowercase()}"
     stream.sabrFormat != null -> "itag:${stream.sabrFormat.itag}"
+    stream.visionOsFormat != null -> "visionos:${stream.visionOsFormat.itag}"
     else -> "stream:${stream.url}|${stream.codec.lowercase()}|${stream.bitrate}"
 }
 
@@ -809,9 +954,15 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
     var quality by remember { mutableStateOf(runCatching { QualityChoice.valueOf(prefs.getString("quality", "AUTO")!!) }.getOrDefault(QualityChoice.AUTO)) }
     var videoDecoderMode by remember { mutableStateOf(runCatching { DecoderMode.valueOf(prefs.getString("video_decoder_mode", "AUTO")!!) }.getOrDefault(DecoderMode.AUTO)) }
     var audioDecoderMode by remember { mutableStateOf(runCatching { DecoderMode.valueOf(prefs.getString("audio_decoder_mode", "AUTO")!!) }.getOrDefault(DecoderMode.AUTO)) }
+    var vodTransport by remember { mutableStateOf(runCatching { VodTransport.valueOf(prefs.getString("vod_transport", "SABR")!!) }.getOrDefault(VodTransport.SABR)) }
     remember {
         PlaybackPreferences.prioritizeQualityOverCodec = prefs.getBoolean("prioritize_quality_over_codec", false)
         PlaybackPreferences.showSabrBackoffDuringBuffering = prefs.getBoolean("show_sabr_backoff_during_buffering", false)
+        PlaybackPreferences.vodTransport = vodTransport
+        PlaybackPreferences.separateLiveTransport = prefs.getBoolean("separate_live_transport", false)
+        PlaybackPreferences.liveTransport = runCatching { VodTransport.valueOf(prefs.getString("live_transport", "SABR")!!) }.getOrDefault(VodTransport.SABR)
+        PlaybackPreferences.separateMusicTransport = prefs.getBoolean("separate_music_transport", false)
+        PlaybackPreferences.musicVodTransport = runCatching { VodTransport.valueOf(prefs.getString("music_vod_transport", "SABR")!!) }.getOrDefault(VodTransport.SABR)
     }
     PlaybackPreferences.videoDecoderMode = videoDecoderMode
     PlaybackPreferences.audioDecoderMode = audioDecoderMode
@@ -832,20 +983,20 @@ private fun MaterialYtRoot(activity: MainActivity, onPlayer: (ExoPlayer) -> Unit
         }
     }
     MaterialTheme(colorScheme = scheme) {
-        AppScaffold(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme = { theme = it; prefs.edit().putString("theme", it.name).apply() },
+        AppScaffold(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, vodTransport, onTheme = { theme = it; prefs.edit().putString("theme", it.name).apply() },
             onColor = { color = it; prefs.edit().putString("color", it.name).apply() },
             onCodec = { codec = it; prefs.edit().putString("codec", it.name).apply() },
             onAudioCodec = { audioCodec = it; prefs.edit().putString("audio_codec", it.name).apply() },
             onQuality = { quality = it; prefs.edit().putString("quality", it.name).apply() },
-            onVideoDecoderMode = { videoDecoderMode = it; PlaybackPreferences.videoDecoderMode = it; prefs.edit().putString("video_decoder_mode", it.name).apply() }, onAudioDecoderMode = { audioDecoderMode = it; PlaybackPreferences.audioDecoderMode = it; prefs.edit().putString("audio_decoder_mode", it.name).apply() }, registerPlayer)
+            onVideoDecoderMode = { videoDecoderMode = it; PlaybackPreferences.videoDecoderMode = it; prefs.edit().putString("video_decoder_mode", it.name).apply() }, onAudioDecoderMode = { audioDecoderMode = it; PlaybackPreferences.audioDecoderMode = it; prefs.edit().putString("audio_decoder_mode", it.name).apply() }, onVodTransport = { vodTransport = it; PlaybackPreferences.vodTransport = it; prefs.edit().putString("vod_transport", it.name).apply() }, registerPlayer)
     }
 }
 
 @Composable
 private fun AppScaffold(
-    activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode,
+    activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, vodTransport: VodTransport,
     onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit,
-    onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit,
+    onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onVodTransport: (VodTransport) -> Unit,
     onPlayer: (ExoPlayer) -> Unit
 ) {
     var tab by remember { mutableIntStateOf(0) }
@@ -958,7 +1109,7 @@ private fun AppScaffold(
                 }) { playerMode = it }
                 "YT Music" -> MusicScreen(activity, audioCodec, reopenMusicPlayer) { playerMode = it }
                 "History" -> NativeFeedScreen(activity, "History", Icons.Default.History, codec, audioCodec, quality, onPlayer, { playerMode = it }, onOpenVideoWithPlaylist, loader = { YouTubeRepository.history() })
-                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onPlayer, { playerMode = it }, onOpenVideoWithPlaylist) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
+                else -> AccountScreen(activity, theme, color, codec, audioCodec, quality, videoDecoderMode, audioDecoderMode, vodTransport, onTheme, onColor, onCodec, onAudioCodec, onQuality, onVideoDecoderMode, onAudioDecoderMode, onVodTransport, onPlayer, { playerMode = it }, onOpenVideoWithPlaylist) { authenticated = it; tab = tabs.indexOfFirst { entry -> entry.first == "Account" } }
             }
             activeVideoUrl?.let { videoUrl ->
                 VideoScreen(activity, videoUrl, codec, audioCodec, quality, onPlayer,
@@ -3289,7 +3440,8 @@ private fun MusicPlayer(
                 } else audioTracks.forEach { audio ->
                     val selected = selectedAudioTrack?.let { current ->
                         when {
-                            current.audioTrackId.isNotBlank() && audio.audioTrackId.isNotBlank() -> current.audioTrackId == audio.audioTrackId && current.codec.equals(audio.codec, true)
+                            current.audioTrackId.isNotBlank() && audio.audioTrackId.isNotBlank() -> current.audioTrackId == audio.audioTrackId && current.codec.substringBefore('.').equals(audio.codec.substringBefore('.'), true)
+                            current.visionOsFormat != null && audio.visionOsFormat != null -> current.visionOsFormat.itag == audio.visionOsFormat.itag
                             current.sabrFormat != null && audio.sabrFormat != null -> current.sabrFormat.itag == audio.sabrFormat.itag
                             else -> current.url == audio.url && current.codec.equals(audio.codec, true) && current.bitrate == audio.bitrate
                         }
@@ -4983,6 +5135,9 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
     var audio by remember(item.id) { mutableStateOf<PlayerChoice?>(null) }
     var audioTracks by remember(item.id) { mutableStateOf<List<PlayerChoice>>(emptyList()) }
     var sabrPlayback by remember(item.id) { mutableStateOf<SabrPlaybackInfo?>(null) }
+    var visionOsPlayback by remember(item.id) { mutableStateOf<VisionOsVodPlayback?>(null) }
+    val vodTransport = PlaybackPreferences.vodTransport
+    val liveTransport = PlaybackPreferences.effectiveLiveTransport()
     val preferredAudioCodec = audioCodec
     var shortMetadata by remember(item.id) { mutableStateOf<VideoDetails?>(YouTubeRepository.videoDetails(item.id)) }
     var speed by remember { mutableFloatStateOf(1f) }
@@ -5040,10 +5195,35 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
 
     fun play(stream: PlayerChoice) {
         val sabr = sabrPlayback
-        val source = if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
+        val visionOs = visionOsPlayback
+        val activeTransport = if (stream.isLive) liveTransport else vodTransport
+        val source = if (visionOs != null && activeTransport == VodTransport.HLS && visionOs.hlsManifestUrl.isNotBlank()) {
+            val lang = audio?.audioTrackId?.substringBefore('.')?.takeIf(String::isNotBlank)
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
+                if (stream.height > 0) setMaxVideoSize(Int.MAX_VALUE, stream.height) else clearVideoSizeConstraints()
+                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
+            }.build()
+            HlsMediaSource.Factory(visionOsDataSourceFactory()).createMediaSource(MediaItem.fromUri(visionOs.hlsManifestUrl))
+                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
+        } else if (visionOs != null && activeTransport == VodTransport.DASH && stream.visionOsFormat != null) {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
+            val mpd = YouTubeRepository.buildDashMpd(visionOs.durationMs, stream.visionOsFormat, audio?.visionOsFormat)
+            DashMediaSource.Factory(dashMpdDataSourceFactory(mpd.toByteArray(Charsets.UTF_8)))
+                .createMediaSource(MediaItem.fromUri("dash://local/${item.id}"))
+                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
+        } else if (visionOs != null && activeTransport == VodTransport.DASH && visionOs.dashManifestUrl.isNotBlank()) {
+            val lang = audio?.audioTrackId?.substringBefore('.')?.takeIf(String::isNotBlank)
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
+                if (stream.height > 0) setMaxVideoSize(Int.MAX_VALUE, stream.height) else clearVideoSizeConstraints()
+                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
+            }.build()
+            LiveTimelineMediaSource(liveDashMediaSourceFactory().createMediaSource(liveDashMediaItem(visionOs.dashManifestUrl)))
+        } else if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
             SabrMediaFactory.create(sabr, stream.sabrFormat, audio!!.sabrFormat!!,
                 sabrDataSourceFactory(sabr.serverAbrStreamingUrl))
         } else {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
             val video = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
             if (stream.videoOnly && audio != null) MergingMediaSource(true, video,
                 ProgressiveMediaSource.Factory(videoDataSourceFactory(audio!!.url)).createMediaSource(MediaItem.fromUri(audio!!.url))) else video
@@ -5052,7 +5232,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         selected = stream
     }
     val prioritizeQualityOverCodec = PlaybackPreferences.prioritizeQualityOverCodec
-    LaunchedEffect(item.id, active, codec, preferredAudioCodec, quality, prioritizeQualityOverCodec) {
+    LaunchedEffect(item.id, active, codec, preferredAudioCodec, quality, prioritizeQualityOverCodec, vodTransport, liveTransport) {
         if (!active) {
             player.stop()
             player.clearMediaItems()
@@ -5060,8 +5240,73 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         }
         hasStartedPlayback = false
         PlaybackLoadStatus.beginInitialLoad(item.id)
-        streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; sabrPlayback = null; error = null
-        if (streams.isEmpty()) {
+        streams = emptyList(); audioTracks = emptyList(); selected = null; audio = null; sabrPlayback = null; visionOsPlayback = null; error = null
+        var useSabrPath = vodTransport == VodTransport.SABR
+        if (!useSabrPath) {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.visionOsVodPlayback(item.id) } }.onSuccess { extracted ->
+                shortMetadata = YouTubeRepository.videoDetails(item.id)
+                val activeTransport = if (extracted.isLive) liveTransport else vodTransport
+                if (activeTransport == VodTransport.SABR) {
+                    useSabrPath = true
+                } else if (activeTransport == VodTransport.HLS) {
+                    if (extracted.hlsManifestUrl.isBlank()) {
+                        error = "VISIONOS returned no HLS manifest for this Short"
+                    } else {
+                        visionOsPlayback = extracted
+                        audioTracks = dedupeAudioChoices(extracted.formats.filter { it.audio }.map {
+                            PlayerChoice(extracted.hlsManifestUrl, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio, visionOsFormat = it, isLive = extracted.isLive)
+                        })
+                        audio = selectAudioStream(audioTracks, preferredAudioCodec)
+                        val hlsChoices = extracted.formats.filter { !it.audio && it.height > 0 }.map {
+                            PlayerChoice(extracted.hlsManifestUrl, it.codec, it.height, it.fps, it.bitrate, false, isLive = extracted.isLive)
+                        }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                        streams = hlsChoices.ifEmpty {
+                            listOf(PlayerChoice(extracted.hlsManifestUrl, "HLS", 0, 0, 0, false, isLive = extracted.isLive))
+                        }
+                        selectVideoStream(streams, codec, quality, prioritizeQualityOverCodec)?.let { stream -> error = null; play(stream) }
+                        AppLog.event("shorts VISIONOS HLS video=${item.id} isLive=${extracted.isLive} streams=${streams.size} audio=${audioTracks.size}")
+                    }
+                } else if (activeTransport == VodTransport.DASH) {
+                    if (extracted.isLive && extracted.dashManifestUrl.isNotBlank()) {
+                        visionOsPlayback = extracted
+                        audioTracks = dedupeAudioChoices(extracted.formats.filter { it.audio }.map {
+                            PlayerChoice(extracted.dashManifestUrl, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio, isLive = true)
+                        })
+                        audio = selectAudioStream(audioTracks, preferredAudioCodec)
+                        val dashChoices = extracted.formats.filter { !it.audio && it.height > 0 }.map {
+                            PlayerChoice(extracted.dashManifestUrl, it.codec, it.height, it.fps, it.bitrate, false, isLive = true)
+                        }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                        streams = dashChoices.ifEmpty {
+                            listOf(PlayerChoice(extracted.dashManifestUrl, "DASH", 0, 0, 0, false, isLive = true))
+                        }
+                        selectVideoStream(streams, codec, quality, prioritizeQualityOverCodec)?.let { stream -> error = null; play(stream) }
+                        AppLog.event("shorts VISIONOS live DASH video=${item.id} streams=${streams.size} audio=${audioTracks.size}")
+                    } else {
+                        val dashFormats = extracted.formats.filter { it.indexEnd > 0L && it.initEnd >= 0L }
+                        val dashAudio = dedupeAudioChoices(dashFormats.filter { it.audio }.map {
+                            PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio, visionOsFormat = it, isLive = extracted.isLive)
+                        })
+                        val dashVideo = dashFormats.filter { !it.audio && it.height > 0 }.map {
+                            PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, true, visionOsFormat = it, isLive = extracted.isLive)
+                        }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                        if (dashVideo.isEmpty() || dashAudio.isEmpty()) {
+                            error = if (extracted.isLive) "ANDROID_VR returned no DASH manifest for this live Short" else "VISIONOS returned no DASH formats for this Short"
+                        } else {
+                            visionOsPlayback = extracted
+                            audioTracks = dashAudio
+                            audio = selectAudioStream(audioTracks, preferredAudioCodec)
+                            streams = dashVideo
+                            selectVideoStream(streams, codec, quality, prioritizeQualityOverCodec)?.let { stream -> error = null; play(stream) }
+                            AppLog.event("shorts VISIONOS DASH video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
+                        }
+                    }
+                }
+            }.onFailure {
+                AppLog.failure("shorts VISIONOS VOD video=${item.id}", it)
+                error = it.message ?: "VISIONOS playback failed"
+            }
+        }
+        if (useSabrPath && streams.isEmpty()) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(item.id) } }.onSuccess { playback ->
                 sabrPlayback = playback
                 audioTracks = playback.formats.filter { it.audio }.map {
@@ -5078,7 +5323,7 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
                 AppLog.event("shorts SABR primary video=${item.id} videoStreams=${streams.size} audioStreams=${audioTracks.size}")
             }.onFailure { AppLog.failure("shorts SABR primary video=${item.id}", it) }
         }
-        if (streams.isEmpty()) {
+        if (useSabrPath && streams.isEmpty()) {
             val extracted = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(item.id) } }
             extracted.onSuccess { result ->
                 audioTracks = result.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio) }
@@ -5326,12 +5571,14 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             Spacer(Modifier.height(16.dp)); Text("Quality", style = MaterialTheme.typography.titleMedium)
             streams.forEach { stream ->
                 val bitrate = if (stream.bitrate > 0) " • ${"%.1f".format(stream.bitrate / 1_000_000.0)} Mbps" else ""
-                ListItem(headlineContent = { Text("${stream.height}p • ${stream.fps} FPS • ${stream.codec.uppercase()}$bitrate") },
+                val label = if (stream.height == 0) "Auto" else "${stream.height}p • ${if (stream.fps > 0) stream.fps else "?"} FPS • ${stream.codec.uppercase()}$bitrate"
+                ListItem(headlineContent = { Text(label) },
                     leadingContent = { RadioButton(selected == stream, null) }, modifier = Modifier.clickable { play(stream) })
             }
             Spacer(Modifier.height(16.dp)); Text("Audio track", style = MaterialTheme.typography.titleMedium)
             visibleAudioChoices(audioTracks, audio).forEach { track ->
-                ListItem(headlineContent = { Text(audioChoiceLabel(track)) }, supportingContent = { Text("${track.codec.uppercase()} • ${track.bitrate / 1000} kbps") },
+                val bitrate = if (track.bitrate > 0) "${track.bitrate / 1000} kbps" else "Unknown bitrate"
+                ListItem(headlineContent = { Text(audioChoiceLabel(track)) }, supportingContent = { Text("${track.codec.uppercase()} • $bitrate") },
                     leadingContent = { RadioButton(audio?.let(::audioChoiceKey) == audioChoiceKey(track), null) }, modifier = Modifier.clickable { audio = track; selected?.let(::play) })
             }
         }
@@ -5425,6 +5672,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var selectedAudio by remember { mutableStateOf<PlayerChoice?>(null) }
     var selectedStream by remember { mutableStateOf<PlayerChoice?>(null) }
     var sabrPlayback by remember { mutableStateOf<SabrPlaybackInfo?>(null) }
+    var visionOsPlayback by remember { mutableStateOf<VisionOsVodPlayback?>(null) }
+    val vodTransport = PlaybackPreferences.vodTransport
+    val liveTransport = PlaybackPreferences.effectiveLiveTransport()
     var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
     var hasStartedPlayback by remember(videoId) { mutableStateOf(false) }
     val videoLoadStatus by PlaybackLoadStatus.message.collectAsState()
@@ -5445,12 +5695,58 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
     var isMinimized by remember { mutableStateOf(false) }
     var miniplayerDismissed by remember { mutableStateOf(false) }
     var currentPlayerView by remember { mutableStateOf<PlayerView?>(null) }
+    val currentPlaylistIndex by rememberUpdatedState(playlistIndex)
+    val currentPlaylistItems by rememberUpdatedState(playlistItems)
+    val currentOnPlaylistIndex by rememberUpdatedState(onPlaylistIndex)
+    var liveElapsedMs by remember(videoId) { mutableLongStateOf(0L) }
+    var liveElapsedStartedAtMs by remember(videoId) { mutableLongStateOf(0L) }
+    fun currentLiveElapsedMs(): Long {
+        val running = if (liveElapsedStartedAtMs > 0L) (android.os.SystemClock.elapsedRealtime() - liveElapsedStartedAtMs).coerceAtLeast(0L) else 0L
+        return liveElapsedMs + running
+    }
+    val uiPlayer = remember(player) {
+        object : ForwardingPlayer(player) {
+            private fun hasPrevPlaylistItem(): Boolean = currentPlaylistIndex > 0
+            private fun hasNextPlaylistItem(): Boolean =
+                currentPlaylistIndex >= 0 && currentPlaylistIndex < currentPlaylistItems.lastIndex
+            override fun isCommandAvailable(command: Int): Boolean = when (command) {
+                Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> hasPrevPlaylistItem()
+                Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> hasNextPlaylistItem()
+                else -> super.isCommandAvailable(command)
+            }
+            override fun getAvailableCommands(): Player.Commands =
+                super.getAvailableCommands().buildUpon()
+                    .apply {
+                        if (!hasPrevPlaylistItem()) {
+                            remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+                            remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                        }
+                        if (!hasNextPlaylistItem()) {
+                            remove(Player.COMMAND_SEEK_TO_NEXT)
+                            remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                        }
+                    }.build()
+            override fun getDuration(): Long = if (selectedStream?.isLive == true) C.TIME_UNSET else super.getDuration()
+            override fun getCurrentPosition(): Long {
+                if (selectedStream?.isLive == true && sabrPlayback == null) return currentLiveElapsedMs()
+                return super.getCurrentPosition()
+            }
+            override fun getContentPosition(): Long =
+                if (selectedStream?.isLive == true && sabrPlayback == null) currentLiveElapsedMs() else super.getContentPosition()
+            override fun getBufferedPosition(): Long {
+                if (selectedStream?.isLive == true && sabrPlayback == null) return currentLiveElapsedMs()
+                return super.getBufferedPosition()
+            }
+            override fun getContentBufferedPosition(): Long =
+                if (selectedStream?.isLive == true && sabrPlayback == null) currentLiveElapsedMs() else super.getContentBufferedPosition()
+        }
+    }
     fun attachPlayerView(view: PlayerView) {
         if (currentPlayerView !== view) {
-            PlayerView.switchTargetView(player, currentPlayerView, view)
+            PlayerView.switchTargetView(uiPlayer, currentPlayerView, view)
             currentPlayerView = view
-        } else if (view.player !== player) {
-            view.player = player
+        } else if (view.player !== uiPlayer) {
+            view.player = uiPlayer
         }
         activity.visiblePlayerView(view)
     }
@@ -5488,9 +5784,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             publishedDate = stablePublished,
         )
     }
-    val currentPlaylistIndex by rememberUpdatedState(playlistIndex)
-    val currentPlaylistItems by rememberUpdatedState(playlistItems)
-    val currentOnPlaylistIndex by rememberUpdatedState(onPlaylistIndex)
     fun bindPlaylistControls(view: PlayerView) {
         val previous = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_prev)
         val next = view.findViewById<View>(com.google.android.exoplayer2.ui.R.id.exo_next)
@@ -5522,10 +5815,35 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         val position = if (stream.isLive) 0L else if (currentPosition > 0L) currentPosition else resumeStartMs.takeIf { !initialStartApplied } ?: 0L
         val audio = if (stream.videoOnly) selectedAudio ?: audioStreams.maxByOrNull { it.bitrate } else null
         val sabr = sabrPlayback
-        val source = if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
+        val visionOs = visionOsPlayback
+        val activeTransport = if (stream.isLive) liveTransport else vodTransport
+        val source = if (visionOs != null && activeTransport == VodTransport.HLS && visionOs.hlsManifestUrl.isNotBlank()) {
+            val lang = selectedAudio?.audioTrackId?.substringBefore('.')?.takeIf(String::isNotBlank)
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
+                if (stream.height > 0) setMaxVideoSize(Int.MAX_VALUE, stream.height) else clearVideoSizeConstraints()
+                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
+            }.build()
+            HlsMediaSource.Factory(visionOsDataSourceFactory()).createMediaSource(MediaItem.fromUri(visionOs.hlsManifestUrl))
+                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
+        } else if (visionOs != null && activeTransport == VodTransport.DASH && stream.visionOsFormat != null) {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
+            val mpd = YouTubeRepository.buildDashMpd(visionOs.durationMs, stream.visionOsFormat, audio?.visionOsFormat)
+            DashMediaSource.Factory(dashMpdDataSourceFactory(mpd.toByteArray(Charsets.UTF_8)))
+                .createMediaSource(MediaItem.fromUri("dash://local/$videoId"))
+                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
+        } else if (visionOs != null && activeTransport == VodTransport.DASH && visionOs.dashManifestUrl.isNotBlank()) {
+            val lang = selectedAudio?.audioTrackId?.substringBefore('.')?.takeIf(String::isNotBlank)
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
+                if (stream.height > 0) setMaxVideoSize(Int.MAX_VALUE, stream.height) else clearVideoSizeConstraints()
+                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
+            }.build()
+            LiveTimelineMediaSource(liveDashMediaSourceFactory().createMediaSource(liveDashMediaItem(visionOs.dashManifestUrl)))
+        } else if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
             SabrMediaFactory.create(sabr, stream.sabrFormat, audio.sabrFormat,
                 sabrDataSourceFactory(sabr.serverAbrStreamingUrl), initialStartMs = position)
         } else {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
             val videoSource = ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url)).createMediaSource(MediaItem.fromUri(stream.url))
             if (audio != null) {
                 val audioSource = ProgressiveMediaSource.Factory(videoDataSourceFactory(audio.url)).createMediaSource(MediaItem.fromUri(audio.url))
@@ -5622,12 +5940,23 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                     PlaybackLoadStatus.message.value?.text?.startsWith("SABR requested backoff") != true) {
                     PlaybackLoadStatus.show(videoId, "Buffering media…")
                 }
-                if (state == Player.STATE_ENDED) autoplayPending = true
+                if (state == Player.STATE_ENDED && selectedStream?.isLive != true) autoplayPending = true
                 mediaSession.setPlaybackState(PlaybackStateCompat.Builder()
                     .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or PlaybackStateCompat.ACTION_SEEK_TO)
                     .setState(if (player.isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED, player.currentPosition.coerceAtLeast(0L), if (player.isPlaying) 1f else 0f).build())
             }
+            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                currentPlayerView?.let { v -> v.post { bindPlaylistControls(v) } }
+            }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (selectedStream?.isLive == true && sabrPlayback == null) {
+                    if (isPlaying) {
+                        if (liveElapsedStartedAtMs == 0L) liveElapsedStartedAtMs = android.os.SystemClock.elapsedRealtime()
+                    } else if (liveElapsedStartedAtMs > 0L) {
+                        liveElapsedMs += (android.os.SystemClock.elapsedRealtime() - liveElapsedStartedAtMs).coerceAtLeast(0L)
+                        liveElapsedStartedAtMs = 0L
+                    }
+                }
                 AppLog.event(
                     "video player playing video=$videoId isPlaying=$isPlaying state=${player.playbackState} " +
                         "playWhenReady=${player.playWhenReady} suppression=${player.playbackSuppressionReason} " +
@@ -5801,7 +6130,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
     }
     val prioritizeQualityOverCodec = PlaybackPreferences.prioritizeQualityOverCodec
-    LaunchedEffect(url, codec, audioCodec, quality, prioritizeQualityOverCodec, playbackTrigger) {
+    LaunchedEffect(url, codec, audioCodec, quality, prioritizeQualityOverCodec, vodTransport, liveTransport, playbackTrigger) {
         val videoId = Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1) ?: url.substringAfterLast('/')
         hasStartedPlayback = false
         val cachedDetails = YouTubeRepository.videoDetails(videoId)
@@ -5828,8 +6157,76 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 .getOrDefault(0L)
                 .also { position -> AppLog.event("history resume video=$videoId positionMs=$position") }
         }
-        player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; sabrPlayback = null; error = null
-        if (availableStreams.isEmpty()) {
+        player.stop(); player.clearMediaItems(); availableStreams = emptyList(); audioStreams = emptyList(); selectedStream = null; selectedAudio = null; sabrPlayback = null; visionOsPlayback = null; error = null
+        val isKnownLive = videoMetadata?.isLive == true || cachedDetails?.isLive == true
+        val initialTransport = if (isKnownLive) liveTransport else vodTransport
+        var useSabrPath = initialTransport == VodTransport.SABR
+        if (!useSabrPath) {
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.visionOsVodPlayback(videoId) } }.onSuccess { extracted ->
+                YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = stableMetadata(it) }
+                val activeTransport = if (extracted.isLive) liveTransport else vodTransport
+                if (activeTransport == VodTransport.SABR) {
+                    useSabrPath = true
+                } else if (activeTransport == VodTransport.HLS) {
+                    if (extracted.hlsManifestUrl.isBlank()) {
+                        error = "VISIONOS returned no HLS manifest for this video"
+                    } else {
+                        visionOsPlayback = extracted
+                        val hlsAudio = dedupeAudioChoices(extracted.formats.filter { it.audio }.map {
+                            PlayerChoice(extracted.hlsManifestUrl, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio, visionOsFormat = it, isLive = extracted.isLive)
+                        })
+                        audioStreams = hlsAudio
+                        selectedAudio = selectAudioStream(audioStreams, audioCodec)
+                        val hlsChoices = extracted.formats.filter { !it.audio && it.height > 0 }.map {
+                            PlayerChoice(extracted.hlsManifestUrl, it.codec, it.height, it.fps, it.bitrate, false, isLive = extracted.isLive)
+                        }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                        availableStreams = hlsChoices.ifEmpty {
+                            listOf(PlayerChoice(extracted.hlsManifestUrl, "HLS", 0, 0, 0, false, isLive = extracted.isLive))
+                        }
+                        selectVideoStream(availableStreams, codec, quality, prioritizeQualityOverCodec)?.let { chosen -> error = null; play(chosen) }
+                        AppLog.event("player VISIONOS HLS video=$videoId isLive=${extracted.isLive} streams=${availableStreams.size} audio=${audioStreams.size}")
+                    }
+                } else if (activeTransport == VodTransport.DASH) {
+                    if (extracted.isLive && extracted.dashManifestUrl.isNotBlank()) {
+                        visionOsPlayback = extracted
+                        audioStreams = dedupeAudioChoices(extracted.formats.filter { it.audio }.map {
+                            PlayerChoice(extracted.dashManifestUrl, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio, isLive = true)
+                        })
+                        selectedAudio = selectAudioStream(audioStreams, audioCodec)
+                        val dashChoices = extracted.formats.filter { !it.audio && it.height > 0 }.map {
+                            PlayerChoice(extracted.dashManifestUrl, it.codec, it.height, it.fps, it.bitrate, false, isLive = true)
+                        }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                        availableStreams = dashChoices.ifEmpty {
+                            listOf(PlayerChoice(extracted.dashManifestUrl, "DASH", 0, 0, 0, false, isLive = true))
+                        }
+                        selectVideoStream(availableStreams, codec, quality, prioritizeQualityOverCodec)?.let { chosen -> error = null; play(chosen) }
+                        AppLog.event("player VISIONOS live DASH video=$videoId streams=${availableStreams.size} audio=${audioStreams.size}")
+                    } else {
+                        val dashFormats = extracted.formats.filter { it.indexEnd > 0L && it.initEnd >= 0L }
+                        val dashAudio = dedupeAudioChoices(dashFormats.filter { it.audio }.map {
+                            PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio, visionOsFormat = it, isLive = extracted.isLive)
+                        })
+                        val dashVideo = dashFormats.filter { !it.audio && it.height > 0 }.map {
+                            PlayerChoice(it.url, it.codec, it.height, it.fps, it.bitrate, true, visionOsFormat = it, isLive = extracted.isLive)
+                        }.distinctBy { "${it.height}-${it.fps}-${it.codec}" }.sortedByDescending { it.height }
+                        if (dashVideo.isEmpty() || dashAudio.isEmpty()) {
+                            error = if (extracted.isLive) "ANDROID_VR returned no DASH manifest for this live stream" else "VISIONOS returned no DASH formats for this video"
+                        } else {
+                            visionOsPlayback = extracted
+                            audioStreams = dashAudio
+                            selectedAudio = selectAudioStream(audioStreams, audioCodec)
+                            availableStreams = dashVideo
+                            selectVideoStream(availableStreams, codec, quality, prioritizeQualityOverCodec)?.let { chosen -> error = null; play(chosen) }
+                            AppLog.event("player VISIONOS DASH video=$videoId videoStreams=${availableStreams.size} audioStreams=${audioStreams.size}")
+                        }
+                    }
+                }
+            }.onFailure {
+                AppLog.failure("player VISIONOS VOD video=$videoId", it)
+                error = it.message ?: "VISIONOS playback failed"
+            }
+        }
+        if (useSabrPath && availableStreams.isEmpty()) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(videoId) } }.onSuccess { extracted ->
                 sabrPlayback = extracted
                 YouTubeRepository.videoDetails(videoId)?.let { videoMetadata = stableMetadata(it) }
@@ -5859,7 +6256,7 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 }
             }
         }
-        if (availableStreams.isEmpty() && videoMetadata?.isUpcoming != true) {
+        if (useSabrPath && availableStreams.isEmpty() && videoMetadata?.isUpcoming != true) {
             runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(videoId) } }.onSuccess { extracted ->
                 audioStreams = extracted.filter { it.audio }.map { PlayerChoice(it.url, it.codec, 0, 0, it.bitrate, false, it.audioTrackName, it.audioTrackId, it.originalAudio, isLive = it.isLive) }
                 selectedAudio = selectAudioStream(audioStreams, audioCodec)
@@ -6582,7 +6979,7 @@ private fun OwnAccountScreen(activity: MainActivity, codec: CodecChoice, audioCo
 }
 
 @Composable
-private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, onAuth: (Boolean) -> Unit) {
+private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppColor, codec: CodecChoice, audioCodec: AudioCodecChoice, quality: QualityChoice, videoDecoderMode: DecoderMode, audioDecoderMode: DecoderMode, vodTransport: VodTransport, onTheme: (ThemeMode) -> Unit, onColor: (AppColor) -> Unit, onCodec: (CodecChoice) -> Unit, onAudioCodec: (AudioCodecChoice) -> Unit, onQuality: (QualityChoice) -> Unit, onVideoDecoderMode: (DecoderMode) -> Unit, onAudioDecoderMode: (DecoderMode) -> Unit, onVodTransport: (VodTransport) -> Unit, onPlayer: (ExoPlayer) -> Unit, onPlayerMode: (Boolean) -> Unit, openVideo: (String, List<FeedItem>, Int) -> Unit, onAuth: (Boolean) -> Unit) {
     var destination by remember { mutableStateOf("account") }
     var signedIn by remember { mutableStateOf(YouTubeRepository.signedIn()) }
     if (destination == "login") { LoginScreen({ destination = "account" }) { signedIn = true; onAuth(true); destination = "account" }; return }
@@ -6656,6 +7053,73 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
                     PlaybackPreferences.showSabrBackoffDuringBuffering = it
                     prefs.edit().putBoolean("show_sabr_backoff_during_buffering", it).apply()
                 })
+            }
+        }
+        item {
+            val separateLive = PlaybackPreferences.separateLiveTransport
+            val separateMusic = PlaybackPreferences.separateMusicTransport
+            val mainTransportTitle = when {
+                !separateLive && !separateMusic -> "Stream transport"
+                separateMusic && !separateLive -> "VOD & Live transport"
+                separateLive && !separateMusic -> "YT Music & VOD transport"
+                else -> "VOD transport"
+            }
+            ChoiceSection(mainTransportTitle, VodTransport.entries, vodTransport, { it.label }, onVodTransport)
+        }
+        item { Text("SABR uses the WEB player session and is recommended. DASH and HLS may return LOGIN_REQUIRED in some situations.", style = MaterialTheme.typography.bodySmall) }
+        item {
+            val prefs = activity.getSharedPreferences("settings", 0)
+            val separateLive = PlaybackPreferences.separateLiveTransport
+            Row(Modifier.fillMaxWidth().clickable {
+                val updated = !separateLive
+                PlaybackPreferences.separateLiveTransport = updated
+                prefs.edit().putBoolean("separate_live_transport", updated).apply()
+            }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Separate Live transport", style = MaterialTheme.typography.titleMedium)
+                    Text("Use a different transport for live streams instead of the main transport", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = separateLive, onCheckedChange = {
+                    PlaybackPreferences.separateLiveTransport = it
+                    prefs.edit().putBoolean("separate_live_transport", it).apply()
+                })
+            }
+        }
+        if (PlaybackPreferences.separateLiveTransport) {
+            item {
+                val prefs = activity.getSharedPreferences("settings", 0)
+                ChoiceSection("Live transport", VodTransport.entries, PlaybackPreferences.liveTransport, { it.label }) { selected ->
+                    PlaybackPreferences.liveTransport = selected
+                    prefs.edit().putString("live_transport", selected.name).apply()
+                }
+            }
+            item { Text("SABR uses the WEB player session and is recommended. HLS uses VISIONOS and DASH uses ANDROID_VR for live streams, and both may return LOGIN_REQUIRED in some situations.", style = MaterialTheme.typography.bodySmall) }
+        }
+        item {
+            val prefs = activity.getSharedPreferences("settings", 0)
+            val separateMusic = PlaybackPreferences.separateMusicTransport
+            Row(Modifier.fillMaxWidth().clickable {
+                val updated = !separateMusic
+                PlaybackPreferences.separateMusicTransport = updated
+                prefs.edit().putBoolean("separate_music_transport", updated).apply()
+            }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Separate YT Music transport", style = MaterialTheme.typography.titleMedium)
+                    Text("Use a different transport for YT Music instead of the main transport", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = separateMusic, onCheckedChange = {
+                    PlaybackPreferences.separateMusicTransport = it
+                    prefs.edit().putBoolean("separate_music_transport", it).apply()
+                })
+            }
+        }
+        if (PlaybackPreferences.separateMusicTransport) {
+            item {
+                val prefs = activity.getSharedPreferences("settings", 0)
+                ChoiceSection("YT Music transport", VodTransport.entries, PlaybackPreferences.musicVodTransport, { it.label }) { selected ->
+                    PlaybackPreferences.musicVodTransport = selected
+                    prefs.edit().putString("music_vod_transport", selected.name).apply()
+                }
             }
         }
         item { ChoiceSection("Video decoder", DecoderMode.entries, videoDecoderMode, { it.label }, onVideoDecoderMode) }

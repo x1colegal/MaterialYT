@@ -61,7 +61,7 @@ data class PlaylistPage(
     val continuation: String? = null,
 )
 data class CanonicalVideoMetadata(val title: String, val author: String, val publishedDate: String = "")
-data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null, val isLive: Boolean = false)
+data class PlayableStream(val url: String, val codec: String, val height: Int, val fps: Int, val bitrate: Int, val audio: Boolean, val videoOnly: Boolean, val originalAudio: Boolean = false, val audioTrackName: String = "", val audioTrackId: String = "", val sabrPlayback: SabrPlaybackInfo? = null, val sabrFormat: SabrFormat? = null, val isLive: Boolean = false, val visionOsPlayback: VisionOsVodPlayback? = null, val visionOsFormat: VisionOsFormat? = null, val hlsManifestUrl: String = "")
 data class LiveChatMessage(
     val id: String,
     val authorName: String,
@@ -120,6 +120,34 @@ data class SabrPlaybackInfo(
     val heartbeatIntervalMs: Long,
     val durationMs: Long,
     val formats: List<SabrFormat>
+)
+data class VisionOsFormat(
+    val itag: Int,
+    val url: String,
+    val mimeType: String,
+    val codec: String,
+    val width: Int,
+    val height: Int,
+    val fps: Int,
+    val bitrate: Int,
+    val audioChannels: Int,
+    val audioSampleRate: Int,
+    val audio: Boolean,
+    val originalAudio: Boolean = false,
+    val audioTrackName: String = "",
+    val audioTrackId: String = "",
+    val initStart: Long = 0L,
+    val initEnd: Long = 0L,
+    val indexStart: Long = 0L,
+    val indexEnd: Long = 0L,
+)
+data class VisionOsVodPlayback(
+    val videoId: String,
+    val hlsManifestUrl: String,
+    val durationMs: Long,
+    val isLive: Boolean,
+    val formats: List<VisionOsFormat>,
+    val dashManifestUrl: String = "",
 )
 data class ChannelInfo(val name: String, val thumbnail: String, val verified: Boolean = false, val channelId: String = "")
 data class NativeChannelPage(
@@ -215,6 +243,7 @@ object YouTubeRepository {
 
     const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
     const val WEB_PLAYER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    const val VISIONOS_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
     private const val YOUTUBE_SUGGEST_EXPERIMENTS = "ytzpb5_e2,ytpo.bo.lqp.elu=1,ytpo.bo.lqp.ecsc=1,ytpo.bo.lqp.mcsc=3,ytpo.bo.lqp.mec=1,ytpo.bo.lqp.rw=0.8,ytpo.bo.lqp.fw=0.2,ytpo.bo.lqp.szp=1,ytpo.bo.lqp.mz=3,ytpo.bo.lqp.al=en_us,ytpo.bo.lqp.zrm=1,ytpo.bo.lqp.er=1,ytpo.bo.ro.erl=1,ytpo.bo.ro.mlus=3,ytpo.bo.ro.erls=3,ytpo.bo.qfo.mlus=3,ytzprp.ppp.e=1,ytzprp.ppp.st=772,ytzprp.ppp.p=5"
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
@@ -2554,6 +2583,197 @@ object YouTubeRepository {
             response.optJSONObject("heartbeatParams")?.optString("intervalMilliseconds")
                 ?.toLongOrNull()?.takeIf { it > 0L } ?: 10_000L,
             durationMs, formats)
+    }
+
+    /** Fetches VOD DASH/HLS streams using the VISIONOS Innertube client (no n-challenge or PoToken). */
+    fun visionOsVodPlayback(videoId: String): VisionOsVodPlayback {
+        val origin = "https://www.youtube.com"
+        val bootstrap = bootstrap(origin, "WEB")
+        val clientVersion = "1.02"
+        val clientObj = JSONObject()
+            .put("clientName", "VISIONOS")
+            .put("clientVersion", clientVersion)
+            .put("deviceMake", "Apple")
+            .put("deviceModel", "RealityDevice17,1")
+            .put("userAgent", VISIONOS_UA)
+            .put("osName", "visionOS")
+            .put("osVersion", "26.5")
+            .put("hl", "en")
+            .put("gl", "US")
+        val visitor = visitorData[origin].orEmpty()
+        if (visitor.isNotBlank()) clientObj.put("visitorData", visitor)
+        val bodyJson = JSONObject()
+            .put("context", JSONObject().put("client", clientObj))
+            .put("videoId", videoId)
+            .toString()
+        val accountCookies = cookies(origin)
+        val auth = if (accountCookies.isNotBlank()) authorization(origin) else null
+        fun execute(withAuth: Boolean): Pair<Int, String> {
+            val request = Request.Builder()
+                .url("$origin/youtubei/v1/player?key=${bootstrap.key}&prettyPrint=false")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", VISIONOS_UA)
+                .header("X-YouTube-Client-Name", "101")
+                .header("X-YouTube-Client-Version", clientVersion)
+                .apply {
+                    if (visitor.isNotBlank()) header("X-Goog-Visitor-Id", visitor)
+                    if (withAuth && accountCookies.isNotBlank()) {
+                        header("Cookie", accountCookies)
+                        auth?.let { header("Authorization", it) }
+                        header("Origin", origin)
+                        header("X-Origin", origin)
+                        header("X-Goog-AuthUser", "0")
+                        header("X-Youtube-Bootstrap-Logged-In", "true")
+                    }
+                }
+                .post(bodyJson.toRequestBody("application/json".toMediaType()))
+                .build()
+            return client.newCall(request).execute().use { res -> res.code to res.body?.string().orEmpty() }
+        }
+        var (code, raw) = execute(withAuth = true)
+        if (code == 400 && accountCookies.isNotBlank()) {
+            AppLog.event("VISIONOS player HTTP 400 with auth, retrying unauthenticated video=$videoId")
+            val retry = execute(withAuth = false)
+            code = retry.first
+            raw = retry.second
+        }
+        if (code !in 200..299) error("VISIONOS player HTTP $code: ${raw.take(200)}")
+        val response = JSONObject(raw)
+        val status = response.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+        val reason = response.optJSONObject("playabilityStatus")?.optString("reason").orEmpty()
+        AppLog.event("VISIONOS player video=$videoId status=$status reason=${reason.take(120)}")
+        if (status != "OK") error(reason.ifBlank { "VISIONOS player returned $status" })
+        cachePlayerLiveDetails(videoId, response)
+        val cpn = java.util.UUID.randomUUID().toString().replace("-", "").take(16)
+        cachePlaybackTracking(videoId, response.optJSONObject("playbackTracking"), cpn, false)
+        val details = response.optJSONObject("videoDetails")
+        val isLive = details?.optBoolean("isLive") == true && details?.optBoolean("isPostLiveDvr") != true
+        val streaming = response.optJSONObject("streamingData") ?: error("VISIONOS returned no streamingData")
+        val hlsManifestUrl = streaming.optString("hlsManifestUrl")
+        var dashManifestUrl = streaming.optString("dashManifestUrl")
+        if (isLive && dashManifestUrl.isBlank()) {
+            dashManifestUrl = fetchLiveDashManifest(videoId, origin, bootstrap.key, visitor)
+        }
+        val adaptive = streaming.optJSONArray("adaptiveFormats")
+        val formats = mutableListOf<VisionOsFormat>()
+        var durationMs = (details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L) * 1_000L
+        if (adaptive != null) {
+            for (i in 0 until adaptive.length()) {
+                val obj = adaptive.optJSONObject(i) ?: continue
+                val directUrl = obj.optString("url").takeIf(String::isNotBlank) ?: continue
+                val rawMime = obj.optString("mimeType")
+                val mime = rawMime.substringBefore(';').trim()
+                val codec = Regex("""codecs="([^"]+)"""").find(rawMime)?.groupValues?.get(1).orEmpty()
+                if (durationMs <= 0L) durationMs = obj.optString("approxDurationMs").toLongOrNull() ?: 0L
+                val isAudio = mime.startsWith("audio/")
+                val audioTrack = obj.optJSONObject("audioTrack")
+                val initRange = obj.optJSONObject("initRange")
+                val indexRange = obj.optJSONObject("indexRange")
+                formats += VisionOsFormat(
+                    itag = obj.optInt("itag"),
+                    url = directUrl,
+                    mimeType = mime,
+                    codec = codec,
+                    width = obj.optInt("width"),
+                    height = obj.optInt("height"),
+                    fps = obj.optInt("fps"),
+                    bitrate = obj.optInt("bitrate"),
+                    audioChannels = obj.optInt("audioChannels", 2),
+                    audioSampleRate = obj.optString("audioSampleRate").toIntOrNull() ?: 44100,
+                    audio = isAudio,
+                    originalAudio = audioTrack?.optBoolean("audioIsDefault") == true ||
+                        audioTrack?.optString("displayName")?.contains("original", true) == true,
+                    audioTrackName = audioTrack?.optString("displayName").orEmpty(),
+                    audioTrackId = audioTrack?.optString("id").orEmpty(),
+                    initStart = initRange?.optString("start")?.toLongOrNull() ?: 0L,
+                    initEnd = initRange?.optString("end")?.toLongOrNull() ?: 0L,
+                    indexStart = indexRange?.optString("start")?.toLongOrNull() ?: 0L,
+                    indexEnd = indexRange?.optString("end")?.toLongOrNull() ?: 0L,
+                )
+            }
+        }
+        AppLog.event("VISIONOS VOD ready video=$videoId isLive=$isLive hls=${hlsManifestUrl.isNotBlank()} dash=${dashManifestUrl.isNotBlank()} dashFormats=${formats.size}")
+        return VisionOsVodPlayback(videoId, hlsManifestUrl, durationMs, isLive, formats, dashManifestUrl)
+    }
+
+    private fun fetchLiveDashManifest(videoId: String, origin: String, apiKey: String, visitor: String): String {
+        val vrVersion = "1.65.10"
+        val vrUa = "com.google.android.apps.youtube.vr.oculus/$vrVersion (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+        val vrClient = JSONObject()
+            .put("clientName", "ANDROID_VR")
+            .put("clientVersion", vrVersion)
+            .put("deviceMake", "Oculus")
+            .put("deviceModel", "Quest 3")
+            .put("userAgent", vrUa)
+            .put("osName", "Android")
+            .put("osVersion", "12L")
+            .put("androidSdkVersion", 32)
+            .put("hl", "en")
+            .put("gl", "US")
+        if (visitor.isNotBlank()) vrClient.put("visitorData", visitor)
+        val bodyJson = JSONObject()
+            .put("context", JSONObject().put("client", vrClient))
+            .put("videoId", videoId)
+            .toString()
+        val req = Request.Builder()
+            .url("$origin/youtubei/v1/player?key=$apiKey&prettyPrint=false")
+            .header("Content-Type", "application/json")
+            .header("User-Agent", vrUa)
+            .header("X-YouTube-Client-Name", "28")
+            .header("X-YouTube-Client-Version", vrVersion)
+            .apply { if (visitor.isNotBlank()) header("X-Goog-Visitor-Id", visitor) }
+            .post(bodyJson.toRequestBody("application/json".toMediaType()))
+            .build()
+        return runCatching {
+            client.newCall(req).execute().use { res ->
+                val raw = res.body?.string().orEmpty()
+                if (!res.isSuccessful) {
+                    AppLog.event("ANDROID_VR live dash HTTP ${res.code} video=$videoId")
+                    return@use ""
+                }
+                val json = JSONObject(raw)
+                val status = json.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+                val dash = json.optJSONObject("streamingData")?.optString("dashManifestUrl").orEmpty()
+                AppLog.event("ANDROID_VR live dash video=$videoId status=$status dash=${dash.isNotBlank()}")
+                dash
+            }
+        }.onFailure { AppLog.failure("ANDROID_VR live dash video=$videoId", it) }.getOrDefault("")
+    }
+
+    fun buildDashMpd(durationMs: Long, video: VisionOsFormat?, audio: VisionOsFormat?): String {
+        fun esc(s: String) = s
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+        val durSec = "%.3f".format(java.util.Locale.US, (durationMs.coerceAtLeast(1_000L)) / 1000.0)
+        return buildString {
+            append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+            append("<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"PT${durSec}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-on-demand:2011\">\n")
+            append("  <Period>\n")
+            if (video != null) {
+                append("    <AdaptationSet mimeType=\"${esc(video.mimeType)}\" subsegmentAlignment=\"true\">\n")
+                append("      <Representation id=\"${video.itag}\" codecs=\"${esc(video.codec)}\" bandwidth=\"${video.bitrate.coerceAtLeast(1)}\" width=\"${video.width}\" height=\"${video.height}\" frameRate=\"${video.fps.coerceAtLeast(1)}\">\n")
+                append("        <BaseURL>${esc(video.url)}</BaseURL>\n")
+                append("        <SegmentBase indexRange=\"${video.indexStart}-${video.indexEnd}\">\n")
+                append("          <Initialization range=\"${video.initStart}-${video.initEnd}\"/>\n")
+                append("        </SegmentBase>\n")
+                append("      </Representation>\n")
+                append("    </AdaptationSet>\n")
+            }
+            if (audio != null) {
+                append("    <AdaptationSet mimeType=\"${esc(audio.mimeType)}\" subsegmentAlignment=\"true\">\n")
+                append("      <Representation id=\"${audio.itag}\" codecs=\"${esc(audio.codec)}\" bandwidth=\"${audio.bitrate.coerceAtLeast(1)}\" audioSamplingRate=\"${audio.audioSampleRate}\">\n")
+                append("        <BaseURL>${esc(audio.url)}</BaseURL>\n")
+                append("        <SegmentBase indexRange=\"${audio.indexStart}-${audio.indexEnd}\">\n")
+                append("          <Initialization range=\"${audio.initStart}-${audio.initEnd}\"/>\n")
+                append("        </SegmentBase>\n")
+                append("      </Representation>\n")
+                append("    </AdaptationSet>\n")
+            }
+            append("  </Period>\n")
+            append("</MPD>")
+        }
     }
 
     /** Keeps a WEB live/premiere SABR broadcast session alive, matching the browser heartbeat flow. */

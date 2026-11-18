@@ -25,7 +25,10 @@ import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.audio.AudioAttributes
+import com.google.android.exoplayer2.source.MediaSource
 import com.google.android.exoplayer2.source.ProgressiveMediaSource
+import com.google.android.exoplayer2.source.dash.DashMediaSource
+import com.google.android.exoplayer2.source.hls.HlsMediaSource
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +51,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     private var extractionRetryCount = 0
     private var playGeneration = 0
     private var preferredAudioCodec = AudioCodecChoice.MP4A
+    private var currentTransport = VodTransport.SABR
     private var playbackQueue = emptyList<FeedItem>()
     private var playbackQueueIndex = -1
     private var autoplayTrack: FeedItem? = null
@@ -562,6 +566,52 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     private suspend fun extractAudioStreams(track: FeedItem): List<PlayableStream> {
+        val vodTransport = PlaybackPreferences.effectiveMusicTransport()
+        val liveTransport = PlaybackPreferences.effectiveLiveTransport()
+        currentTransport = vodTransport
+        var useSabr = vodTransport == VodTransport.SABR
+        if (!useSabr) {
+            val visionResult = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.visionOsVodPlayback(track.id) } }
+            val extracted = visionResult.onFailure { AppLog.failure("music VISIONOS VOD video=${track.id}", it) }.getOrNull()
+                ?: return emptyList()
+            val activeTransport = if (extracted.isLive) liveTransport else vodTransport
+            currentTransport = activeTransport
+            if (activeTransport == VodTransport.SABR) {
+                useSabr = true
+            } else if (activeTransport == VodTransport.HLS) {
+                if (extracted.hlsManifestUrl.isBlank()) {
+                    AppLog.event("music VISIONOS HLS missing manifest video=${track.id}")
+                    return emptyList()
+                }
+                val hlsAudio = dedupeAudioStreams(extracted.formats.filter { it.audio }.map { format ->
+                    PlayableStream(extracted.hlsManifestUrl, format.codec, 0, 0, format.bitrate, true, false,
+                        format.originalAudio, format.audioTrackName, format.audioTrackId,
+                        isLive = extracted.isLive, visionOsPlayback = extracted, visionOsFormat = format, hlsManifestUrl = extracted.hlsManifestUrl)
+                }).ifEmpty {
+                    listOf(PlayableStream(extracted.hlsManifestUrl, "HLS", 0, 0, 0, true, false,
+                        true, "Default audio", isLive = extracted.isLive, visionOsPlayback = extracted, hlsManifestUrl = extracted.hlsManifestUrl))
+                }
+                AppLog.event("music VISIONOS HLS video=${track.id} isLive=${extracted.isLive} audio=${hlsAudio.size}")
+                return hlsAudio
+            } else if (activeTransport == VodTransport.DASH) {
+                if (extracted.isLive && extracted.dashManifestUrl.isNotBlank()) {
+                    AppLog.event("music VISIONOS live DASH manifest video=${track.id}")
+                    return listOf(PlayableStream(extracted.dashManifestUrl, "DASH", 0, 0, 0, true, false,
+                        true, "Default audio", isLive = true, visionOsPlayback = extracted))
+                }
+                val dashAudio = dedupeAudioStreams(extracted.formats.filter { it.audio && it.indexEnd > 0L && it.initEnd >= 0L }.map { format ->
+                    PlayableStream(format.url, format.codec, 0, 0, format.bitrate, true, false,
+                        format.originalAudio, format.audioTrackName, format.audioTrackId,
+                        isLive = extracted.isLive, visionOsPlayback = extracted, visionOsFormat = format)
+                })
+                if (dashAudio.isEmpty()) {
+                    AppLog.event("music VISIONOS DASH no audio formats video=${track.id}")
+                    return emptyList()
+                }
+                AppLog.event("music VISIONOS DASH video=${track.id} audio=${dashAudio.size}")
+                return dashAudio
+            }
+        }
         var audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.sabrPlaybackInfo(track.id, music = true) } }
                 .onFailure { AppLog.failure("music SABR primary video=${track.id}", it) }
                 .getOrNull()?.let { playback ->
@@ -575,7 +625,21 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             audioStreams = runCatching { withContext(Dispatchers.IO) { YouTubeRepository.playerStreams(track.id, music = true) } }
                 .getOrNull()?.filter { it.audio }.orEmpty()
         }
-        return audioStreams
+        return dedupeAudioStreams(audioStreams)
+    }
+
+    private fun dedupeAudioStreams(streams: List<PlayableStream>): List<PlayableStream> {
+        val best = LinkedHashMap<String, PlayableStream>()
+        for (stream in streams) {
+            val family = stream.codec.substringBefore('.').lowercase().ifBlank { "audio" }
+            val track = stream.audioTrackName.trim().lowercase()
+                .ifBlank { stream.audioTrackId.substringBefore('.').lowercase() }
+                .ifBlank { if (stream.originalAudio) "original" else "default" }
+            val key = "$track|$family"
+            val prev = best[key]
+            if (prev == null || stream.bitrate > prev.bitrate) best[key] = stream
+        }
+        return best.values.toList()
     }
 
     private fun setAudioCandidates(audioStreams: List<PlayableStream>, codec: AudioCodecChoice) {
@@ -588,7 +652,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         if (currentTrack?.id != track.id || generation != playGeneration) return
         val next = audioCandidateIndex + 1
         if (next >= audioCandidates.size) {
-            if (!webFallbackAttempted) {
+            if (!webFallbackAttempted && currentTransport == VodTransport.SABR) {
                 webFallbackAttempted = true
                 val webStreams = withContext(Dispatchers.IO) {
                     runCatching { YouTubeRepository.playerStreams(track.id, music = true) }.getOrDefault(emptyList())
@@ -621,11 +685,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val stream = audioCandidates[next]
         selectedAudioTrack.value = stream
         AppLog.event("music trying stream candidate=${next + 1}/${audioCandidates.size} codec=${stream.codec} bitrate=${stream.bitrate} video=${track.id}")
-        val source = if (stream.sabrPlayback != null && stream.sabrFormat != null) {
-            SabrMediaFactory.createAudio(stream.sabrPlayback, stream.sabrFormat,
-                sabrDataSourceFactory(stream.sabrPlayback.serverAbrStreamingUrl))
-        } else ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
-            .createMediaSource(MediaItem.fromUri(stream.url))
+        val source = buildMusicMediaSource(track.id, stream)
         activeSourceGeneration = generation
         player.setMediaSource(source, resumePositionMs.coerceAtLeast(0L))
         player.prepare()
@@ -633,11 +693,49 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         session.isActive = true
     }
 
+    private fun buildMusicMediaSource(trackId: String, stream: PlayableStream): MediaSource {
+        if (stream.hlsManifestUrl.isNotBlank()) {
+            val lang = stream.audioTrackId.substringBefore('.').takeIf(String::isNotBlank)
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
+                setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
+            }.build()
+            return HlsMediaSource.Factory(visionOsDataSourceFactory())
+                .createMediaSource(MediaItem.fromUri(stream.hlsManifestUrl))
+                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
+        }
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
+            .setPreferredAudioLanguages()
+            .build()
+        return when {
+            stream.visionOsPlayback != null && stream.visionOsFormat != null -> {
+                val mpd = YouTubeRepository.buildDashMpd(stream.visionOsPlayback.durationMs, null, stream.visionOsFormat)
+                DashMediaSource.Factory(dashMpdDataSourceFactory(mpd.toByteArray(Charsets.UTF_8)))
+                    .createMediaSource(MediaItem.fromUri("dash://local/$trackId"))
+                    .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
+            }
+            stream.visionOsPlayback != null && stream.visionOsPlayback.dashManifestUrl.isNotBlank() -> {
+                LiveTimelineMediaSource(
+                    liveDashMediaSourceFactory()
+                        .createMediaSource(liveDashMediaItem(stream.visionOsPlayback.dashManifestUrl))
+                )
+            }
+            stream.sabrPlayback != null && stream.sabrFormat != null -> {
+                SabrMediaFactory.createAudio(stream.sabrPlayback, stream.sabrFormat,
+                    sabrDataSourceFactory(stream.sabrPlayback.serverAbrStreamingUrl))
+            }
+            else -> ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
+                .createMediaSource(MediaItem.fromUri(stream.url))
+        }
+    }
+
     private fun audioStreamKey(stream: PlayableStream): String = when {
-        stream.audioTrackId.isNotBlank() -> "id:${stream.audioTrackId}|${stream.codec.lowercase()}"
+        stream.audioTrackId.isNotBlank() -> "id:${stream.audioTrackId}|${stream.codec.substringBefore('.').lowercase()}"
+        stream.visionOsFormat != null -> "vision:${stream.visionOsFormat.itag}"
         stream.sabrFormat != null -> "itag:${stream.sabrFormat.itag}"
-        stream.audioTrackName.isNotBlank() -> "name:${stream.audioTrackName.lowercase()}|${stream.codec.lowercase()}"
-        else -> "stream:${stream.url}|${stream.codec.lowercase()}|${stream.bitrate}"
+        stream.audioTrackName.isNotBlank() -> "name:${stream.audioTrackName.lowercase()}|${stream.codec.substringBefore('.').lowercase()}"
+        else -> "stream:${stream.url}|${stream.codec.substringBefore('.').lowercase()}|${stream.bitrate}"
     }
 
     private fun switchAudioTrack(stream: PlayableStream) {
@@ -645,11 +743,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         val generation = playGeneration
         val resumePosition = player.currentPosition.coerceAtLeast(0L)
         val resumePlayback = player.playWhenReady
-        val source = if (stream.sabrPlayback != null && stream.sabrFormat != null) {
-            SabrMediaFactory.createAudio(stream.sabrPlayback, stream.sabrFormat,
-                sabrDataSourceFactory(stream.sabrPlayback.serverAbrStreamingUrl))
-        } else ProgressiveMediaSource.Factory(videoDataSourceFactory(stream.url))
-            .createMediaSource(MediaItem.fromUri(stream.url))
+        val source = buildMusicMediaSource(track.id, stream)
         audioCandidateIndex = audioCandidates.indexOfFirst { audioStreamKey(it) == audioStreamKey(stream) }
         selectedAudioTrack.value = stream
         player.setMediaSource(source, resumePosition)

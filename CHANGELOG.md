@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [8.0] - 2026-11-18
+
+### Fixed
+- Send final `watchtime` (`final=1`, `paused = true`) and release active media buffers when switching `videoId` inside `VideoScreen` (not only on full player disposal), so switching videos no longer drops uncommitted watch progress from YouTube History.
+
 ## [7.12] - 2026-11-17
 
 ### Added

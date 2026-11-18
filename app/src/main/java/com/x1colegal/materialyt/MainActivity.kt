@@ -5744,15 +5744,6 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
             }
             activity.clearVisiblePlayerView(player)
             activity.unregisterCurrentPlayer(player)
-            val finalPos = player.currentPosition.coerceAtLeast(0L)
-            if (hasStartedPlayback && finalPos > 1_000L) {
-                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                    runCatching { YouTubeRepository.reportPlayback(videoId, finalPos, finalPos, paused = true) }
-                }
-            }
-            SabrMediaFactory.releaseVideo(videoId)
-            ClassicDashMediaFactory.releaseVideo(videoId)
-            HlsHeroMediaFactory.releaseVideo(videoId)
             player.release()
         }
     }
@@ -5871,6 +5862,15 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         }
         player.addListener(listener)
         onDispose {
+            val finalPos = player.currentPosition.coerceAtLeast(0L)
+            if (hasStartedPlayback && finalPos > 1_000L) {
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    runCatching { YouTubeRepository.reportPlayback(videoId, finalPos, finalPos, paused = true) }
+                }
+            }
+            SabrMediaFactory.releaseVideo(videoId)
+            ClassicDashMediaFactory.releaseVideo(videoId)
+            HlsHeroMediaFactory.releaseVideo(videoId)
             PlaybackLoadStatus.setBuffering(videoId, false)
             player.removeListener(listener)
         }

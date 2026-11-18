@@ -88,7 +88,7 @@ Shorts relies on frequently changing internal Reel endpoints. Temporary feed or 
 ## Playback
 
 - Native `WEB` + PoToken + `SABR/UMP` playback (recommended) alongside selectable `DASH` and `HLS` transports for regular videos, Live streams, YouTube Music, and Shorts
-- `DASH` and `HLS` VOD playback use the `VISIONOS` client (authenticated with session cookies when signed in), Live `HLS` uses `VISIONOS`, and Live `DASH` uses `ANDROID_VR` with no silent fallback to `SABR`
+- `DASH` and `HLS` VOD playback use the `VISIONOS` client (cannot play Made for Kids videos), Live `HLS` uses `VISIONOS`, and Live `DASH` uses `ANDROID_VR` — all delivered through disk-backed progressive media sources (`classicdash` and `hlshero`) matching `sabrmodern`, with no silent fallback to `SABR`
 - Optional **Separate Live transport** and **Separate YT Music transport** toggles in Settings with dynamic section labels
 - Official WEB playback-attestation submission with serialized in-flight protection renewal
 - In-session PoToken renewal while stream protection is pending, preserving SABR state and already buffered media
@@ -104,7 +104,7 @@ Shorts relies on frequently changing internal Reel endpoints. Temporary feed or 
 - Android 8.0+ picture-in-picture with play/pause actions
 - Automatic PiP when leaving an active regular video
 - Display-aspect-aware PiP windows
-- Disk-backed SABR reassembly and large forward buffering
+- Disk-backed stream reassembly (`sabrmodern`, `classicdash`, `hlshero`) and large forward buffering
 
 `WEB_REMIX` is used only for YouTube Music browsing, queues, lyrics, and music-specific account data. It is not a playback backend or fallback. MWEB is limited to non-playback surfaces that YouTube does not expose through desktop WEB, such as Saved Shorts discovery.
 
@@ -169,6 +169,8 @@ app/src/main/java/com/x1colegal/materialyt/
 ├── PlayerFactory.kt          # ExoPlayer and buffering configuration
 ├── SabrMediaFactory.kt       # SABR media sources for ExoPlayer
 ├── YouTubeRepository.kt      # Feeds, account data, metadata, and tracking
+├── classicdash/              # Progressive DASH VOD & Live sessions and buffering
+├── hlshero/                  # Progressive HLS VOD & Live sessions and buffering
 └── sabrmodern/               # UMP parsing, SABR sessions, and buffering
 
 sabr/                          # SABR protocol module

@@ -129,15 +129,11 @@ import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.Timeline
-import com.google.android.exoplayer2.source.ForwardingTimeline
 import com.google.android.exoplayer2.source.MediaSource
 import com.google.android.exoplayer2.source.ProgressiveMediaSource
 import com.google.android.exoplayer2.source.MergingMediaSource
-import com.google.android.exoplayer2.source.WrappingMediaSource
-import com.google.android.exoplayer2.source.dash.DashMediaSource
-import com.google.android.exoplayer2.source.dash.manifest.DashManifest
-import com.google.android.exoplayer2.source.dash.manifest.DashManifestParser
-import com.google.android.exoplayer2.source.hls.HlsMediaSource
+import com.x1colegal.materialyt.classicdash.ClassicDashMediaFactory
+import com.x1colegal.materialyt.hlshero.HlsHeroMediaFactory
 import com.google.android.exoplayer2.util.Util
 import com.google.android.exoplayer2.upstream.ByteArrayDataSource
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
@@ -211,129 +207,6 @@ internal fun videoDataSourceFactory(streamUrl: String): DataSource.Factory = Chu
 internal fun sabrDataSourceFactory(streamUrl: String): DataSource.Factory =
     OkHttpDataSource.Factory(videoHttpClient)
         .setDefaultRequestProperties(YouTubeRepository.mediaHeaders(streamUrl))
-
-internal fun visionOsDataSourceFactory(): DataSource.Factory =
-    OkHttpDataSource.Factory(videoHttpClient)
-        .setUserAgent(YouTubeRepository.VISIONOS_UA)
-
-internal fun dashMpdDataSourceFactory(mpdBytes: ByteArray): DataSource.Factory {
-    val upstream = visionOsDataSourceFactory()
-    return DataSource.Factory {
-        val http = upstream.createDataSource()
-        val mem = ByteArrayDataSource(mpdBytes)
-        var current: DataSource = http
-        object : DataSource {
-            override fun addTransferListener(transferListener: com.google.android.exoplayer2.upstream.TransferListener) {
-                http.addTransferListener(transferListener)
-                mem.addTransferListener(transferListener)
-            }
-            override fun open(dataSpec: DataSpec): Long {
-                current = if (dataSpec.uri.scheme == "dash") mem else http
-                return current.open(dataSpec)
-            }
-            override fun read(buffer: ByteArray, offset: Int, length: Int): Int = current.read(buffer, offset, length)
-            override fun getUri(): android.net.Uri? = current.uri
-            override fun close() = current.close()
-        }
-    }
-}
-
-internal class YouTubeLiveDashManifestParser : DashManifestParser() {
-    private var baseAvailMs = -1L
-    private var basePto: String? = null
-
-    override fun parse(uri: android.net.Uri, inputStream: java.io.InputStream): DashManifest {
-        val xml = inputStream.bufferedReader().readText()
-        val rawManifest = super.parse(uri, xml.byteInputStream())
-        if (!rawManifest.dynamic || rawManifest.periodCount <= 0) return rawManifest
-        val period = rawManifest.getPeriod(0)
-        val index = period.adaptationSets.asSequence()
-            .flatMap { it.representations.asSequence() }
-            .mapNotNull { it.index }
-            .firstOrNull() ?: return rawManifest
-        val firstSeg = index.getFirstSegmentNum()
-        val segCount = index.getSegmentCount(C.TIME_UNSET)
-        if (segCount <= 0L) return rawManifest
-        val segDurMs = Util.usToMs(index.getDurationUs(firstSeg, C.TIME_UNSET)).coerceAtLeast(1_000L)
-        val liveEdgeMs = segCount * segDurMs
-        val currentPto = Regex("""presentationTimeOffset="(\d+)"""").find(xml)?.groupValues?.get(1)
-        if (baseAvailMs < 0L) {
-            baseAvailMs = System.currentTimeMillis() - liveEdgeMs
-            basePto = currentPto
-        }
-        val utcFmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
-            timeZone = java.util.TimeZone.getTimeZone("UTC")
-        }
-        val alignedUtc = utcFmt.format(java.util.Date(baseAvailMs))
-        var patchedXml = xml
-            .replace(Regex("""availabilityStartTime="[^"]*""""), """availabilityStartTime="$alignedUtc"""")
-            .replace(Regex("""(<Period\b[^>]*?\s)start="[^"]*""""), """$1start="PT0S"""")
-        val fixedPto = basePto
-        if (fixedPto != null && currentPto != null) {
-            patchedXml = patchedXml
-                .replace(Regex("""presentationTimeOffset="[^"]*""""), """presentationTimeOffset="$fixedPto"""")
-                .replace(Regex("""<SegmentTimeline>\s*<S(?![^>]*\bt=)\b"""), """<SegmentTimeline><S t="$currentPto"""")
-        }
-        val manifest = super.parse(uri, patchedXml.byteInputStream())
-        AppLog.event("DASH MPD patched firstSeg=$firstSeg segCount=$segCount pto=$currentPto basePto=$fixedPto availUtc=$alignedUtc")
-        return DashManifest(
-            manifest.availabilityStartTimeMs,
-            manifest.durationMs,
-            manifest.minBufferTimeMs,
-            manifest.dynamic,
-            manifest.minUpdatePeriodMs,
-            manifest.timeShiftBufferDepthMs,
-            12_000L,
-            manifest.publishTimeMs,
-            manifest.programInformation,
-            manifest.utcTiming,
-            manifest.serviceDescription,
-            manifest.location,
-            List(manifest.periodCount) { manifest.getPeriod(it) },
-        )
-    }
-}
-
-internal fun liveDashMediaItem(url: String): MediaItem =
-    MediaItem.Builder()
-        .setUri(url)
-        .setLiveConfiguration(
-            MediaItem.LiveConfiguration.Builder()
-                .setTargetOffsetMs(12_000L)
-                .setMinOffsetMs(6_000L)
-                .setMaxOffsetMs(30_000L)
-                .build()
-        )
-        .build()
-
-internal fun liveDashMediaSourceFactory(): DashMediaSource.Factory =
-    DashMediaSource.Factory(visionOsDataSourceFactory())
-        .setFallbackTargetLiveOffsetMs(12_000L)
-        .setManifestParser(YouTubeLiveDashManifestParser())
-
-internal class LiveTimelineMediaSource(child: MediaSource) : WrappingMediaSource(child) {
-    override fun onChildSourceInfoRefreshed(newTimeline: Timeline) {
-        super.onChildSourceInfoRefreshed(object : ForwardingTimeline(newTimeline) {
-            override fun getWindow(windowIndex: Int, window: Window, defaultPositionProjectionUs: Long): Window {
-                super.getWindow(windowIndex, window, defaultPositionProjectionUs)
-                if (window.isDynamic || window.durationUs < 0L) {
-                    window.durationUs = C.TIME_UNSET
-                }
-                return window
-            }
-
-            override fun getPeriod(periodIndex: Int, period: Period, setIds: Boolean): Period {
-                super.getPeriod(periodIndex, period, setIds)
-                val win = Window()
-                val dynamic = runCatching { super.getWindow(period.windowIndex, win, 0L).isDynamic }.getOrDefault(false)
-                if (dynamic || period.durationUs < 0L) {
-                    period.durationUs = C.TIME_UNSET
-                }
-                return period
-            }
-        })
-    }
-}
 
 private fun selectVideoStream(
     streams: List<PlayerChoice>,
@@ -3966,7 +3839,7 @@ internal suspend fun enrichItemsProgressively(
 }
 
 internal suspend fun originalMetadataItems(items: List<FeedItem>): List<FeedItem> = coroutineScope {
-    val requests = Semaphore(8)
+    val requests = Semaphore(2)
     items.map { item ->
         async(Dispatchers.IO) {
             if (item.channel) return@async item
@@ -3979,6 +3852,7 @@ internal suspend fun originalMetadataItems(items: List<FeedItem>): List<FeedItem
             }
             if (item.id.length != 11) return@async item
             requests.withPermit {
+                kotlinx.coroutines.delay(120L)
                 val metadata = YouTubeRepository.canonicalVideoMetadata(item.id) ?: return@withPermit item
                 val channel = if (item.channelThumbnail.isBlank() || item.channelUrl.isBlank() || !item.channelVerified) {
                     runCatching { YouTubeRepository.channelInfo(item.id) }.getOrNull()
@@ -5199,25 +5073,12 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
         val activeTransport = if (stream.isLive) liveTransport else vodTransport
         val source = if (visionOs != null && activeTransport == VodTransport.HLS && visionOs.hlsManifestUrl.isNotBlank()) {
             val lang = audio?.audioTrackId?.substringBefore('.')?.takeIf(String::isNotBlank)
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
-                if (stream.height > 0) setMaxVideoSize(Int.MAX_VALUE, stream.height) else clearVideoSizeConstraints()
-                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
-            }.build()
-            HlsMediaSource.Factory(visionOsDataSourceFactory()).createMediaSource(MediaItem.fromUri(visionOs.hlsManifestUrl))
-                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
-        } else if (visionOs != null && activeTransport == VodTransport.DASH && stream.visionOsFormat != null) {
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
-            val mpd = YouTubeRepository.buildDashMpd(visionOs.durationMs, stream.visionOsFormat, audio?.visionOsFormat)
-            DashMediaSource.Factory(dashMpdDataSourceFactory(mpd.toByteArray(Charsets.UTF_8)))
-                .createMediaSource(MediaItem.fromUri("dash://local/${item.id}"))
-                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
-        } else if (visionOs != null && activeTransport == VodTransport.DASH && visionOs.dashManifestUrl.isNotBlank()) {
+            HlsHeroMediaFactory.create(context, item.id, visionOs.hlsManifestUrl, stream.isLive, stream.height, lang, visionOs.durationMs)
+        } else if (visionOs != null && activeTransport == VodTransport.DASH && (stream.visionOsFormat != null || visionOs.dashManifestUrl.isNotBlank())) {
             val lang = audio?.audioTrackId?.substringBefore('.')?.takeIf(String::isNotBlank)
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
-                if (stream.height > 0) setMaxVideoSize(Int.MAX_VALUE, stream.height) else clearVideoSizeConstraints()
-                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
-            }.build()
-            LiveTimelineMediaSource(liveDashMediaSourceFactory().createMediaSource(liveDashMediaItem(visionOs.dashManifestUrl)))
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
+            ClassicDashMediaFactory.create(context, visionOs, stream.visionOsFormat, audio?.visionOsFormat, stream.height, lang)
         } else if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
             SabrMediaFactory.create(sabr, stream.sabrFormat, audio!!.sabrFormat!!,
@@ -5407,6 +5268,8 @@ private fun ShortPlayer(activity: MainActivity, item: FeedItem, active: Boolean,
             player.pause()
             player.stop()
             SabrMediaFactory.releaseVideo(item.id)
+            ClassicDashMediaFactory.releaseVideo(item.id)
+            HlsHeroMediaFactory.releaseVideo(item.id)
             (context as? MainActivity)?.unregisterCurrentPlayer(player)
             player.release()
         }
@@ -5819,25 +5682,15 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
         val activeTransport = if (stream.isLive) liveTransport else vodTransport
         val source = if (visionOs != null && activeTransport == VodTransport.HLS && visionOs.hlsManifestUrl.isNotBlank()) {
             val lang = selectedAudio?.audioTrackId?.substringBefore('.')?.takeIf(String::isNotBlank)
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
-                if (stream.height > 0) setMaxVideoSize(Int.MAX_VALUE, stream.height) else clearVideoSizeConstraints()
-                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
-            }.build()
-            HlsMediaSource.Factory(visionOsDataSourceFactory()).createMediaSource(MediaItem.fromUri(visionOs.hlsManifestUrl))
-                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
-        } else if (visionOs != null && activeTransport == VodTransport.DASH && stream.visionOsFormat != null) {
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
-            val mpd = YouTubeRepository.buildDashMpd(visionOs.durationMs, stream.visionOsFormat, audio?.visionOsFormat)
-            DashMediaSource.Factory(dashMpdDataSourceFactory(mpd.toByteArray(Charsets.UTF_8)))
-                .createMediaSource(MediaItem.fromUri("dash://local/$videoId"))
-                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
-        } else if (visionOs != null && activeTransport == VodTransport.DASH && visionOs.dashManifestUrl.isNotBlank()) {
+            HlsHeroMediaFactory.create(context, videoId, visionOs.hlsManifestUrl, stream.isLive, stream.height, lang, visionOs.durationMs, initialStartMs = position)
+        } else if (visionOs != null && activeTransport == VodTransport.DASH && (stream.visionOsFormat != null || visionOs.dashManifestUrl.isNotBlank())) {
             val lang = selectedAudio?.audioTrackId?.substringBefore('.')?.takeIf(String::isNotBlank)
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
-                if (stream.height > 0) setMaxVideoSize(Int.MAX_VALUE, stream.height) else clearVideoSizeConstraints()
-                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
-            }.build()
-            LiveTimelineMediaSource(liveDashMediaSourceFactory().createMediaSource(liveDashMediaItem(visionOs.dashManifestUrl)))
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
+            ClassicDashMediaFactory.create(
+                context, visionOs, stream.visionOsFormat, audio?.visionOsFormat,
+                stream.height, lang, initialStartMs = position,
+            )
         } else if (sabr != null && stream.sabrFormat != null && audio?.sabrFormat != null) {
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearVideoSizeConstraints().build()
             SabrMediaFactory.create(sabr, stream.sabrFormat, audio.sabrFormat,
@@ -5898,6 +5751,8 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 }
             }
             SabrMediaFactory.releaseVideo(videoId)
+            ClassicDashMediaFactory.releaseVideo(videoId)
+            HlsHeroMediaFactory.releaseVideo(videoId)
             player.release()
         }
     }
@@ -5918,6 +5773,9 @@ private fun VideoScreen(activity: MainActivity, url: String, codec: CodecChoice,
                 val seekPos = newPosition.positionMs.coerceAtLeast(0L)
                 kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                     runCatching { YouTubeRepository.reportPlayback(videoId, seekPos, seekPos, paused = !player.isPlaying) }
+                }
+                if (selectedStream?.visionOsFormat != null) {
+                    ClassicDashMediaFactory.hintSeek(videoId, newPosition.positionMs)
                 }
                 val sabr = sabrPlayback ?: return
                 val video = selectedStream?.sabrFormat ?: return
@@ -7066,7 +6924,7 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
             }
             ChoiceSection(mainTransportTitle, VodTransport.entries, vodTransport, { it.label }, onVodTransport)
         }
-        item { Text("SABR uses the WEB player session and is recommended. DASH and HLS may return LOGIN_REQUIRED in some situations.", style = MaterialTheme.typography.bodySmall) }
+        item { Text("SABR uses the WEB player session and is recommended. HLS uses VISIONOS (cannot play Made for Kids videos); DASH uses VISIONOS for VOD and ANDROID_VR for live streams, and both may return LOGIN_REQUIRED in some situations.", style = MaterialTheme.typography.bodySmall) }
         item {
             val prefs = activity.getSharedPreferences("settings", 0)
             val separateLive = PlaybackPreferences.separateLiveTransport

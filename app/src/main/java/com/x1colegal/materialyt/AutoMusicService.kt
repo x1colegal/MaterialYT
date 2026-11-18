@@ -27,9 +27,9 @@ import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.audio.AudioAttributes
 import com.google.android.exoplayer2.source.MediaSource
 import com.google.android.exoplayer2.source.ProgressiveMediaSource
-import com.google.android.exoplayer2.source.dash.DashMediaSource
-import com.google.android.exoplayer2.source.hls.HlsMediaSource
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
+import com.x1colegal.materialyt.classicdash.ClassicDashMediaFactory
+import com.x1colegal.materialyt.hlshero.HlsHeroMediaFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -694,32 +694,19 @@ class AutoMusicService : MediaBrowserServiceCompat() {
     }
 
     private fun buildMusicMediaSource(trackId: String, stream: PlayableStream): MediaSource {
-        if (stream.hlsManifestUrl.isNotBlank()) {
-            val lang = stream.audioTrackId.substringBefore('.').takeIf(String::isNotBlank)
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
-                setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
-                if (lang != null) setPreferredAudioLanguage(lang) else setPreferredAudioLanguages()
-            }.build()
-            return HlsMediaSource.Factory(visionOsDataSourceFactory())
-                .createMediaSource(MediaItem.fromUri(stream.hlsManifestUrl))
-                .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
-        }
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
             .setPreferredAudioLanguages()
             .build()
+        val lang = stream.audioTrackId.substringBefore('.').takeIf(String::isNotBlank)
+        if (stream.hlsManifestUrl.isNotBlank()) {
+            return HlsHeroMediaFactory.createAudio(
+                this, trackId, stream.hlsManifestUrl, stream.isLive, lang, stream.visionOsPlayback?.durationMs ?: 0L,
+            )
+        }
         return when {
-            stream.visionOsPlayback != null && stream.visionOsFormat != null -> {
-                val mpd = YouTubeRepository.buildDashMpd(stream.visionOsPlayback.durationMs, null, stream.visionOsFormat)
-                DashMediaSource.Factory(dashMpdDataSourceFactory(mpd.toByteArray(Charsets.UTF_8)))
-                    .createMediaSource(MediaItem.fromUri("dash://local/$trackId"))
-                    .let { if (stream.isLive) LiveTimelineMediaSource(it) else it }
-            }
-            stream.visionOsPlayback != null && stream.visionOsPlayback.dashManifestUrl.isNotBlank() -> {
-                LiveTimelineMediaSource(
-                    liveDashMediaSourceFactory()
-                        .createMediaSource(liveDashMediaItem(stream.visionOsPlayback.dashManifestUrl))
-                )
+            stream.visionOsPlayback != null && (stream.visionOsFormat != null || stream.visionOsPlayback.dashManifestUrl.isNotBlank()) -> {
+                ClassicDashMediaFactory.createAudio(this, trackId, stream.visionOsPlayback, stream.visionOsFormat, lang)
             }
             stream.sabrPlayback != null && stream.sabrFormat != null -> {
                 SabrMediaFactory.createAudio(stream.sabrPlayback, stream.sabrFormat,

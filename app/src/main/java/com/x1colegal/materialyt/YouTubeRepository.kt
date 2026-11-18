@@ -2298,9 +2298,22 @@ object YouTubeRepository {
             val started = SystemClock.elapsedRealtime()
             val browseId = when (name) { "home" -> "FEwhat_to_watch"; "history" -> "FEhistory"; "playlists" -> "FEplaylist_aggregation"; else -> null }
             val bootstrap = bootstrap("https://www.youtube.com", "WEB", generation)
-            val data = if (browseId != null) post("https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
-                JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", browseId), bootstrap.origin, generation)
-            else initialData(get(url))
+            val data = if (browseId != null) {
+                val browseResult = runCatching {
+                    post(
+                        "https://www.youtube.com/youtubei/v1/browse?key=${bootstrap.key}",
+                        JSONObject().put("context", context("WEB", bootstrap.version)).put("browseId", browseId),
+                        bootstrap.origin,
+                        generation,
+                    )
+                }
+                if (browseResult.isFailure && name == "history") {
+                    AppLog.failure("feed=history browse", browseResult.exceptionOrNull()!!)
+                    JSONObject()
+                } else {
+                    browseResult.getOrThrow()
+                }
+            } else initialData(get(url))
             var mode = if (browseId == null) "html" else "browse"
             val parseStarted = SystemClock.elapsedRealtime()
             var uniqueItems = parseItems(data).distinctBy { it.id }
@@ -4386,7 +4399,15 @@ object YouTubeRepository {
             val headersMs = SystemClock.elapsedRealtime() - started
             val raw = it.body?.string().orEmpty()
             val bodyMs = SystemClock.elapsedRealtime() - started
-            if (!it.isSuccessful) { AppLog.event("authenticated POST host=${request.url.host} HTTP ${it.code} body=${raw.take(400)}"); error("YouTube returned HTTP ${it.code}") }
+            if (!it.isSuccessful) {
+                if (it.code in 500..599) {
+                    synchronized(bootstrapCache) { bootstrapCache.clear() }
+                    visitorData.remove(origin)
+                    clientVersions.remove(origin)
+                }
+                AppLog.event("authenticated POST host=${request.url.host} HTTP ${it.code} body=${raw.take(400)}")
+                error("YouTube returned HTTP ${it.code}")
+            }
             val parsed = JSONObject(raw)
             if (requestGeneration != null) {
                 AppLog.event("feed HTTP host=${request.url.host} headersMs=$headersMs bodyMs=$bodyMs bytes=${raw.length}")

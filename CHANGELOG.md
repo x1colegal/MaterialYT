@@ -2,6 +2,21 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [7.12] - 2026-11-17
+
+### Added
+- **`classicdash` transport package** (`ClassicDashDataSource`, `ClassicDashSession`, `ClassicDashMediaFactory`): delivers DASH VOD (via streaming HTTP `Range` requests with seek/resume support) and DASH Live (via `ANDROID_VR` MPD `<SegmentURL>` polling + `LiveMp4TimelineNormalizer` `tkhd`/`tfdt` patching) through disk-backed `SabrBuffer` + `ProgressiveMediaSource` / `MergingMediaSource`, matching `sabrmodern`.
+- **`hlshero` transport package** (`HlsHeroDataSource`, `HlsHeroSession`, `HlsHeroMediaFactory`): delivers HLS VOD and HLS Live (`VISIONOS`, muxed or separate audio rendition) through `SabrBuffer` + `ProgressiveMediaSource` / `MergingMediaSource`, preserving VOD total duration and history resume position from `#EXTINF` segments.
+- Shared `LiveMp4TimelineNormalizer` helper in `sabrmodern` for live fMP4 `tkhd`/`tfdt` normalization.
+
+### Changed
+- Removed `DashMediaSource`, `HlsMediaSource`, `YouTubeLiveDashManifestParser`, and `LiveTimelineMediaSource` across `MainActivity` and `AutoMusicService`.
+- Clarified Stream Transport settings description (`HLS` uses `VISIONOS` and cannot play Made for Kids videos; `DASH` uses `VISIONOS` for VOD and `ANDROID_VR` for live streams).
+
+### Fixed
+- Pace `originalMetadataItems` (`Semaphore(2)` + 120ms delay) while keeping `canonicalVideoMetadata` authenticated so feeds no longer trigger `HTTP 429` bursts or `HTTP 500` + feed depersonalization.
+- Invalidate `bootstrapCache`, `visitorData`, and `clientVersions` on `HTTP 500..599`, and fall back to authenticated `/feed/history` HTML parsing when `FEhistory` browse fails.
+
 ## [7.11] - 2026-11-17
 
 ### Added

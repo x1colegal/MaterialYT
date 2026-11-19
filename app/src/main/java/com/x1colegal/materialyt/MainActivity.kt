@@ -3823,7 +3823,7 @@ private fun ChannelRow(item: FeedItem, click: () -> Unit) {
 
 internal suspend fun enrichItemsProgressively(
     items: List<FeedItem>,
-    chunkSize: Int = 16,
+    chunkSize: Int = 8,
     onUpdate: (List<FeedItem>) -> Unit,
 ) {
     if (items.isEmpty()) return
@@ -4302,8 +4302,15 @@ private fun ChannelScreen(activity: MainActivity, url: String, codec: CodecChoic
                 .onSuccess { posts = it }.onFailure { error = it.message }
         } else {
             channelItems = emptyList()
-            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url, selectedTab) } }
-                .onSuccess { page -> channel = page; channelItems = page.items }
+            val tab = selectedTab
+            runCatching { withContext(Dispatchers.IO) { YouTubeRepository.channelPage(url, tab) } }
+                .onSuccess { page ->
+                    channel = page
+                    channelItems = page.items
+                    enrichItemsProgressively(page.items) { updated ->
+                        if (selectedTab == tab) channelItems = updated
+                    }
+                }
                 .onFailure { error = it.message }
         }
     }

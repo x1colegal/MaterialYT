@@ -2,6 +2,12 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [8.1] - 2026-11-19
+
+### Fixed
+- Enrich `ChannelScreen` video/short items with `enrichItemsProgressively` so channel tabs display original un-translated titles instead of auto-translated feed titles.
+- Reduce `enrichItemsProgressively` chunk size from `16` to `8` so the first visible search, home, and channel results update to original titles twice as fast.
+
 ## [8.0] - 2026-11-18
 
 ### Fixed

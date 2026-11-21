@@ -2840,6 +2840,32 @@ private fun MusicPlaylistScreen(
 }
 
 @Composable
+private fun MusicSeekProgressBar(duration: Long) {
+    Canvas(
+        Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) {
+            detectTapGestures { point ->
+                if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong())
+            }
+        }
+    ) {
+        val total = duration.coerceAtLeast(1L).toFloat()
+        val y = center.y
+        val stroke = 9.dp.toPx()
+        val buffered = AutoMusicService.bufferedPosition.longValue
+        val position = AutoMusicService.position.longValue
+        drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)
+        drawLine(ComposeColor.LightGray.copy(alpha = .78f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (buffered / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
+        drawLine(ComposeColor.White, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (position / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
+    }
+    val positionSec by remember { derivedStateOf { AutoMusicService.position.longValue / 1000L } }
+    Row(Modifier.fillMaxWidth()) {
+        Text(formatTime(positionSec * 1000L), color = ComposeColor.White.copy(alpha = .75f))
+        Spacer(Modifier.weight(1f))
+        Text(formatTime(duration), color = ComposeColor.White.copy(alpha = .75f))
+    }
+}
+
+@Composable
 private fun MusicPlayer(
     activity: MainActivity,
     track: FeedItem,
@@ -2873,23 +2899,21 @@ private fun MusicPlayer(
     var commentsRefresh by remember(track.id) { mutableIntStateOf(0) }
     
     val lyricsState = key(track.id) { rememberLazyListState() }
-    val position = AutoMusicService.position.longValue
     val duration = AutoMusicService.duration.longValue
-    val buffered = AutoMusicService.bufferedPosition.longValue
     val playing = AutoMusicService.playing.value
     val audioTracks = AutoMusicService.availableAudioTracks.value
     val selectedAudioTrack = AutoMusicService.selectedAudioTrack.value
     val serviceTrack = AutoMusicService.nowPlaying.value
     val currentQueue = (if (queue.isNotEmpty()) queue else AutoMusicService.queue.value).ifEmpty { listOf(track) }
     val currentQueueIndex = if (queueIndex >= 0) queueIndex else AutoMusicService.queueIndex.intValue
-    val hasPrev = currentQueueIndex > 0 || position > 5_000L
+    val hasPrev by remember(currentQueueIndex) { derivedStateOf { currentQueueIndex > 0 || AutoMusicService.position.longValue > 5_000L } }
     val hasNext = (currentQueueIndex >= 0 && currentQueueIndex < currentQueue.lastIndex) || AutoMusicService.hasNext
     val musicLoadStatus by PlaybackLoadStatus.message.collectAsState()
     val musicLoadMessage = musicLoadStatus?.takeIf {
         it.mediaId == track.id &&
             (!PlaybackLoadStatus.hasPlaybackStarted(track.id) ||
-                !it.text.startsWith("SABR requested backoff") ||
-                PlaybackPreferences.showSabrBackoffDuringBuffering)
+                (PlaybackPreferences.showSabrBackoffDuringBuffering &&
+                    it.text.startsWith("SABR requested backoff")))
     }?.text
     BackHandler { onBack() }
     DisposableEffect(Unit) {
@@ -2963,10 +2987,25 @@ private fun MusicPlayer(
             .onSuccess { lyrics = it }.onFailure { if (it !is kotlinx.coroutines.CancellationException) lyricsError = it.message ?: "Lyrics unavailable" }
     }
     val lines = lyrics.orEmpty()
-    val timed = lines.any { it.startMs >= 0 }
-    val currentLine = if (lines.isEmpty()) 0 else if (timed) lines.indexOfLast { it.startMs in 0..position }.coerceAtLeast(0)
-        else if (duration > 0) ((position.toDouble() / duration) * lines.size).toInt().coerceIn(lines.indices) else 0
-    LaunchedEffect(currentLine, showLyrics) { if (lines.isNotEmpty()) lyricsState.animateScrollToItem(currentLine, -300) }
+    val timed = remember(lines) { lines.any { it.startMs >= 0 } }
+    val currentLine by remember(lines, timed, duration) {
+        derivedStateOf {
+            val pos = AutoMusicService.position.longValue
+            if (lines.isEmpty()) 0
+            else if (timed) lines.indexOfLast { it.startMs in 0..pos }.coerceAtLeast(0)
+            else if (duration > 0) ((pos.toDouble() / duration) * lines.size).toInt().coerceIn(lines.indices)
+            else 0
+        }
+    }
+    LaunchedEffect(currentLine, showLyrics) {
+        if (lines.isNotEmpty()) {
+            if (kotlin.math.abs(lyricsState.firstVisibleItemIndex - currentLine) > 6) {
+                lyricsState.scrollToItem(currentLine, -300)
+            } else {
+                lyricsState.animateScrollToItem(currentLine, -300)
+            }
+        }
+    }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     val backgroundArtwork = remember(track.thumbnail) {
         if (Build.VERSION.SDK_INT >= 31) track.thumbnail
@@ -3027,13 +3066,7 @@ private fun MusicPlayer(
                             textAlign = TextAlign.Center,
                         )
                         Spacer(Modifier.height(14.dp))
-                        Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
-                            val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
-                            drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)
-                            drawLine(ComposeColor.LightGray.copy(alpha = .78f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (buffered / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
-                            drawLine(ComposeColor.White, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (position / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
-                        }
-                        Row(Modifier.fillMaxWidth()) { Text(formatTime(position), color = ComposeColor.White.copy(alpha = .75f)); Spacer(Modifier.weight(1f)); Text(formatTime(duration), color = ComposeColor.White.copy(alpha = .75f)) }
+                        MusicSeekProgressBar(duration)
                         Spacer(Modifier.height(8.dp))
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 24.dp),
@@ -3260,13 +3293,7 @@ private fun MusicPlayer(
                             overflow = TextOverflow.Ellipsis,
                             textAlign = TextAlign.Center,
                         )
-                        Canvas(Modifier.fillMaxWidth().height(36.dp).pointerInput(duration) { detectTapGestures { point -> if (duration > 0) AutoMusicService.seekTo((duration * (point.x / size.width)).toLong()) } }) {
-                            val total = duration.coerceAtLeast(1L).toFloat(); val y = center.y; val stroke = 9.dp.toPx()
-                            drawLine(ComposeColor.Gray.copy(alpha = .48f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = stroke, cap = StrokeCap.Round)
-                            drawLine(ComposeColor.LightGray.copy(alpha = .78f), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (buffered / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
-                            drawLine(ComposeColor.White, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width * (position / total).coerceIn(0f, 1f), y), strokeWidth = stroke, cap = StrokeCap.Round)
-                        }
-                        Row(Modifier.fillMaxWidth()) { Text(formatTime(position), color = ComposeColor.White.copy(alpha = .75f)); Spacer(Modifier.weight(1f)); Text(formatTime(duration), color = ComposeColor.White.copy(alpha = .75f)) }
+                        MusicSeekProgressBar(duration)
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 24.dp),
                             horizontalArrangement = Arrangement.SpaceEvenly,

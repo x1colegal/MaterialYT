@@ -2,6 +2,14 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [8.2] - 2026-11-21
+
+### Fixed
+- Pass the newly minted `streamingPoToken` through `RefreshedSabrEndpoint` and `SabrRefreshedPlayer` when `refreshWebSabrAdPlayback()` recreates a WEB SABR session on persistent `protection=2` (`ATTESTATION_PENDING`), preventing the `~70s` (`01:09`) grace-window stall.
+- Fix `musicLoadMessage` visibility condition in `MusicPlayer` so non-backoff loading status messages do not reappear once playback has started.
+- Isolate `AutoMusicService.position` and `bufferedPosition` reads in `MusicPlayer` (`MusicSeekProgressBar` draw-phase reads + `derivedStateOf` for `currentLine`, `hasPrev`, and per-second timer) to prevent continuous full-screen recomposition and lyric desync on slower devices.
+- Release active SABR/media streams when switching tracks, closing playback, or destroying `AutoMusicService`, and raise `WebStreamAttestationProvider` init timeout to 25s for slower devices.
+
 ## [8.1] - 2026-11-19
 
 ### Fixed

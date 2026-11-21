@@ -191,7 +191,7 @@ object WebStreamAttestationProvider {
                 // Autoplay remains gated by WebSettings until the silence guard above is active.
                 webView.loadUrl("$origin/watch?v=$initialVideoId&hl=en&autoplay=0&mute=1&playsinline=1")
             }
-            ready.get(12, TimeUnit.SECONDS)
+            ready.get(25, TimeUnit.SECONDS)
         }
 
         fun attest(videoId: String, cpn: String, atrUrl: String) {

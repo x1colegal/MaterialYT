@@ -693,7 +693,21 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         session.isActive = true
     }
 
+    private var activeMediaTrackId: String? = null
+
+    private fun releaseMediaStreams(trackId: String?) {
+        val id = trackId?.takeIf(String::isNotBlank) ?: return
+        SabrMediaFactory.releaseVideo(id)
+        ClassicDashMediaFactory.releaseVideo(id)
+        HlsHeroMediaFactory.releaseVideo(id)
+        if (activeMediaTrackId == id) activeMediaTrackId = null
+    }
+
     private fun buildMusicMediaSource(trackId: String, stream: PlayableStream): MediaSource {
+        if (activeMediaTrackId != null && activeMediaTrackId != trackId) {
+            releaseMediaStreams(activeMediaTrackId)
+        }
+        activeMediaTrackId = trackId
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
             .setPreferredAudioLanguages()
@@ -852,6 +866,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         // synchronously from the nested close/drag gesture can invalidate its own UI tree.
         nowPlaying.value = null
         playing.value = false
+        val closingId = currentTrack?.id ?: activeMediaTrackId
         currentTrack = null
         currentArtwork = null
         availableAudioTracks.value = emptyList()
@@ -866,7 +881,9 @@ class AutoMusicService : MediaBrowserServiceCompat() {
             runCatching {
                 player.pause()
                 player.clearMediaItems()
-                releasePlaybackLocks()
+                releaseMediaStreams(closingId)
+                releaseMediaStreams(currentTrack?.id ?: activeMediaTrackId)
+        releasePlaybackLocks()
                 session.setMetadata(null)
                 session.setQueue(null)
                 session.setPlaybackState(PlaybackStateCompat.Builder()
@@ -890,6 +907,7 @@ class AutoMusicService : MediaBrowserServiceCompat() {
         selectedAudioTrack.value = null
         Companion.queue.value = emptyList()
         Companion.queueIndex.intValue = -1
+        releaseMediaStreams(currentTrack?.id ?: activeMediaTrackId)
         releasePlaybackLocks()
         scope.cancel()
         player.release()

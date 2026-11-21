@@ -3293,8 +3293,14 @@ object YouTubeRepository {
         return refreshed
     }
 
+    data class RefreshedSabrEndpoint(
+        val url: String,
+        val ustreamerConfig: String,
+        val streamingPoToken: String = "",
+    )
+
     /** Recreates a WEB SABR endpoint after the server enters its content-ad context flow or stalls on protection. */
-    fun refreshWebSabrAdPlayback(info: SabrPlaybackInfo, forceFreshCpn: Boolean = true): Pair<String, String> {
+    fun refreshWebSabrAdPlayback(info: SabrPlaybackInfo, forceFreshCpn: Boolean = true): RefreshedSabrEndpoint {
         check(info.clientId == 1) { "Ad playback refresh is only supported by the WEB playback client" }
         val originalCpn = if (forceFreshCpn) null else info.serverAbrStreamingUrl.toHttpUrlOrNull()?.queryParameter("cpn")
         var response = if (forceFreshCpn) {
@@ -3322,8 +3328,9 @@ object YouTubeRepository {
             ?.build()?.toString() ?: solved
         val config = findString(response, "videoPlaybackUstreamerConfig")
             ?.takeIf(String::isNotBlank) ?: info.videoPlaybackUstreamerConfig
-        AppLog.event("SABR WEB ad playback refresh ready video=${info.videoId}")
-        return url to config
+        val streamingPot = response.optString("_materialytStreamingPot")
+        AppLog.event("SABR WEB ad playback refresh ready video=${info.videoId} hasPot=${streamingPot.isNotBlank()}")
+        return RefreshedSabrEndpoint(url, config, streamingPot)
     }
 
     /** Applies a WEB SABR RELOAD_PLAYER_RESPONSE token and returns its prepared replacement endpoint. */

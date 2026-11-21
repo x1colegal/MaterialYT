@@ -15,6 +15,12 @@ import timber.log.Timber
  * [nTransform] applies the cipher n-parameter transform to a googlevideo URL. Web clients'
  * `serverAbrStreamingUrl` is CIPHERED, so its `n=` parameter must be transformed before POSTing.
  */
+internal class SabrRefreshedPlayer(
+    val url: String,
+    val ustreamerConfig: ByteArray,
+    val poToken: ByteArray? = null,
+)
+
 internal class SabrConfig(
     val mediaId: String,
     val sabrUrl: String,
@@ -41,7 +47,7 @@ internal class SabrConfig(
      */
     val cpn: () -> String? = { null },
     val reloadPlayer: ((String) -> Pair<String, ByteArray>)? = null,
-    val refreshPlayer: (() -> Pair<String, ByteArray>)? = null,
+    val refreshPlayer: (() -> SabrRefreshedPlayer)? = null,
     /** Returns the same fresh streaming PoToken in its URL-safe and decoded protobuf forms. */
     val refreshPoToken: (() -> Pair<String, ByteArray>)? = null,
 )
@@ -163,6 +169,7 @@ internal class SabrSession(
         var attestationStalls = 0
         var emptySessionRefreshes = 0
         var midStreamRefreshes = 0
+        var consecutivePendingResponses = 0
         var protectionSessionRefreshes = 0
         var startupEmptyResponses = 0
         var lastProtectionRefreshAt = 0L
@@ -171,6 +178,8 @@ internal class SabrSession(
         var activeProtectionStatus = 0L
         val pendingPoToken = java.util.concurrent.atomic.AtomicReference<Pair<String, ByteArray>?>(null)
         val poTokenRefreshRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+        val pendingPlayerRefresh = java.util.concurrent.atomic.AtomicReference<SabrRefreshedPlayer?>(null)
+        val playerRefreshRunning = java.util.concurrent.atomic.AtomicBoolean(false)
         val poTokenGeneration = java.util.concurrent.atomic.AtomicLong(0L)
         var protectionRejectCount = 0L
 
@@ -206,6 +215,28 @@ internal class SabrSession(
                 // Match googlevideo's reference flow: replace only StreamerContext.poToken. The
                 // signed URL, rn, playback cookie and SABR contexts belong to the active exchange.
                 AppLog.event("SABR audio installed asynchronously refreshed streamer-context PoToken generation=${poTokenGeneration.get()}")
+            }
+            pendingPlayerRefresh.getAndSet(null)?.let { refreshed ->
+                url = refreshed.url
+                ustreamerConfig = refreshed.ustreamerConfig
+                val updatedPot = refreshed.poToken?.takeIf { it.isNotEmpty() } ?: refreshed.url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
+                    runCatching { android.util.Base64.decode(pot, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
+                        .getOrNull()?.takeIf { it.isNotEmpty() }
+                }
+                if (updatedPot != null) {
+                    poToken = updatedPot
+                    poTokenGeneration.incrementAndGet()
+                }
+                requestNumber = 0
+                cookie = null
+                ctxByType.clear()
+                ctxToSend.clear()
+                dry = 0
+                attestationStalls = 0
+                backoffTimeMs = 0
+                lastProtectionRefreshStatus = 0
+                consecutivePendingResponses = 0
+                AppLog.event("SABR audio installed asynchronously refreshed player session hasPot=${updatedPot != null}")
             }
             // Keep requesting while WebView mints the replacement proof. YouTube deliberately
             // serves a short grace window of playable media with protection=2; consuming all of
@@ -372,13 +403,19 @@ internal class SabrSession(
                     .onFailure { AppLog.failure("SABR audio protection session refresh", it) }
                     .getOrNull()
                 if (refreshed != null) {
-                    url = refreshed.first
-                    ustreamerConfig = refreshed.second
-                    config.refreshPoToken?.let { refresh ->
-                        runCatching { refresh() }.onSuccess { proof ->
-                            poToken = proof.second
-                            poTokenGeneration.incrementAndGet()
-                        }.onFailure { AppLog.failure("SABR audio proof after session refresh", it) }
+                    url = refreshed.url
+                    ustreamerConfig = refreshed.ustreamerConfig
+                    val updatedPot = refreshed.poToken?.takeIf { it.isNotEmpty() }
+                    if (updatedPot != null) {
+                        poToken = updatedPot
+                        poTokenGeneration.incrementAndGet()
+                    } else {
+                        config.refreshPoToken?.let { refresh ->
+                            runCatching { refresh() }.onSuccess { proof ->
+                                poToken = proof.second
+                                poTokenGeneration.incrementAndGet()
+                            }.onFailure { AppLog.failure("SABR audio proof after session refresh", it) }
+                        }
                     }
                     requestNumber = 0
                     cookie = null
@@ -421,11 +458,14 @@ internal class SabrSession(
                 emptySessionRefreshes++
                 AppLog.event("SABR audio empty session; refreshing player attempt=$emptySessionRefreshes snackbar=$snackbarPayload")
                 val refreshed = config.refreshPlayer.invoke()
-                url = refreshed.first
-                ustreamerConfig = refreshed.second
-                url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
+                url = refreshed.url
+                ustreamerConfig = refreshed.ustreamerConfig
+                (refreshed.poToken?.takeIf { it.isNotEmpty() } ?: url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
                     runCatching { android.util.Base64.decode(pot, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
-                        .getOrNull()?.takeIf { it.isNotEmpty() }?.let { poToken = it }
+                        .getOrNull()?.takeIf { it.isNotEmpty() }
+                })?.let {
+                    poToken = it
+                    poTokenGeneration.incrementAndGet()
                 }
                 requestNumber = 0
                 cookie = null
@@ -468,11 +508,14 @@ internal class SabrSession(
                         emptySessionRefreshes++
                         AppLog.event("SABR audio startup stalled; refreshing player attempt=$emptySessionRefreshes")
                         val refreshed = config.refreshPlayer.invoke()
-                        url = refreshed.first
-                        ustreamerConfig = refreshed.second
-                        url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
+                        url = refreshed.url
+                        ustreamerConfig = refreshed.ustreamerConfig
+                        (refreshed.poToken?.takeIf { it.isNotEmpty() } ?: url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
                             runCatching { android.util.Base64.decode(pot, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
-                                .getOrNull()?.takeIf { it.isNotEmpty() }?.let { poToken = it }
+                                .getOrNull()?.takeIf { it.isNotEmpty() }
+                        })?.let {
+                            poToken = it
+                            poTokenGeneration.incrementAndGet()
                         }
                         requestNumber = 0
                         cookie = null
@@ -563,6 +606,9 @@ internal class SabrSession(
             // those last segments, then re-arm once YouTube accepts the proof with status 1.
             if (protStatus < SabrProtection.ATTESTATION_PENDING) {
                 lastProtectionRefreshStatus = 0L
+                consecutivePendingResponses = 0
+            } else if (protStatus == SabrProtection.ATTESTATION_PENDING) {
+                consecutivePendingResponses++
             }
             val protectionEscalated = protStatus >= SabrProtection.ATTESTATION_PENDING &&
                 protStatus > lastProtectionRefreshStatus
@@ -619,21 +665,38 @@ internal class SabrSession(
                 continue
             }
             val refreshPlayer = config.refreshPlayer
+            if (protStatus == SabrProtection.ATTESTATION_PENDING && consecutivePendingResponses >= 2 &&
+                refreshPlayer != null && midStreamRefreshes < MAX_MIDSTREAM_REFRESHES &&
+                pendingPlayerRefresh.get() == null && playerRefreshRunning.compareAndSet(false, true)
+            ) {
+                midStreamRefreshes++
+                val attempt = midStreamRefreshes
+                AppLog.event("SABR audio refreshing player session asynchronously protStatus=$protStatus consecutive=$consecutivePendingResponses attempt=$attempt")
+                Thread({
+                    runCatching { refreshPlayer() }
+                        .onSuccess { refreshed -> pendingPlayerRefresh.set(refreshed) }
+                        .onFailure { AppLog.failure("SABR audio async player refresh", it) }
+                    playerRefreshRunning.set(false)
+                }, "materialyt-audio-refresh-${config.mediaId}").apply { isDaemon = true; start() }
+            }
             val midStreamNeedsRefresh = protStatus < SabrProtection.ATTESTATION_PENDING && dry >= 3 &&
-                lastSeq > 0 &&
-                refreshPlayer != null && midStreamRefreshes < MAX_MIDSTREAM_REFRESHES
+                lastSeq > 0 && refreshPlayer != null && midStreamRefreshes < MAX_MIDSTREAM_REFRESHES
             if (midStreamNeedsRefresh && refreshPlayer != null) {
                 midStreamRefreshes++
+                consecutivePendingResponses = 0
                 AppLog.event("SABR audio refreshing player session mid-stream protStatus=$protStatus stalls=$attestationStalls dry=$dry attempt=$midStreamRefreshes")
                 val refreshed = runCatching { refreshPlayer() }
                     .onFailure { AppLog.failure("SABR audio mid-stream player refresh", it) }
                     .getOrNull()
                 if (refreshed != null) {
-                    url = refreshed.first
-                    ustreamerConfig = refreshed.second
-                    refreshed.first.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
+                    url = refreshed.url
+                    ustreamerConfig = refreshed.ustreamerConfig
+                    (refreshed.poToken?.takeIf { it.isNotEmpty() } ?: refreshed.url.toHttpUrlOrNull()?.queryParameter("pot")?.let { pot ->
                         runCatching { android.util.Base64.decode(pot, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
-                            .getOrNull()?.takeIf { it.isNotEmpty() }?.let { poToken = it }
+                            .getOrNull()?.takeIf { it.isNotEmpty() }
+                    })?.let {
+                        poToken = it
+                        poTokenGeneration.incrementAndGet()
                     }
                     requestNumber = 0
                     cookie = null

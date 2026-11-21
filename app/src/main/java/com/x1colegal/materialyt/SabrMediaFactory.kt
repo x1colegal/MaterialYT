@@ -55,11 +55,19 @@ object SabrMediaFactory {
             refreshPlayer = when (info.clientId) {
                 1, 67 -> ({
                     val refreshed = YouTubeRepository.refreshWebSabrAdPlayback(info)
-                    refreshed.first to decode(refreshed.second)
+                    com.x1colegal.materialyt.sabrmodern.SabrRefreshedPlayer(
+                        refreshed.url,
+                        decode(refreshed.ustreamerConfig),
+                        refreshed.streamingPoToken.takeIf(String::isNotBlank)?.let(::decode),
+                    )
                 })
                 101 -> ({
                     val refreshed = YouTubeRepository.sabrPlaybackInfo(info.videoId)
-                    refreshed.serverAbrStreamingUrl to decode(refreshed.videoPlaybackUstreamerConfig)
+                    com.x1colegal.materialyt.sabrmodern.SabrRefreshedPlayer(
+                        refreshed.serverAbrStreamingUrl,
+                        decode(refreshed.videoPlaybackUstreamerConfig),
+                        refreshed.streamingPoToken.takeIf(String::isNotBlank)?.let(::decode),
+                    )
                 })
                 else -> null
             },
@@ -138,11 +146,19 @@ object SabrMediaFactory {
             refreshPlayer = when (info.clientId) {
                 1, 67 -> ({
                     val refreshed = YouTubeRepository.refreshWebSabrAdPlayback(info)
-                    refreshed.first to decode(refreshed.second)
+                    com.x1colegal.materialyt.sabrmodern.SabrRefreshedPlayer(
+                        refreshed.url,
+                        decode(refreshed.ustreamerConfig),
+                        refreshed.streamingPoToken.takeIf(String::isNotBlank)?.let(::decode),
+                    )
                 })
                 101 -> ({
                     val refreshed = YouTubeRepository.sabrPlaybackInfo(info.videoId)
-                    refreshed.serverAbrStreamingUrl to decode(refreshed.videoPlaybackUstreamerConfig)
+                    com.x1colegal.materialyt.sabrmodern.SabrRefreshedPlayer(
+                        refreshed.serverAbrStreamingUrl,
+                        decode(refreshed.videoPlaybackUstreamerConfig),
+                        refreshed.streamingPoToken.takeIf(String::isNotBlank)?.let(::decode),
+                    )
                 })
                 else -> null
             },

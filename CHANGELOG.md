@@ -2,6 +2,11 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [8.3] - 2026-11-23
+
+### Added
+- Bundle `org.conscrypt:conscrypt-android:2.9.0` as the primary JSSE security provider and configure every `OkHttpClient` via `HttpBackend.configurePostQuantumTls()` with `X25519MLKEM768` prioritized first in `Conscrypt.setNamedGroups(...)` (followed by `X25519`, `secp256r1`, `secp384r1`).
+
 ## [8.2] - 2026-11-21
 
 ### Fixed

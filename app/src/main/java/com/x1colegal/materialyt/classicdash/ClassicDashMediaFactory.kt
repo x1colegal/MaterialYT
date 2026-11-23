@@ -22,16 +22,19 @@ internal object ClassicDashMediaFactory {
     private val clenRegex = Regex("""[?&]clen=(\d+)""")
 
     internal val mediaHttpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .dispatcher(Dispatcher().apply {
-                maxRequests = 64
-                maxRequestsPerHost = 16
-            })
-            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .build()
+        with(com.x1colegal.materialyt.HttpBackend) {
+            OkHttpClient.Builder()
+                .configurePostQuantumTls()
+                .dispatcher(Dispatcher().apply {
+                    maxRequests = 64
+                    maxRequestsPerHost = 16
+                })
+                .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+        }
     }
 
     private val liveLoaderFactory = CompositeSequenceableLoaderFactory { loaders ->

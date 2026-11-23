@@ -395,7 +395,9 @@ private class BotGuardRuntime(
         if (body != null) builder.post(body.toRequestBody("application/json+protobuf".toMediaType()))
             .header("x-goog-api-key", GOOGLE_API_KEY).header("x-user-agent", "grpc-web-javascript/0.1")
         val call = builder.build()
-        return okhttp3.OkHttpClient().newCall(call).execute().use {
+        return with(HttpBackend) {
+            okhttp3.OkHttpClient.Builder().configurePostQuantumTls().build()
+        }.newCall(call).execute().use {
             check(it.isSuccessful) { "BotGuard HTTP ${it.code}" }
             it.body.string()
         }

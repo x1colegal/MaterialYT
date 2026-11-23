@@ -7021,6 +7021,18 @@ private fun AccountScreen(activity: MainActivity, theme: ThemeMode, color: AppCo
         item { ChoiceSection("Audio decoder", DecoderMode.entries, audioDecoderMode, { it.label }, onAudioDecoderMode) }
         item { ChoiceSection("Backend HTTP", HttpBackend.Mode.entries, HttpBackend.mode, { it.label }, { HttpBackend.setMode(it) }) }
         item { Text("HTTP/2 is preferred and automatically falls back to HTTP/1.1 when a server does not negotiate it. Select HTTP/1.1 to disable HTTP/2 for backend and media requests.", style = MaterialTheme.typography.bodySmall) }
+        item {
+            OutlinedButton(
+                onClick = {
+                    val message = runCatching { "Logs saved to ${AppLog.exportToDownloads(activity)}" }
+                        .getOrElse { it.message ?: "Failed to export logs" }
+                    android.widget.Toast.makeText(activity, message, android.widget.Toast.LENGTH_LONG).show()
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Export logs to Downloads")
+            }
+        }
     }
 }
 

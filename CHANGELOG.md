@@ -2,6 +2,17 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [8.4] - 2026-11-23
+
+### Added
+- Initialize `AppLog` file logging (`app_diag.log`) on startup and add an **Export logs to Downloads** button in Settings to copy diagnostic logs to internal storage (`Download/MaterialYT-diag-*.log`) without root or ADB.
+
+### Fixed
+- Strip the `||...` suffix from `DATASYNC_ID` (`substringBefore("||")`) before using it as the signed-in GVS PoToken content binding, matching `yt-dlp` / `bgutil` so accounts without `gvsBindToVideoId` no longer get rejected with `protection=3` (`ATTESTATION_REQUIRED` x10).
+
+### Removed
+- Remove `WebStreamAttestationProvider` (`prepareAsync` / `attest`) from `webPoPlayer` so playback startup and refresh no longer wait on or run extra WebView ATR attestation.
+
 ## [8.3] - 2026-11-23
 
 ### Added

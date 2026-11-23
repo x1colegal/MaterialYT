@@ -3163,10 +3163,6 @@ object YouTubeRepository {
                 forceFreshChallenge = forceFreshPoToken,
             )
         }
-        // The official watch page initializes playback attestation separately from the GVS
-        // content-bound PoToken. The live server still escalates valid PoTokens to status 3 when
-        // this ATR proof is omitted, so prepare it while the remaining player work runs.
-        WebStreamAttestationProvider.prepareAsync(videoId, origin, WEB_PLAYER_UA)
         if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Loading player JavaScript…")
         val cpn = cpnOverride?.takeIf(String::isNotBlank)
             ?: UUID.randomUUID().toString().replace("-", "").take(16)
@@ -3231,10 +3227,6 @@ object YouTubeRepository {
         }
         response.optJSONObject("playbackTracking")?.optJSONObject("atrUrl")
             ?.optString("baseUrl")?.takeIf(String::isNotBlank)?.let { atrUrl ->
-                if (showInitialProgress) PlaybackLoadStatus.show(videoId, "Submitting playback attestation…")
-                runCatching {
-                    WebStreamAttestationProvider.attest(videoId, cpn, atrUrl, origin, WEB_PLAYER_UA)
-                }.onFailure { AppLog.failure("WEB playback attestation video=$videoId", it) }
                 response.put("_materialytAtrUrl", atrUrl)
             }
         if (reloadToken == null && !adPlayback && !forceFreshPoToken) {
@@ -4325,6 +4317,7 @@ object YouTubeRepository {
         clientVersions[baseOrigin] = version
         Regex("\"VISITOR_DATA\":\"([^\"]+)").find(html)?.groupValues?.get(1)?.let { visitorData[baseOrigin] = it }
         val dataSyncId = Regex("\"DATASYNC_ID\":\"([^\"]+)").find(html)?.groupValues?.get(1).orEmpty()
+            .substringBefore("||").trim()
         val gvsBindToVideoId = html.contains("html5_generate_content_po_token=true") ||
             html.contains("html5_generate_content_po_token%3Dtrue") ||
             html.contains("html5_generate_content_po_token\\u003dtrue")

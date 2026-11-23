@@ -7,6 +7,7 @@ class MaterialYtApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        AppLog.init(this)
         AppLog.event("application started version=1.1.0 process=${android.os.Process.myPid()}")
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             AppLog.failure("uncaught thread=${thread.name}", error)

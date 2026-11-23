@@ -1,6 +1,8 @@
 package com.x1colegal.materialyt
 
 import android.app.Application
+import coil.Coil
+import coil.ImageLoader
 
 class MaterialYtApp : Application() {
     companion object { lateinit var instance: MaterialYtApp }
@@ -14,6 +16,11 @@ class MaterialYtApp : Application() {
             kotlin.system.exitProcess(10)
         }
         HttpBackend.initialize(this)
+        Coil.setImageLoader(
+            ImageLoader.Builder(this)
+                .okHttpClient { HttpBackend.playbackClient() }
+                .build()
+        )
         EjsChallengeSolver.initialize(this)
     }
 }

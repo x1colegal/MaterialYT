@@ -507,6 +507,7 @@ internal class SabrVideoSession(
                     ctxByType.clear()
                     ctxToSend.clear()
                     dry = 0
+                    startupEmptyResponses = 0
                     attestationStalls = 0
                     backoffTimeMs = 0L
                     activeProtectionStatus = 0L

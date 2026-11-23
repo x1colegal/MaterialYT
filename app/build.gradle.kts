@@ -16,8 +16,8 @@ android {
         applicationId = "com.x1colegal.materialyt"
         minSdk = 21
         targetSdk = 36
-        versionCode = 219
-        versionName = "8.4"
+        versionCode = 220
+        versionName = "8.5"
     }
     signingConfigs {
         getByName("debug") {
@@ -43,7 +43,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true }
-    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+    packaging { resources.excludes += listOf("/META-INF/{AL2.0,LGPL2.1}", "/META-INF/LICENSE*", "/META-INF/NOTICE*") }
 }
 
 val generateEjsAssets by tasks.registering {
@@ -86,7 +86,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
-    implementation("org.conscrypt:conscrypt-android:2.9.0")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.87")
+    implementation("org.bouncycastle:bctls-jdk18on:1.87")
     implementation(project(":sabr"))
     implementation("org.jsoup:jsoup:1.18.3")
     

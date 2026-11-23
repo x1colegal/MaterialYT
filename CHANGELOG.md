@@ -2,6 +2,16 @@
 
 All notable changes to MaterialYT are documented in this file.
 
+## [8.5] - 2026-11-23
+
+### Added
+- Switch OkHttp TLS provider to BouncyCastle (`bcprov-jdk18on` + `bctls-jdk18on` `1.87`) with `X25519MLKEM768` prioritized in `jdk.tls.namedGroups` and strict `TLS_AES_256_GCM_SHA384` `ConnectionSpec` first (falling back to `TLS_AES_128_GCM_SHA256` / `TLS_CHACHA20_POLY1305_SHA256`).
+- Log negotiated TLS version and cipher suite via `AppLog.event` for every request.
+
+### Fixed
+- Reset `startupEmptyResponses = 0` when `SabrSession` / `SabrVideoSession` rebuilds a rejected `protection=3` session so the replacement session is not immediately discarded on its first context-only warmup response.
+- Route Coil's `ImageLoader` through `HttpBackend.playbackClient()` and register BouncyCastle providers without overriding position 1 globally so thumbnail/avatar loading uses the Android system `TrustManager`.
+
 ## [8.4] - 2026-11-23
 
 ### Added
